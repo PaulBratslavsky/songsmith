@@ -57,49 +57,6 @@ export function chartSvg(names: string[], title = "Chord chart"): string {
   return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${body}</svg>`;
 }
 
-/** A play-along sheet: title + key/tempo header + a body of lines. A line that
- *  is only a [Section] tag becomes an accent header; everything else (lyrics
- *  with inline [Chord] tags) is rendered as-is. */
-export function sheetSvg(o: { title: string; subtitle: string; body: string }): { svg: string; width: number; height: number } {
-  const W = 760, pad = 28;
-  const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  let y = pad + 8;
-  const rows: string[] = [];
-  rows.push(`<text x="${pad}" y="${y}" fill="${DOT}" font-size="24" font-weight="bold" font-family="monospace">${esc(o.title)}</text>`);
-  y += 22;
-  rows.push(`<text x="${pad}" y="${y}" fill="${LINE}" font-size="12" font-family="monospace">${esc(o.subtitle)}</text>`);
-  y += 18;
-  rows.push(`<line x1="${pad}" y1="${y}" x2="${W - pad}" y2="${y}" stroke="${LINE}"/>`);
-  y += 14;
-  for (const raw of o.body.split("\n")) {
-    const t = raw.trim();
-    if (t === "") { y += 9; continue; }
-    if (/^\[[^\]]+\]$/.test(t)) {
-      y += 8;
-      rows.push(`<text x="${pad}" y="${y}" fill="${DOT}" font-size="14" font-weight="bold" font-family="monospace">${esc(t.replace(/^\[|\]$/g, ""))}</text>`);
-      y += 18;
-    } else {
-      rows.push(`<text x="${pad}" y="${y}" fill="${INK}" font-size="13" font-family="monospace">${esc(raw)}</text>`);
-      y += 17;
-    }
-  }
-  const H = y + pad;
-  const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">` +
-    `<rect width="${W}" height="${H}" fill="#0e0f10"/>${rows.join("")}</svg>`;
-  return { svg, width: W, height: H };
-}
-
-/** Inner SVG for a one-octave piano voicing at (ox,oy). ~74 wide. */
-export function pianoInner(pcs: number[], ox = 0, oy = 0): string {
-  const set = new Set(pcs);
-  const w = 10, whites = [0, 2, 4, 5, 7, 9, 11];
-  const blacks: Record<number, number> = { 1: 0, 3: 1, 6: 3, 8: 4, 10: 5 };
-  let s = "";
-  whites.forEach((pc, i) => { s += `<rect x="${ox + i * w}" y="${oy}" width="${w}" height="44" fill="${set.has(pc) ? DOT : "#16181a"}" stroke="${LINE}"/>`; });
-  Object.keys(blacks).forEach((k) => { const pc = Number(k); s += `<rect x="${ox + (blacks[pc] + 1) * w - 3}" y="${oy}" width="6" height="28" fill="${set.has(pc) ? "#8aa92c" : "#000"}" stroke="${LINE}"/>`; });
-  return s;
-}
-
 const ROOT_COL = "#c8ff3d", SCALE_COL = "#5cff9d";
 function scaleSet(rootPc: number, mode: "major" | "minor"): Set<number> {
   const steps = mode === "major" ? [0, 2, 4, 5, 7, 9, 11] : [0, 2, 3, 5, 7, 8, 10];

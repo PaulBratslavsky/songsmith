@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
+import { FieldChat } from "./FieldChat";
 
 // ChordPro model: a lyric line is a sequence of words, each optionally carrying
 // a chord that lands on its first syllable. Stored back as inline "[C]word" text
@@ -180,6 +181,15 @@ export function LyricsEditor({
   const autoPlace = (si: number) => mutate((s) => { autoPlaceSection(s[si].lines, paletteFor(s[si].label)); return s; });
   const autoPlaceAll = () => mutate((s) => { s.forEach((sec) => autoPlaceSection(sec.lines, paletteFor(sec.label))); return s; });
 
+  // a section's words as plain text (no chord tags) — what the 💬 refine edits
+  const sectionPlain = (sec: Section) => sec.lines.map((line) => line.map((w) => w.text).join(" ").replace(/\s+/g, " ").trim()).join("\n");
+  // apply a refined/edited block of words back to the section, then re-place chords
+  const applyRefine = (si: number, text: string) => mutate((s) => {
+    s[si].lines = text.split("\n").map(parseLine);
+    autoPlaceSection(s[si].lines, paletteFor(s[si].label));
+    return s;
+  });
+
   const save = useMutation({
     mutationFn: () => {
       const data = { sections: sections.map((s) => ({ label: s.label, lines: s.lines.map(lineToChordPro) })) };
@@ -215,7 +225,10 @@ export function LyricsEditor({
               <b>{sec.label}</b>
               {isInstrumental(sec) && <span className="badge" title="no sung words — plays as an instrumental">🎸 instrumental</span>}
             </div>
-            {mode === "place" && !isInstrumental(sec) && <button className="sm ghost" onClick={() => autoPlace(si)} title="spread this section's progression across its lyrics">⚡ auto-place</button>}
+            <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              {mode === "place" && !isInstrumental(sec) && <button className="sm ghost" onClick={() => autoPlace(si)} title="spread this section's progression across its lyrics">⚡ auto-place</button>}
+              <FieldChat stageLabel="Lyrics" fieldLabel={isInstrumental(sec) ? `${sec.label} (write lyrics)` : sec.label} current={sectionPlain(sec)} onResult={(t) => applyRefine(si, t)} />
+            </div>
           </div>
 
           {mode === "place" && isInstrumental(sec) ? (

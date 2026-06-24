@@ -65,10 +65,32 @@ def main():
             # Chords stage = per-section progressions with section add/remove/reorder
             pg.click(".song-nav >> text=Chords"); pg.wait_for_timeout(500)
             pg.screenshot(path=f"{OUT}/chords-sections.png", full_page=True)
+            # select a chord → voicing panel with inversion cycler (‹ ›)
+            cell = pg.locator(".chord-cell")
+            if cell.count() > 0:
+                cell.first.click(); pg.wait_for_timeout(300)
+                pg.screenshot(path=f"{OUT}/chords-voicing.png", full_page=True)
+
+            # dnd-kit pointer reorder — drag section 0's handle down past section 2
+            handles = pg.locator(".drag-handle")
+            if handles.count() >= 3:
+                src, dst = handles.nth(0).bounding_box(), handles.nth(2).bounding_box()
+                pg.mouse.move(src["x"] + 5, src["y"] + 5); pg.mouse.down()
+                pg.mouse.move(src["x"] + 5, src["y"] + 20, steps=5)       # exceed activation distance
+                pg.mouse.move(dst["x"] + 5, dst["y"] + 10, steps=15)
+                pg.wait_for_timeout(200); pg.mouse.up(); pg.wait_for_timeout(400)
+                pg.screenshot(path=f"{OUT}/chords-dnd.png", full_page=True)
 
             # Lyrics stage = ChordPro click-to-place editor (chords pinned over words)
             pg.click(".song-nav >> text=Lyrics"); pg.wait_for_timeout(500)
             pg.screenshot(path=f"{OUT}/lyrics-chordpro.png", full_page=True)
+
+            # per-section 💬 refine drawer (slides in as the right inspector flyout)
+            refine = pg.locator(".card button:has-text('💬')")
+            if refine.count() > 0:
+                refine.first.click(); pg.wait_for_timeout(400)
+                pg.screenshot(path=f"{OUT}/lyrics-refine.png", full_page=True)
+                pg.click(".inspector-flyout button:has-text('✕')"); pg.wait_for_timeout(200)
             # ⚡ Auto-place spreads each section's progression across its lyrics
             pg.click("button:has-text('Auto-place')"); pg.wait_for_timeout(400)
             pg.screenshot(path=f"{OUT}/lyrics-autoplace.png", full_page=True)

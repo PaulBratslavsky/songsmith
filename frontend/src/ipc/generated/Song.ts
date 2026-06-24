@@ -8,4 +8,8 @@ status: string, current_stage: string, key_root: string,
 /**
  * `major` | `minor`
  */
-key_mode: string, bpm: bigint, created_at: string, updated_at: string, };
+key_mode: string, bpm: bigint, 
+/**
+ * JSON map of chord→voicing/inversion picks for the Sheet, keyed "<instrument>:<chord>"
+ */
+voicings: string, created_at: string, updated_at: string, };

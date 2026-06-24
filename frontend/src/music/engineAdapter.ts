@@ -28,17 +28,6 @@ export function chordPcsIdx(rootIdx: number, quality: ChordQuality): number[] {
   return getChordPitchClasses(PITCH_CLASSES[rootIdx], quality).map(pcIdx);
 }
 
-/** MIDI notes voiced ascending around the base octave — for playback. */
-export function chordMidis(rootIdx: number, quality: ChordQuality, base = 48): number[] {
-  let prev = -1;
-  return chordPcsIdx(rootIdx, quality).map((pc) => {
-    let n = base + pc;
-    while (n <= prev) n += 12;
-    prev = n;
-    return n;
-  });
-}
-
 /** Piano voicing as MIDI, honoring inversion (which chord tone is the bass). */
 export function voicedMidis(rootIdx: number, quality: ChordQuality, inversion: number): number[] {
   return pianoVoicing({ root: PITCH_CLASSES[rootIdx], quality, inversion, voicingIndex: 0 }).map(noteMidi);

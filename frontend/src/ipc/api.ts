@@ -91,6 +91,7 @@ export const api = {
   updateSongStatus: (id: string, status: string) => call<Song>("update_song_status", { id, status }),
   updateSongTitle: (id: string, title: string) => call<Song>("update_song_title", { id, title }),
   updateSongKey: (id: string, root: string, mode: string, bpm: number) => call<Song>("update_song_key", { id, root, mode, bpm }),
+  updateSongVoicings: (id: string, voicings: string) => call<Song>("update_song_voicings", { id, voicings }),
   refineField: (stageLabel: string, fieldLabel: string, current: string, instruction: string) =>
     call<string>("refine_field", { stageLabel, fieldLabel, current, instruction }),
   deleteSong: (id: string) => call<void>("delete_song", { id }),
@@ -141,12 +142,13 @@ export const api = {
     call<string>("chat_send", { message, sessionId: sessionId ?? null, songId: songId ?? null }),
 };
 
-export const STAGE_ORDER = ["concept", "structure", "chords", "lyrics", "prompt"] as const;
+export const STAGE_ORDER = ["concept", "structure", "chords", "lyric_spec", "lyrics", "prompt"] as const;
 
 export const STAGE_LABELS: Record<string, string> = {
   concept: "Concept",
   structure: "Structure",
   chords: "Chords",
+  lyric_spec: "Lyric Spec",
   lyrics: "Lyrics",
   prompt: "Generation Prompt",
 };

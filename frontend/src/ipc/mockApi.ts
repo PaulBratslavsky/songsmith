@@ -40,12 +40,12 @@ function seed(): Any {
   const songId = uid();
   const song = {
     id: songId, style_preset_id: presetId, title: "Cyber Dreams", status: "in_progress",
-    current_stage: "prompt", key_root: "A", key_mode: "minor", bpm: 120, created_at: ts, updated_at: ts,
+    current_stage: "prompt", key_root: "A", key_mode: "minor", bpm: 120, voicings: "{}", created_at: ts, updated_at: ts,
   };
-  const order = ["concept", "structure", "chords", "lyrics", "prompt"];
+  const order = ["concept", "structure", "chords", "lyric_spec", "lyrics", "prompt"];
   const stages = order.map((type, ordinal) => ({
     id: uid(), song_id: songId, type, ordinal,
-    status: ordinal <= 4 ? "done" : "pending", skill_id: null, created_at: ts, updated_at: ts,
+    status: ordinal <= 5 ? "done" : "pending", skill_id: null, created_at: ts, updated_at: ts,
   }));
   const stageOf = (t: string) => stages.find((s) => s.type === t)!;
   const artifact = (stageType: string, kind: string, data: Any) => ({
@@ -102,6 +102,18 @@ function seed(): Any {
     songs: [song], stages,
     artifacts: [
       artifact("chords", "chords", chordsData),
+      artifact("lyric_spec", "lyric_spec", {
+        hook: "Cyber Dreams", premise: "chasing a feeling you can only reach at full speed on an empty highway",
+        pov: "first person, present tense", setting: "a neon highway at 3am, dashboard glowing",
+        arc: "restless and numb → wide awake and free",
+        diction: "balanced", referenceVibe: "late-night, neon-lit, propulsive but lonely",
+        beats: [
+          { section: "Verse 1", beat: "set the scene — the dashboard, the empty road, the restlessness" },
+          { section: "Chorus 1", beat: "the release — dreaming in neon, finally feeling alive" },
+        ],
+        imageBank: ["dashboard glow", "cold glass", "tail lights", "static hum", "white lines"],
+        avoid: ["chasing dreams", "fading light", "lost in time"],
+      }),
       artifact("lyrics", "lyrics", { sections: lyricsSections }),
       artifact("prompt", "generation_prompt", { taggedLyrics }),
     ],
@@ -112,10 +124,14 @@ function seed(): Any {
 
 let db = load();
 const KINDS: Record<string, string> = {
-  concept: "concept", structure: "structure", chords: "chords", lyrics: "lyrics", prompt: "generation_prompt",
+  concept: "concept", structure: "structure", chords: "chords", lyric_spec: "lyric_spec", lyrics: "lyrics", prompt: "generation_prompt",
 };
 function currentArtifact(stageId: string) {
   return db.artifacts.filter((a: Any) => a.stage_id === stageId).sort((a: Any, b: Any) => b.version - a.version)[0] ?? null;
+}
+// mirror the SQL subquery: attach the current artifact's timestamp to each stage
+function withArtifactAt(stage: Any) {
+  return { ...stage, artifact_at: currentArtifact(stage.id)?.created_at ?? null };
 }
 function activeSkill(stageType: string) {
   return db.skills.find((s: Any) => s.stage_type === stageType && s.enabled) ?? null;
@@ -141,7 +157,7 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
     case "create_song": {
       const id = uid();
       const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
-        current_stage: "concept", key_root: "A", key_mode: "minor", bpm: 120, created_at: now(), updated_at: now() };
+        current_stage: "concept", key_root: "A", key_mode: "minor", bpm: 120, voicings: "{}", created_at: now(), updated_at: now() };
       db.songs.unshift(v);
       STAGE_ORDER.forEach((type, ordinal) =>
         db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
@@ -152,12 +168,13 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
       const song = db.songs.find((v: Any) => v.id === a.id);
       if (!song) return r(null);
       const preset = db.presets.find((p: Any) => p.id === song.style_preset_id);
-      const stages = db.stages.filter((s: Any) => s.song_id === a.id).sort((x: Any, y: Any) => x.ordinal - y.ordinal);
+      const stages = db.stages.filter((s: Any) => s.song_id === a.id).sort((x: Any, y: Any) => x.ordinal - y.ordinal).map(withArtifactAt);
       return r({ song, preset, stages });
     }
     case "update_song_status": { const v = db.songs.find((x: Any) => x.id === a.id); v.status = a.status; v.updated_at = now(); return r(v); }
     case "update_song_title": { const v = db.songs.find((x: Any) => x.id === a.id); v.title = a.title; v.updated_at = now(); return r(v); }
     case "update_song_key": { const v = db.songs.find((x: Any) => x.id === a.id); v.key_root = a.root; v.key_mode = a.mode; v.bpm = a.bpm; v.updated_at = now(); return r(v); }
+    case "update_song_voicings": { const v = db.songs.find((x: Any) => x.id === a.id); v.voicings = a.voicings; v.updated_at = now(); return r(v); }
     case "refine_field": return r(`(mock) ${a.fieldLabel}: ${a.instruction}`);
     case "delete_song": {
       db.songs = db.songs.filter((v: Any) => v.id !== a.id);
@@ -169,7 +186,7 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
     case "get_stage": {
       const stage = db.stages.find((s: Any) => s.id === a.id);
       if (!stage) return r(null);
-      return r({ stage, artifact: currentArtifact(a.id), skill: activeSkill(stage.type) });
+      return r({ stage: withArtifactAt(stage), artifact: currentArtifact(a.id), skill: activeSkill(stage.type) });
     }
     case "run_stage": {
       const stage = db.stages.find((s: Any) => s.id === a.stageId);

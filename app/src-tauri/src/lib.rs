@@ -78,6 +78,10 @@ async fn update_song_key(state: State<'_, AppState>, id: String, root: String, m
     db::update_song_key(&state.conn, &id, &root, &mode, bpm).await.map_err(e2s)
 }
 #[tauri::command]
+async fn update_song_voicings(state: State<'_, AppState>, id: String, voicings: String) -> R<Song> {
+    db::update_song_voicings(&state.conn, &id, &voicings).await.map_err(e2s)
+}
+#[tauri::command]
 async fn refine_field(state: State<'_, AppState>, stage_label: String, field_label: String, current: String, instruction: String) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     agent::refine_field(&settings, &stage_label, &field_label, &current, &instruction).await.map_err(|e| e.to_string())
@@ -384,6 +388,8 @@ section, placed at the running bar offset from these counts: {}.",
         use std::io::BufRead;
         let mut child = std::process::Command::new(claude)
             .args(&args)
+            // use the Claude Code subscription login, not an inherited API key
+            .env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -715,6 +721,7 @@ pub fn run() {
             update_song_status,
             update_song_title,
             update_song_key,
+            update_song_voicings,
             refine_field,
             delete_song,
             get_stage,

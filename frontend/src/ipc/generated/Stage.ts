@@ -8,4 +8,9 @@ type: string, ordinal: bigint,
 /**
  * `pending` | `in_progress` | `done`
  */
-status: string, skill_id: string | null, created_at: string, updated_at: string, };
+status: string, skill_id: string | null, created_at: string, updated_at: string, 
+/**
+ * when this stage's current artifact was created (null if never run) —
+ * used to detect when a downstream stage is out of date vs. an edited upstream
+ */
+artifact_at: string | null, };

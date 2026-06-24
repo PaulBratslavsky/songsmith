@@ -18,6 +18,7 @@ pub fn kind_for_stage(stage_type: &str) -> &'static str {
         "concept" => "concept",
         "structure" => "structure",
         "chords" => "chords",
+        "lyric_spec" => "lyric_spec",
         "lyrics" => "lyrics",
         "prompt" => "generation_prompt",
         _ => "artifact",
@@ -114,15 +115,16 @@ async fn gather_prior_context(conn: &Connection, song_id: &str, ordinal: i64) ->
     let stages = db::list_stages(conn, song_id).await?;
     let mut blocks = Vec::new();
     for s in stages.into_iter().filter(|s| s.ordinal < ordinal) {
+        // Use each prior stage's CURRENT artifact (not only approved ones) so edits
+        // cascade: re-running a downstream stage always builds on the latest upstream
+        // content. Saving an edit creates a new (unapproved) revision, and the user
+        // expects that to be what downstream sees.
         if let Some(art) = db::current_artifact(conn, &s.id).await? {
-            if !art.approved {
-                continue;
-            }
             let body = serde_json::from_str::<Value>(&art.content)
                 .ok()
                 .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
                 .unwrap_or(art.content.clone());
-            blocks.push(format!("### Approved {} output\n{}", stage_label(&s.r#type), body));
+            blocks.push(format!("### {} output\n{}", stage_label(&s.r#type), body));
         }
     }
     Ok(blocks.join("\n\n"))
@@ -194,6 +196,11 @@ where
 {
     let bin = if settings.claude_bin.is_empty() { "claude".to_string() } else { settings.claude_bin.clone() };
     let mut cmd = tokio::process::Command::new(&bin);
+    // This app drives Claude via your Claude Code / claude.ai subscription login.
+    // If ANTHROPIC_API_KEY (or the helper var) is inherited from the launching
+    // environment, the CLI silently switches to API billing and disables connectors.
+    // Strip them so it always uses the subscription login.
+    cmd.env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
     cmd.arg("-p").arg(user)
         .arg("--append-system-prompt").arg(system)
         .arg("--output-format").arg("stream-json")

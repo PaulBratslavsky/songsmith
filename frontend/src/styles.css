@@ -132,15 +132,7 @@ button.sm { padding: 3px 7px; font-size: 11px; }
 /* drag-to-reorder sections (Chords builder) */
 .drag-handle { cursor: grab; color: var(--ink-faint); font-size: 16px; padding: 0 4px; user-select: none; }
 .drag-handle:active { cursor: grabbing; }
-.section-card.dragging { opacity: 0.45; outline: 1px dashed var(--accent); }
-/* drop-target cue: a bright insertion bar on the edge the dragged section will land */
-.section-card.drop-above, .section-card.drop-below { position: relative; }
-.section-card.drop-above::before, .section-card.drop-below::before {
-  content: ""; position: absolute; left: 0; right: 0; height: 3px;
-  background: var(--accent); box-shadow: 0 0 8px var(--accent); border-radius: 2px;
-}
-.section-card.drop-above::before { top: -5px; }
-.section-card.drop-below::before { bottom: -5px; }
+.section-card.dragging { outline: 1px dashed var(--accent); }
 
 .cp-instrumental { display: flex; flex-direction: column; gap: 6px; }
 .cp-bars { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: 0.04em; }
@@ -200,6 +192,7 @@ button.sm { padding: 3px 7px; font-size: 11px; }
 .checklist .step.active { background: var(--paper-3); border-color: var(--line); }
 .checklist .step .label { flex: 1; }
 .checklist .step .ord { color: var(--ink-faint); width: 16px; }
+.checklist .step .stale-flag { color: #e0a020; font-size: 12px; }
 
 .artifact-text {
   white-space: pre-wrap; word-break: break-word; background: var(--paper);

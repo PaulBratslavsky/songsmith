@@ -1,13 +1,27 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
+import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, arrayMove, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { api } from "../ipc/api";
 import { diatonicChords, pitchClassOf, NOTE_NAMES } from "../music/theory";
-import { isValidName, chordMidisByName, chordPcsByName } from "../music/engineAdapter";
+import { isValidName, chordMidisByName, voicedMidisByName, voicedNotesByName, chordSizeByName } from "../music/engineAdapter";
+import { pianoVoicedSvg } from "../music/diagrams";
 import { playChord, playSequence } from "../music/synth";
 import { ImportProgression } from "./ImportProgression";
 
+const INV_LABELS = ["root", "1st inv", "2nd inv", "3rd inv", "4th inv"];
+
 type Chord = { id: string; name: string; beats: number };
-type Section = { label: string; chords: Chord[]; feel?: string };
+type Section = { id: string; label: string; chords: Chord[]; feel?: string };
+
+/** A pointer/keyboard-draggable wrapper (dnd-kit) — works in the Tauri WebView,
+ *  unlike HTML5 drag. Hands the drag handle props to its render child. */
+function Sortable({ id, children }: { id: string; children: (handle: Record<string, unknown>, dragging: boolean) => ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, zIndex: isDragging ? 2 : undefined };
+  return <div ref={setNodeRef} style={style}>{children({ ...attributes, ...listeners }, isDragging)}</div>;
+}
 
 const uid = () => Math.random().toString(36).slice(2, 8);
 
@@ -15,6 +29,7 @@ function fromData(data: any): Section[] {
   const secs = data?.sections;
   if (!Array.isArray(secs)) return [];
   return secs.map((s: any) => ({
+    id: uid(),
     label: s.label || s.type || "Section",
     feel: s.feel,
     chords: (Array.isArray(s.chords) ? s.chords : []).map((c: any) => ({
@@ -26,23 +41,6 @@ function fromData(data: any): Section[] {
 }
 function toData(sections: Section[]) {
   return { sections: sections.map((s) => ({ label: s.label, feel: s.feel, chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })) })) };
-}
-
-function PianoVoicing({ pcs }: { pcs: number[] }) {
-  const set = new Set(pcs);
-  const whites = [0, 2, 4, 5, 7, 9, 11];
-  const blacks: Record<number, number> = { 1: 0, 3: 1, 6: 3, 8: 4, 10: 5 };
-  return (
-    <div style={{ position: "relative", display: "flex", height: 64 }}>
-      {whites.map((pc) => (
-        <div key={pc} style={{ width: 24, height: 64, border: "1px solid var(--line)", background: set.has(pc) ? "var(--accent)" : "var(--paper-2)", borderRadius: "0 0 3px 3px" }} title={NOTE_NAMES[pc]} />
-      ))}
-      {Object.keys(blacks).map((k) => {
-        const pc = Number(k);
-        return <div key={pc} style={{ position: "absolute", left: (blacks[pc] + 1) * 24 - 7, top: 0, width: 14, height: 40, background: set.has(pc) ? "var(--accent-dim)" : "#000", border: "1px solid var(--line)", borderRadius: "0 0 2px 2px" }} title={NOTE_NAMES[pc]} />;
-      })}
-    </div>
-  );
 }
 
 export function Composer({
@@ -77,19 +75,33 @@ export function Composer({
   const importToSection = (si: number, names: string[]) => mutate((s) => { s[si].chords = names.map((n) => ({ id: uid(), name: n, beats: 4 })); return s; });
   const removeChord = (si: number, ci: number) => mutate((s) => { s[si].chords.splice(ci, 1); return s; });
   const setLabel = (si: number, label: string) => mutate((s) => { s[si].label = label; return s; });
-  const addSection = (label = "Section") => mutate((s) => { s.push({ label, chords: [] }); return s; });
+  const addSection = (label = "Section") => mutate((s) => { s.push({ id: uid(), label, chords: [] }); return s; });
   const removeSection = (si: number) => mutate((s) => { s.splice(si, 1); return s; });
   const moveSection = (si: number, dir: -1 | 1) => mutate((s) => {
     const j = si + dir; if (j < 0 || j >= s.length) return s;
     [s[si], s[j]] = [s[j], s[si]]; return s;
   });
-  // drag-and-drop reorder: pull section `from` out and drop it on `to`
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [overIdx, setOverIdx] = useState<number | null>(null); // section currently hovered as drop target
-  const dropOn = (to: number) => { setOverIdx(null); setDragIdx((from) => { if (from != null && from !== to) mutate((s) => { const [m] = s.splice(from, 1); s.splice(to, 0, m); return s; }); return null; }); };
+  // pointer/keyboard drag-and-drop reorder via dnd-kit (HTML5 drag is unreliable
+  // in the Tauri WebView — its native handler intercepts it). A small activation
+  // distance lets the handle still receive plain clicks.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    mutate((s) => {
+      const from = s.findIndex((x) => x.id === active.id);
+      const to = s.findIndex((x) => x.id === over.id);
+      return from < 0 || to < 0 ? s : arrayMove(s, from, to);
+    });
+  };
 
   const selChord = selected ? sections[selected.s]?.chords[selected.c] : null;
-  const selPcs = selChord ? chordPcsByName(selChord.name) : null;
+  // inversion preview for the selected chord (cycle the bass note up the chord tones)
+  const [inv, setInv] = useState(0);
+  useEffect(() => { setInv(0); }, [selected?.s, selected?.c, selChord?.name]);
   const playOne = (name: string) => { const m = chordMidisByName(name); if (m.length) playChord(m); };
   const playSection = (si: number) => {
     const steps = sections[si].chords.map((c) => ({ notes: chordMidisByName(c.name), beats: c.beats })).filter((s) => s.notes.length);
@@ -149,59 +161,77 @@ export function Composer({
         </div>
       </div>
 
-      {sections.map((sec, si) => (
-        <div key={si} className={"card section-card" + (dragIdx === si ? " dragging" : "") + (overIdx === si && dragIdx != null && dragIdx !== si ? (dragIdx < si ? " drop-below" : " drop-above") : "")} style={{ marginBottom: 8 }}
-          onDragOver={(e) => { if (dragIdx != null) { e.preventDefault(); if (overIdx !== si) setOverIdx(si); } }} onDrop={() => dropOn(si)}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <div className="row" style={{ gap: 6, alignItems: "center" }}>
-              <span className="drag-handle" draggable title="drag to reorder" onDragStart={() => setDragIdx(si)} onDragEnd={() => { setDragIdx(null); setOverIdx(null); }}>⠿</span>
-              <input value={sec.label} onChange={(e) => setLabel(si, e.target.value)} title="section name (Intro, Solo, Drop…)" style={{ width: 180, fontWeight: 600 }} />
-            </div>
-            <div className="row" style={{ gap: 6 }}>
-              <button className="sm ghost" title="move up" disabled={si === 0} onClick={() => moveSection(si, -1)}>↑</button>
-              <button className="sm ghost" title="move down" disabled={si === sections.length - 1} onClick={() => moveSection(si, 1)}>↓</button>
-              <button className="sm" onClick={() => playSection(si)}>▶ play</button>
-              <button className="sm" onClick={() => { addChord(si); setSelected({ s: si, c: sections[si].chords.length }); }}>+ chord</button>
-              <button className="sm ghost danger" title="remove section" onClick={() => removeSection(si)}>remove</button>
-            </div>
-          </div>
-          {sec.feel && <div className="faint" style={{ marginBottom: 6 }}>{sec.feel}</div>}
-          <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 4 }}>
-            {sec.chords.map((c, ci) => {
-              const active = selected?.s === si && selected?.c === ci;
-              const playing = playingIdx?.s === si && playingIdx?.c === ci;
-              const ok = isValidName(c.name);
-              return (
-                <div key={c.id} className="chord-cell" style={{ borderColor: playing ? "var(--accent)" : active ? "var(--accent-dim)" : ok ? "var(--line)" : "var(--danger)" }} onClick={() => setSelected({ s: si, c: ci })}>
-                  <input value={c.name} onChange={(e) => setChordName(si, ci, e.target.value)} placeholder="Am" style={{ width: 56, padding: "2px 4px", textAlign: "center", border: "none", background: "transparent" }} />
-                  <div className="row" style={{ gap: 4, justifyContent: "center" }}>
-                    <button className="sm ghost" title="play" onClick={(e) => { e.stopPropagation(); playOne(c.name); }}>♪</button>
-                    <input type="number" min={1} value={c.beats} onChange={(e) => setChordBeats(si, ci, Number(e.target.value))} title="beats" style={{ width: 34, padding: "1px 3px" }} />
-                    <button className="sm ghost danger" title="remove" onClick={(e) => { e.stopPropagation(); removeChord(si, ci); }}>×</button>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext items={sections.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+          {sections.map((sec, si) => (
+            <Sortable key={sec.id} id={sec.id}>
+              {(handle, dragging) => (
+                <div className={"card section-card" + (dragging ? " dragging" : "")} style={{ marginBottom: 8 }}>
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                      <span className="drag-handle" title="drag to reorder" {...handle}>⠿</span>
+                      <input value={sec.label} onChange={(e) => setLabel(si, e.target.value)} title="section name (Intro, Solo, Drop…)" style={{ width: 180, fontWeight: 600 }} />
+                    </div>
+                    <div className="row" style={{ gap: 6 }}>
+                      <button className="sm ghost" title="move up" disabled={si === 0} onClick={() => moveSection(si, -1)}>↑</button>
+                      <button className="sm ghost" title="move down" disabled={si === sections.length - 1} onClick={() => moveSection(si, 1)}>↓</button>
+                      <button className="sm" onClick={() => playSection(si)}>▶ play</button>
+                      <button className="sm" onClick={() => { addChord(si); setSelected({ s: si, c: sections[si].chords.length }); }}>+ chord</button>
+                      <button className="sm ghost danger" title="remove section" onClick={() => removeSection(si)}>remove</button>
+                    </div>
+                  </div>
+                  {sec.feel && <div className="faint" style={{ marginBottom: 6 }}>{sec.feel}</div>}
+                  <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                    {sec.chords.map((c, ci) => {
+                      const active = selected?.s === si && selected?.c === ci;
+                      const playing = playingIdx?.s === si && playingIdx?.c === ci;
+                      const ok = isValidName(c.name);
+                      return (
+                        <div key={c.id} className="chord-cell" style={{ borderColor: playing ? "var(--accent)" : active ? "var(--accent-dim)" : ok ? "var(--line)" : "var(--danger)" }} onClick={() => setSelected({ s: si, c: ci })}>
+                          <input value={c.name} onChange={(e) => setChordName(si, ci, e.target.value)} placeholder="Am" style={{ width: 56, padding: "2px 4px", textAlign: "center", border: "none", background: "transparent" }} />
+                          <div className="row" style={{ gap: 4, justifyContent: "center" }}>
+                            <button className="sm ghost" title="play" onClick={(e) => { e.stopPropagation(); playOne(c.name); }}>♪</button>
+                            <input type="number" min={1} value={c.beats} onChange={(e) => setChordBeats(si, ci, Number(e.target.value))} title="beats" style={{ width: 34, padding: "1px 3px" }} />
+                            <button className="sm ghost danger" title="remove" onClick={(e) => { e.stopPropagation(); removeChord(si, ci); }}>×</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {sec.chords.length === 0 && <span className="faint">no chords — use the palette or “+ chord”. A section with chords but no lyrics plays as an instrumental.</span>}
                   </div>
                 </div>
-              );
-            })}
-            {sec.chords.length === 0 && <span className="faint">no chords — use the palette or “+ chord”. A section with chords but no lyrics plays as an instrumental.</span>}
-          </div>
-        </div>
-      ))}
+              )}
+            </Sortable>
+          ))}
+        </SortableContext>
+      </DndContext>
 
       <div className="row" style={{ gap: 6, marginBottom: 10 }}>
         <button className="sm" onClick={() => addSection()}>+ section</button>
         <button className="sm" onClick={() => addSection("Instrumental")} title="add a wordless section (Intro / Solo / Break / Drop)">+ instrumental</button>
       </div>
 
-      {selChord && selPcs && selPcs.length > 0 && (
-        <div className="card">
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h3>Voicing — {selChord.name}</h3>
-            <button className="sm" onClick={() => playChord(chordMidisByName(selChord.name))}>♪ play</button>
+      {selChord && (() => {
+        const count = Math.max(1, chordSizeByName(selChord.name));
+        const i = Math.min(inv, count - 1);
+        const midis = voicedMidisByName(selChord.name, i);
+        if (!midis.length) return null;
+        return (
+          <div className="card">
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <h3 style={{ margin: 0 }}>Voicing — {selChord.name}</h3>
+              <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                <button className="sm ghost" title="previous inversion" disabled={count < 2} onClick={() => setInv((v) => ((v - 1) % count + count) % count)}>‹</button>
+                <span className="faint" style={{ fontSize: 11, minWidth: 78, textAlign: "center" }}>{INV_LABELS[i] ?? `inv ${i}`} ({i + 1}/{count})</span>
+                <button className="sm ghost" title="next inversion" disabled={count < 2} onClick={() => setInv((v) => (v + 1) % count)}>›</button>
+                <button className="sm" onClick={() => playChord(midis)}>♪ play</button>
+              </div>
+            </div>
+            <div className="fit-svg" dangerouslySetInnerHTML={{ __html: pianoVoicedSvg(midis, selChord.name) }} />
+            <div className="faint" style={{ marginTop: 6 }}>notes (low→high): {voicedNotesByName(selChord.name, i).join(" · ")}</div>
           </div>
-          <PianoVoicing pcs={selPcs} />
-          <div className="faint" style={{ marginTop: 6 }}>notes: {selPcs.map((pc) => NOTE_NAMES[pc]).join(" · ")}</div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

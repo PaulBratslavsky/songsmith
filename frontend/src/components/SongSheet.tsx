@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, inTauri, savePng, revealFile } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
 import { pitchClassOf } from "../music/theory";
@@ -14,18 +14,20 @@ function dataOf(content: string | undefined): any {
   try { return JSON.parse(content)?.data ?? null; } catch { return null; }
 }
 
-const vkey = (songId: string) => `ss-voicings-${songId}`;
-function loadVoicings(songId: string): Record<string, number> {
-  try { return JSON.parse(localStorage.getItem(vkey(songId)) || "{}"); } catch { return {}; }
+function parseVoicings(json: string): Record<string, number> {
+  try { return JSON.parse(json || "{}"); } catch { return {}; }
 }
 
 export function SongSheet({
-  songId, title, subtitle, keyRoot, keyMode, stages,
+  songId, title, subtitle, keyRoot, keyMode, stages, voicings: voicingsJson,
 }: {
   songId: string; title: string; subtitle: string; keyRoot: string; keyMode: string; stages: Stage[];
+  /** the song's saved voicing/inversion picks (JSON), persisted in the DB */
+  voicings: string;
 }) {
+  const qc = useQueryClient();
   const [instrument, setInstrument] = useState<"guitar" | "piano">("guitar");
-  const [voicings, setVoicings] = useState<Record<string, number>>(() => loadVoicings(songId));
+  const [voicings, setVoicings] = useState<Record<string, number>>(() => parseVoicings(voicingsJson));
   const chordsStage = stages.find((s) => s.type === "chords");
   const lyricsStage = stages.find((s) => s.type === "lyrics");
   const chords = useQuery({ queryKey: ["stage", chordsStage?.id], queryFn: () => api.getStage(chordsStage!.id), enabled: !!chordsStage });
@@ -69,7 +71,10 @@ export function SongSheet({
     const n = countOf(name);
     const next = (((v[k] ?? 0) + dir) % n + n) % n;
     const nv = { ...v, [k]: next };
-    try { localStorage.setItem(vkey(songId), JSON.stringify(nv)); } catch { /* ignore */ }
+    const json = JSON.stringify(nv);
+    // persist to the song record, and keep the cached song in sync (no refetch)
+    api.updateSongVoicings(songId, json).catch(() => { /* ignore */ });
+    qc.setQueryData(["song", songId], (old: any) => (old ? { ...old, song: { ...old.song, voicings: json } } : old));
     return nv;
   });
 

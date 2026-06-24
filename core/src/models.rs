@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The five stages of a song spec, in order.
-pub const STAGE_ORDER: [&str; 5] = ["concept", "structure", "chords", "lyrics", "prompt"];
+/// The stages of a song spec, in order.
+pub const STAGE_ORDER: [&str; 6] = ["concept", "structure", "chords", "lyric_spec", "lyrics", "prompt"];
 
 /// Human-readable label for a stage type.
 pub fn stage_label(stage_type: &str) -> &'static str {
@@ -15,6 +15,7 @@ pub fn stage_label(stage_type: &str) -> &'static str {
         "concept" => "Concept",
         "structure" => "Structure",
         "chords" => "Chords",
+        "lyric_spec" => "Lyric Spec",
         "lyrics" => "Lyrics",
         "prompt" => "Generation Prompt",
         _ => "Stage",
@@ -49,6 +50,8 @@ pub struct Song {
     /// `major` | `minor`
     pub key_mode: String,
     pub bpm: i64,
+    /// JSON map of chord→voicing/inversion picks for the Sheet, keyed "<instrument>:<chord>"
+    pub voicings: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -66,6 +69,9 @@ pub struct Stage {
     pub skill_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// when this stage's current artifact was created (null if never run) —
+    /// used to detect when a downstream stage is out of date vs. an edited upstream
+    pub artifact_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

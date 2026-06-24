@@ -68,6 +68,18 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
         "#,
     )
     .await?;
+    // columns added after v0.1 — idempotent (errors if already present, ignored)
+    let _ = conn.execute("ALTER TABLE song ADD COLUMN voicings TEXT NOT NULL DEFAULT '{}'", ()).await;
+    // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
+    // songs that predate it — make room by shifting Lyrics/Prompt, then insert. Idempotent.
+    let _ = conn.execute(
+        "UPDATE stage SET ordinal = ordinal + 1 WHERE type IN ('lyrics','prompt') \
+         AND song_id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await;
+    let _ = conn.execute(
+        "INSERT INTO stage (id, song_id, type, ordinal, status, created_at, updated_at) \
+         SELECT lower(hex(randomblob(16))), s.id, 'lyric_spec', 3, 'pending', \
+                strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+         FROM song s WHERE s.id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await;
     Ok(())
 }
 
@@ -75,6 +87,7 @@ const SEED_SKILLS: &[(&str, &str, &str, &str)] = &[
     ("songsmith-concept", "Song Concept", "concept", include_str!("skills/concept.md")),
     ("songsmith-structure", "Song Structure", "structure", include_str!("skills/structure.md")),
     ("songsmith-chords", "Chord Progressions", "chords", include_str!("skills/chords.md")),
+    ("songsmith-lyric-spec", "Lyric Spec", "lyric_spec", include_str!("skills/lyric-spec.md")),
     ("songsmith-lyrics", "Lyricist", "lyrics", include_str!("skills/lyrics.md")),
     ("songsmith-prompt", "Generation Prompt", "prompt", include_str!("skills/prompt.md")),
     ("songsmith-style", "Style Builder", "style", include_str!("skills/style.md")),
@@ -166,18 +179,21 @@ pub async fn update_preset(conn: &Connection, id: &str, p: StyleInput) -> Result
 // ---- Songs & stages --------------------------------------------------------
 
 const SONG_COLS: &str =
-    "id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at";
+    "id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at, voicings";
 fn map_song(r: &libsql::Row) -> Song {
+    let voicings = so(r, 10).filter(|v| !v.is_empty()).unwrap_or_else(|| "{}".into());
     Song {
         id: s(r, 0), style_preset_id: s(r, 1), title: s(r, 2), status: s(r, 3), current_stage: s(r, 4),
-        key_root: s(r, 5), key_mode: s(r, 6), bpm: i(r, 7), created_at: s(r, 8), updated_at: s(r, 9),
+        key_root: s(r, 5), key_mode: s(r, 6), bpm: i(r, 7), created_at: s(r, 8), updated_at: s(r, 9), voicings,
     }
 }
-const STAGE_COLS: &str = "id, song_id, type, ordinal, status, skill_id, created_at, updated_at";
+// includes the current artifact's timestamp (max-version) as a correlated subquery
+const STAGE_SELECT: &str = "SELECT id, song_id, type, ordinal, status, skill_id, created_at, updated_at, \
+    (SELECT created_at FROM artifact WHERE stage_id = stage.id ORDER BY version DESC LIMIT 1) AS artifact_at FROM stage";
 fn map_stage(r: &libsql::Row) -> Stage {
     Stage {
         id: s(r, 0), song_id: s(r, 1), r#type: s(r, 2), ordinal: i(r, 3), status: s(r, 4),
-        skill_id: so(r, 5), created_at: s(r, 6), updated_at: s(r, 7),
+        skill_id: so(r, 5), created_at: s(r, 6), updated_at: s(r, 7), artifact_at: so(r, 8),
     }
 }
 
@@ -221,6 +237,10 @@ pub async fn update_song_status(conn: &Connection, id: &str, status: &str) -> Re
 }
 pub async fn update_song_title(conn: &Connection, id: &str, title: &str) -> Result<Song> {
     conn.execute("UPDATE song SET title=?2, updated_at=?3 WHERE id=?1", params![id, title, now()]).await?;
+    Ok(get_song(conn, id).await?.unwrap())
+}
+pub async fn update_song_voicings(conn: &Connection, id: &str, voicings: &str) -> Result<Song> {
+    conn.execute("UPDATE song SET voicings=?2, updated_at=?3 WHERE id=?1", params![id, voicings, now()]).await?;
     Ok(get_song(conn, id).await?.unwrap())
 }
 pub async fn update_song_key(conn: &Connection, id: &str, root: &str, mode: &str, bpm: i64) -> Result<Song> {
@@ -280,13 +300,13 @@ pub async fn delete_render(conn: &Connection, id: &str) -> Result<()> {
 }
 
 pub async fn list_stages(conn: &Connection, song_id: &str) -> Result<Vec<Stage>> {
-    let mut rows = conn.query(&format!("SELECT {STAGE_COLS} FROM stage WHERE song_id = ?1 ORDER BY ordinal"), params![song_id]).await?;
+    let mut rows = conn.query(&format!("{STAGE_SELECT} WHERE song_id = ?1 ORDER BY ordinal"), params![song_id]).await?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await? { out.push(map_stage(&r)); }
     Ok(out)
 }
 pub async fn get_stage(conn: &Connection, id: &str) -> Result<Option<Stage>> {
-    let mut rows = conn.query(&format!("SELECT {STAGE_COLS} FROM stage WHERE id = ?1"), params![id]).await?;
+    let mut rows = conn.query(&format!("{STAGE_SELECT} WHERE id = ?1"), params![id]).await?;
     Ok(rows.next().await?.as_ref().map(map_stage))
 }
 pub async fn set_stage_status(conn: &Connection, id: &str, status: &str) -> Result<()> {

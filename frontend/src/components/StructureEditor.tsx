@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { NOTE_NAMES, pitchClassOf } from "../music/theory";
+import { FieldChat } from "./FieldChat";
 
 export type Section = { type?: string; label: string; bars: number; role: string };
 export type StructureData = { root: string; mode: string; bpm: number; keyNote: string; tempoNote: string; sections: Section[] };
@@ -81,6 +82,7 @@ export function StructureEditor({
                 <input type="number" value={s.bars} onChange={(e) => setSec(i, { bars: Number(e.target.value) })} title="bars" style={{ width: 60 }} />
                 <button className="sm ghost" title="up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
                 <button className="sm ghost" title="down" disabled={i === d.sections.length - 1} onClick={() => move(i, 1)}>↓</button>
+                <FieldChat stageLabel="Structure" fieldLabel={`${s.label || "section"} — role`} current={s.role} onResult={(v) => setSec(i, { role: v })} />
                 <button className="sm ghost" title="remove" onClick={() => rmSec(i)}>×</button>
               </div>
               <textarea value={s.role} onChange={(e) => setSec(i, { role: e.target.value })} placeholder="energy / role of this section…" style={{ width: "100%", minHeight: 40, marginTop: 6 }} />

@@ -24,14 +24,22 @@ export function promptToMarkdown(d: PromptData): string {
   ].join("\n");
 }
 
+const norm = (s: string) => s.replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").trim();
+
 export function PromptEditor({
-  songId, stageId, kind, content, onChanged,
+  songId, stageId, kind, content, onChanged, lyricsTagged,
 }: {
   songId: string; stageId: string; kind: string; content: string; onChanged: () => void;
+  /** the Lyrics stage's tagged text — the source of truth for the tagged lyrics field */
+  lyricsTagged?: string;
 }) {
   const [d, setD] = useState<PromptData>(() => parsePrompt(content));
   const [saved, setSaved] = useState("");
   const set = (patch: Partial<PromptData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
+  // the tagged lyrics should mirror the Lyrics stage verbatim; flag drift + offer a one-click pull
+  const lyr = (lyricsTagged ?? "").trim();
+  const lyricsDiffer = !!lyr && norm(d.taggedLyrics) !== norm(lyr);
+  const pullFromLyrics = () => set({ taggedLyrics: lyr });
   const save = useMutation({
     mutationFn: () => api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: promptToMarkdown(d), data: d })),
     onSuccess: () => { setSaved("Saved."); onChanged(); },
@@ -47,9 +55,17 @@ export function PromptEditor({
       </div>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-          <label style={{ margin: 0 }}>Tagged lyrics <span className="faint">([Section] headers + inline [Chord] tags)</span></label>
-          <FieldChat stageLabel="Generation Prompt" fieldLabel="tagged lyrics" current={d.taggedLyrics} onResult={(v) => set({ taggedLyrics: v })} />
+          <label style={{ margin: 0 }}>Tagged lyrics <span className="faint">(pulled from the Lyrics stage — [Section] + inline [Chord] tags)</span></label>
+          <div className="row" style={{ gap: 6, alignItems: "center" }}>
+            {lyr && <button className={"sm" + (lyricsDiffer ? " primary" : " ghost")} title="replace with the exact lyrics from the Lyrics stage" onClick={pullFromLyrics}>↺ Pull from Lyrics</button>}
+            <FieldChat stageLabel="Generation Prompt" fieldLabel="tagged lyrics" current={d.taggedLyrics} onResult={(v) => set({ taggedLyrics: v })} />
+          </div>
         </div>
+        {lyricsDiffer && (
+          <div className="banner warn" style={{ marginBottom: 6 }}>
+            ⚠ These don't match your <b>Lyrics</b> stage. The generator should sing your actual lyrics — click <b>↺ Pull from Lyrics</b> to sync, then Save.
+          </div>
+        )}
         <textarea value={d.taggedLyrics} onChange={(e) => set({ taggedLyrics: e.target.value })} spellCheck={false} style={{ width: "100%", minHeight: 220, fontFamily: "var(--mono)", fontSize: 12 }} />
       </div>
       <div>

@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
-import { StageChecklist } from "../components/StageChecklist";
+import { StageChecklist, staleStageIds } from "../components/StageChecklist";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { AIRunPanel } from "../components/AIRunPanel";
 import { Composer } from "../components/Composer";
@@ -12,6 +12,7 @@ import { LyricsEditor } from "../components/LyricsEditor";
 import { ConceptEditor } from "../components/ConceptEditor";
 import { StructureEditor } from "../components/StructureEditor";
 import { PromptEditor } from "../components/PromptEditor";
+import { LyricSpecEditor } from "../components/LyricSpecEditor";
 import { FieldDrawer, useFieldDrawer } from "../components/FieldDrawer";
 import { FinalRenders } from "../components/FinalRenders";
 import { SongSheet } from "../components/SongSheet";
@@ -67,6 +68,19 @@ export function SongWorkspace() {
   const chordsStage = useQuery({ queryKey: ["stage", chordsStageId], queryFn: () => api.getStage(chordsStageId!), enabled: !!chordsStageId });
   const chordsData = artifactData(chordsStage.data?.artifact?.content);
 
+  // lyrics-stage tagged text feeds the Generation Prompt's tagged-lyrics field (verbatim).
+  // build it from the lyrics data sections (robust) so it reflects the current words+chords.
+  const lyricsStageId = song.data?.stages.find((s) => s.type === "lyrics")?.id;
+  const lyricsStageQ = useQuery({ queryKey: ["stage", lyricsStageId], queryFn: () => api.getStage(lyricsStageId!), enabled: !!lyricsStageId });
+  const lyricsTagged = (() => {
+    const ld = artifactData(lyricsStageQ.data?.artifact?.content);
+    const secs = ld?.sections;
+    if (Array.isArray(secs) && secs.length) {
+      return secs.map((s: any) => `[${s.label || s.type || "Section"}]\n${(Array.isArray(s.lines) ? s.lines : []).join("\n")}`).join("\n\n").trim();
+    }
+    try { return (JSON.parse(lyricsStageQ.data?.artifact?.content ?? "")?.text ?? "").trim(); } catch { return ""; }
+  })();
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["song", id] });
     qc.invalidateQueries({ queryKey: ["stage", activeStageId] });
@@ -86,6 +100,7 @@ export function SongWorkspace() {
   const preset = song.data.preset;
   const sd = stage.data;
   const structureDone = song.data.stages.find((s) => s.type === "structure")?.status === "done";
+  const isStale = !!sd?.stage && staleStageIds(song.data.stages).has(sd.stage.id);
 
   return (
     <div>
@@ -159,6 +174,11 @@ export function SongWorkspace() {
             <h2>{sd ? STAGE_LABELS[sd.stage.type] : "Stage"}</h2>
             {sd?.skill && <span className="faint">skill: {sd.skill.name}</span>}
           </div>
+          {isStale && (
+            <div className="banner warn" style={{ marginBottom: 8 }}>
+              ⚠ <b>Out of date.</b> An earlier stage changed after this was generated. Re-run this stage to rebuild it from the current upstream content.
+            </div>
+          )}
           {stage.isLoading && <div className="empty">Loading stage…</div>}
           {sd && !sd.artifact && (
             <div className="banner">
@@ -194,6 +214,15 @@ export function SongWorkspace() {
               initialData={artifactData(sd.artifact.content)}
               onChanged={invalidate}
             />
+          ) : sd?.artifact && sd.stage.type === "lyric_spec" ? (
+            <LyricSpecEditor
+              key={sd.artifact.id}
+              songId={id}
+              stageId={sd.stage.id}
+              kind={sd.artifact.kind}
+              content={sd.artifact.content}
+              onChanged={invalidate}
+            />
           ) : sd?.artifact && sd.stage.type === "lyrics" ? (
             <LyricsEditor
               songId={id}
@@ -212,6 +241,7 @@ export function SongWorkspace() {
               kind={sd.artifact.kind}
               content={sd.artifact.content}
               onChanged={invalidate}
+              lyricsTagged={lyricsTagged}
             />
           ) : (
             sd?.artifact && <ArtifactPanel artifact={sd.artifact} songId={id} stageId={sd.stage.id} onChanged={invalidate} />
@@ -267,6 +297,7 @@ export function SongWorkspace() {
           keyRoot={v.key_root}
           keyMode={v.key_mode}
           stages={song.data.stages}
+          voicings={v.voicings}
         />
       )}
       {tab === "renders" && <FinalRenders songId={id} />}
