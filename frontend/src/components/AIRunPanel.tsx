@@ -68,7 +68,12 @@ export function AIRunPanel({
     setStream("");
     streamRef.current = "";
     try {
-      await api.runStage(stageId, seed || undefined);
+      // force the picked key to win over a stale key in an earlier stage's context
+      const keyDirective = stageType === "chords" && keyRoot
+        ? `Write the progression strictly in ${keyRoot} ${keyMode ?? "minor"}: treat ${keyRoot} as the TONIC / home chord and resolve to it, using that scale's diatonic chords (plus tasteful borrowed ones). If any earlier stage names a different key, it is STALE — this key wins.\n\n`
+        : "";
+      const userInput = (keyDirective + (seed || "")).trim();
+      await api.runStage(stageId, userInput || undefined);
       setRunning(false);
       onChanged();
     } catch (e: any) {

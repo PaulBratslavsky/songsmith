@@ -5,12 +5,29 @@ import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrate
 import { CSS } from "@dnd-kit/utilities";
 import { api } from "../ipc/api";
 import { diatonicChords, pitchClassOf, NOTE_NAMES } from "../music/theory";
-import { isValidName, chordMidisByName, voicedMidisByName, voicedNotesByName, chordSizeByName } from "../music/engineAdapter";
+import { isValidName, chordMidisByName, chordPcsByName, voicedMidisByName, voicedNotesByName, chordSizeByName } from "../music/engineAdapter";
 import { pianoVoicedSvg } from "../music/diagrams";
 import { playChord, playSequence } from "../music/synth";
 import { ImportProgression } from "./ImportProgression";
 
 const INV_LABELS = ["root", "1st inv", "2nd inv", "3rd inv", "4th inv"];
+
+const SCALE_PCS: Record<string, number[]> = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10] };
+/** Check the progression against the song key: which chords sit outside the scale,
+ *  and whether the key's tonic chord ever appears (a tonal-center sanity check). */
+function keyCheck(names: string[], root: string, mode: string): { out: string[]; hasTonic: boolean; tonic: string } {
+  const rpc = pitchClassOf(root) ?? 0;
+  const allowed = new Set(SCALE_PCS[mode === "major" ? "major" : "minor"].map((i) => (i + rpc) % 12));
+  if (mode !== "major") allowed.add((rpc + 11) % 12); // raised 7th → V / vii° read as in-key
+  const out: string[] = [];
+  for (const n of names) {
+    const pcs = chordPcsByName(n);
+    if (pcs.length && !pcs.every((p) => allowed.has(p)) && !out.includes(n)) out.push(n);
+  }
+  const tonic = root + (mode === "major" ? "" : "m");
+  const hasTonic = names.some((n) => n === tonic || n.startsWith(tonic + "/") || (n.startsWith(tonic) && !/^[A-G]/.test(n.slice(tonic.length))));
+  return { out, hasTonic, tonic };
+}
 
 type Chord = { id: string; name: string; beats: number };
 type Section = { id: string; label: string; chords: Chord[]; feel?: string };
@@ -128,11 +145,18 @@ export function Composer({
     );
   }
 
+  const check = useMemo(() => keyCheck(sections.flatMap((s) => s.chords.map((c) => c.name)), keyRoot, keyMode), [sections, keyRoot, keyMode]);
+  const inKey = check.out.length === 0 && check.hasTonic;
   return (
     <div>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
         <span className="faint">{keyRoot} {keyMode} · click a chord to voice it · 7ths/sus/borrowed all OK</span>
-        <button className="sm primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "saving…" : dirty ? "save revision" : "saved"}</button>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <span className={"badge " + (inKey ? "done" : "pending")} title={inKey ? `every chord fits ${keyRoot} ${keyMode}` : [check.out.length ? `outside ${keyRoot} ${keyMode}: ${check.out.join(", ")}` : "", !check.hasTonic ? `tonic ${check.tonic} never appears — the progression may be centered on another key` : ""].filter(Boolean).join(" · ")}>
+            {inKey ? `✓ in ${keyRoot} ${keyMode}` : `⚠ key check: ${check.out.length ? `${check.out.length} outside scale` : `no ${check.tonic} tonic`}`}
+          </span>
+          <button className="sm primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "saving…" : dirty ? "save revision" : "saved"}</button>
+        </div>
       </div>
 
       <ImportProgression sectionLabels={sections.map((s) => s.label)} onImport={importToSection} />
