@@ -247,7 +247,7 @@ export function SongWorkspace() {
             sd?.artifact && <ArtifactPanel artifact={sd.artifact} songId={id} stageId={sd.stage.id} onChanged={invalidate} />
           )}
           {sd && (
-            <AIRunPanel stageId={sd.stage.id} stageType={sd.stage.type} hasArtifact={!!sd.artifact} approved={!!sd.artifact?.approved} onChanged={invalidate} />
+            <AIRunPanel stageId={sd.stage.id} stageType={sd.stage.type} hasArtifact={!!sd.artifact} approved={!!sd.artifact?.approved} onChanged={invalidate} songId={id} keyRoot={v.key_root} keyMode={v.key_mode} bpm={Number(v.bpm)} />
           )}
         </div>
 

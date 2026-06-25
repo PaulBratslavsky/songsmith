@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, listen, STAGE_LABELS } from "../ipc/api";
+import { NOTE_NAMES } from "../music/theory";
 
 const SEED_HINT: Record<string, string> = {
   concept: "Optional: a title, a line, or a feeling to build the concept around.",
@@ -15,12 +16,20 @@ export function AIRunPanel({
   hasArtifact,
   approved,
   onChanged,
+  songId,
+  keyRoot,
+  keyMode,
+  bpm,
 }: {
   stageId: string;
   stageType: string;
   hasArtifact: boolean;
   approved: boolean;
   onChanged: () => void;
+  songId?: string;
+  keyRoot?: string;
+  keyMode?: string;
+  bpm?: number;
 }) {
   const [seed, setSeed] = useState("");
   const [stream, setStream] = useState("");
@@ -68,10 +77,20 @@ export function AIRunPanel({
     }
   };
   const approve = async () => { await api.approveStage(stageId); onChanged(); };
+  // key/scale override for the Chords stage — updates the song key (one source of
+  // truth) so the chord generation is grounded in it.
+  const setKey = async (root: string, mode: string) => { if (songId) { await api.updateSongKey(songId, root, mode, bpm ?? 120); onChanged(); } };
 
   return (
     <div className="card" style={{ marginTop: 12 }}>
       <h3>Co-write with Claude</h3>
+      {stageType === "chords" && songId && keyRoot && (
+        <div className="row" style={{ gap: 10, alignItems: "flex-end", marginBottom: 8 }}>
+          <div><label>Key</label><select value={keyRoot} onChange={(e) => setKey(e.target.value, keyMode ?? "minor")} disabled={running}>{NOTE_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
+          <div><label>Scale</label><select value={keyMode ?? "minor"} onChange={(e) => setKey(keyRoot, e.target.value)} disabled={running}><option value="minor">minor</option><option value="major">major</option></select></div>
+          <span className="faint" style={{ fontSize: 11 }}>steers the chords · updates the song key</span>
+        </div>
+      )}
       <label>Your seed ({STAGE_LABELS[stageType]})</label>
       <textarea value={seed} onChange={(e) => setSeed(e.target.value)} placeholder={SEED_HINT[stageType]} />
 
