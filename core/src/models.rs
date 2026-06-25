@@ -119,11 +119,15 @@ pub struct Settings {
     /// Base folder where all song renders live. "+ Add version" opens this folder
     /// so the user drops the generated audio here, keeping all music in one place.
     pub music_folder: String,
+    /// Command that runs the local reference analyzer (perception layer). The audio
+    /// path is appended as the last arg. e.g. "/path/.venv/bin/python /path/analyze.py".
+    /// Empty = reference import disabled.
+    pub analyzer_cmd: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { claude_model: String::new(), claude_bin: String::new(), mcp_token: String::new(), ableton_mcp: String::new(), music_folder: String::new() }
+        Settings { claude_model: String::new(), claude_bin: String::new(), mcp_token: String::new(), ableton_mcp: String::new(), music_folder: String::new(), analyzer_cmd: String::new() }
     }
 }
 

@@ -90,6 +90,7 @@ const SEED_SKILLS: &[(&str, &str, &str, &str)] = &[
     ("songsmith-lyric-spec", "Lyric Spec", "lyric_spec", include_str!("skills/lyric-spec.md")),
     ("songsmith-lyrics", "Lyricist", "lyrics", include_str!("skills/lyrics.md")),
     ("songsmith-prompt", "Generation Prompt", "prompt", include_str!("skills/prompt.md")),
+    ("songsmith-reference", "Reference Analyst", "reference", include_str!("skills/reference.md")),
     ("songsmith-style", "Style Builder", "style", include_str!("skills/style.md")),
     ("songsmith-ableton", "Ableton Arrange", "ableton", include_str!("skills/ableton.md")),
 ];
@@ -466,13 +467,14 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
             "mcp_token" => st.mcp_token = s(&r, 1),
             "ableton_mcp" => st.ableton_mcp = s(&r, 1),
             "music_folder" => st.music_folder = s(&r, 1),
+            "analyzer_cmd" => st.analyzer_cmd = s(&r, 1),
             _ => {}
         }
     }
     Ok(st)
 }
 pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
-    for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("mcp_token", &st.mcp_token), ("ableton_mcp", &st.ableton_mcp)] {
+    for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("mcp_token", &st.mcp_token), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd)] {
         conn.execute(
             "INSERT INTO setting (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2",
             params![k, v.as_str()],

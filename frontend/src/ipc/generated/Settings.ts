@@ -15,4 +15,10 @@ ableton_mcp: string,
  * Base folder where all song renders live. "+ Add version" opens this folder
  * so the user drops the generated audio here, keeping all music in one place.
  */
-music_folder: string, };
+music_folder: string, 
+/**
+ * Command that runs the local reference analyzer (perception layer). The audio
+ * path is appended as the last arg. e.g. "/path/.venv/bin/python /path/analyze.py".
+ * Empty = reference import disabled.
+ */
+analyzer_cmd: string, };

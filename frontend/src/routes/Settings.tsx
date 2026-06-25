@@ -122,6 +122,18 @@ export function SettingsPage() {
           </div>
 
           <div className="card">
+            <h2>Reference analyzer <span className="badge pending">spike</span></h2>
+            <p className="muted">Local command that analyzes an imported reference track (tempo, key, chords, sections). The audio path is appended automatically — your audio never leaves the machine. Empty = reference import off.</p>
+            <textarea value={form.analyzer_cmd} onChange={set("analyzer_cmd")} spellCheck={false}
+              placeholder="/path/to/analysis/.venv/bin/python /path/to/analysis/analyze.py"
+              style={{ width: "100%", minHeight: 50, fontFamily: "var(--mono)", fontSize: 12 }} />
+            <div className="row" style={{ gap: 8, marginTop: 8 }}>
+              <button className="primary" onClick={() => save.mutate()}>Save</button>
+              <button className="ghost" onClick={() => setForm({ ...form, analyzer_cmd: "/Users/paul/programing/songsmith-studio/analysis/.venv/bin/python /Users/paul/programing/songsmith-studio/analysis/analyze.py" })}>use dev default</button>
+            </div>
+          </div>
+
+          <div className="card">
             <h2>Tool registry</h2>
             <p className="muted">{tools.data?.length ?? 0} tools — one registry for the UI, the agent, and Claude over MCP.</p>
             <div style={{ maxHeight: 220, overflow: "auto" }}>

@@ -118,7 +118,7 @@ function seed(): Any {
       artifact("prompt", "generation_prompt", { taggedLyrics }),
     ],
     skills, progressions: [], renders: [],
-    settings: { claude_model: "", claude_bin: "", mcp_token: "mock-token", ableton_mcp: "", music_folder: "" },
+    settings: { claude_model: "", claude_bin: "", mcp_token: "mock-token", ableton_mcp: "", music_folder: "", analyzer_cmd: "" },
   };
 }
 
@@ -237,6 +237,12 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
     case "add_render": { const x = { id: uid(), song_id: a.songId, label: a.label || "Render", file_path: a.filePath, source: a.source || "", notes: a.notes || "", is_pick: false, created_at: now() }; db.renders.unshift(x); return r(x); }
     case "set_render_pick": { const x = db.renders.find((y: Any) => y.id === a.id); if (a.isPick) db.renders.filter((y: Any) => y.song_id === x.song_id).forEach((y: Any) => (y.is_pick = false)); if (x) x.is_pick = a.isPick; return r(undefined); }
     case "delete_render": db.renders = db.renders.filter((x: Any) => x.id !== a.id); return r(undefined);
+    case "analyze_reference": return r({
+      duration_sec: 80, tempo_bpm: 95.7, key: { root: "E", mode: "minor", confidence: 0.66 },
+      section_count: 3, note: "(mock) raw perception output",
+      bar_chords: ["Am", "F", "C", "E", "Am", "F", "C", "E"].map((chord, i) => ({ bar: i + 1, time: i * 2, chord })),
+      sections: [{ start_sec: 0, end_sec: 32, approx_bars: 8, chords: ["Am", "F", "C", "E"] }],
+    });
     case "get_settings": return r(db.settings);
     case "set_settings": db.settings = a.settings; return r(db.settings);
     case "list_tools": return r(MOCK_TOOLS);
@@ -260,5 +266,6 @@ const MOCK_TOOLS = [
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",
   "list_progressions","save_progression","delete_progression",
   "list_renders","add_render","set_render_pick","delete_render",
+  "analyze_reference",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" }));

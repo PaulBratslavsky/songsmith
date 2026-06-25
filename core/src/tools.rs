@@ -57,6 +57,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "add_render", description: "Add a final render: a label + file path on disk (Suno/Udio/Ableton take).", destructive: false, input_schema: obj(json!({"song_id": s(""),"label": s(""),"file_path": s(""),"source": s(""),"notes": s("")}), &["song_id","file_path"]) },
         ToolSpec { name: "set_render_pick", description: "Mark a render as the chosen winner for its song.", destructive: false, input_schema: obj(json!({"id": s(""),"is_pick": {"type":"boolean"}}), &["id","is_pick"]) },
         ToolSpec { name: "delete_render", description: "Remove a render reference (does not delete the file).", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
+        ToolSpec { name: "analyze_reference", description: "Analyze a local audio file (the perception layer for importing a reference): returns raw tempo, a key guess, bar-level chord candidates, and rough section boundaries as JSON. Interpret it with the Reference Analyst method — correct the key from the chord content, snap tempo, clean chords to the diatonic set, derive form from chord repetition — then create a song and save its Structure + Chords.", destructive: false, input_schema: obj(json!({"audio_path": s("absolute path to the local audio file")}), &["audio_path"]) },
         ToolSpec { name: "get_settings", description: "Get app settings.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "set_settings", description: "Update app settings.", destructive: false, input_schema: obj(json!({"settings": {"type":"object"}}), &["settings"]) },
     ]
@@ -71,6 +72,26 @@ fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 }
 fn arg_opt<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
+}
+
+/// Run the configured local analyzer CLI on an audio file and return its JSON.
+/// The audio path is appended as the final argument. Audio never leaves the machine.
+async fn run_analyzer(settings: &Settings, audio_path: &str) -> Result<Value> {
+    let cmd = settings.analyzer_cmd.trim();
+    if cmd.is_empty() {
+        return Err(anyhow!("reference analyzer is not configured — set the analyzer command in Settings (e.g. \"/path/.venv/bin/python /path/analyze.py\")"));
+    }
+    let mut parts = cmd.split_whitespace();
+    let program = parts.next().ok_or_else(|| anyhow!("empty analyzer command"))?;
+    let mut command = tokio::process::Command::new(program);
+    for a in parts { command.arg(a); }
+    command.arg(audio_path);
+    let out = command.output().await.map_err(|e| anyhow!("could not run analyzer ({program}): {e}"))?;
+    if !out.status.success() {
+        return Err(anyhow!("analyzer failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(serde_json::from_str::<Value>(stdout.trim()).unwrap_or_else(|_| json!({ "raw": stdout })))
 }
 fn style_input(args: &Value) -> StyleInput {
     StyleInput {
@@ -157,6 +178,7 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "add_render" => v(db::create_render(conn, arg(args, "song_id")?, arg_opt(args, "label").unwrap_or("Render"), arg(args, "file_path")?, arg_opt(args, "source").unwrap_or(""), arg_opt(args, "notes").unwrap_or("")).await?),
         "set_render_pick" => { db::set_render_pick(conn, arg(args, "id")?, args.get("is_pick").and_then(|b| b.as_bool()).unwrap_or(true)).await?; Ok(json!({ "ok": true })) }
         "delete_render" => { db::delete_render(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "analyze_reference" => run_analyzer(settings, arg(args, "audio_path")?).await,
         "get_settings" => v(db::get_settings(conn).await?),
         "set_settings" => {
             let st: Settings = serde_json::from_value(args.get("settings").cloned().unwrap_or(json!({})))?;
