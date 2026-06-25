@@ -722,11 +722,12 @@ fn mk_note(pitch: i64, start: f64, dur: f64, vel: i64) -> serde_json::Value {
 /// arc (intro = sparse → chorus/drop = everything) instead of all parts everywhere.
 fn section_parts(label: &str) -> &'static [&'static str] {
     let l = label.to_lowercase();
-    if l.contains("intro") || l.contains("outro") { &["Sections", "Bass", "Chords"] }
-    else if l.contains("pre") || l.contains("build") { &["Sections", "Bass", "Chords", "Chord melody", "Filler"] }
-    else if l.contains("break") || l.contains("bridge") { &["Sections", "Bass", "Chords", "Filler"] }
-    else if l.contains("verse") { &["Sections", "Bass", "Chords", "Chord melody"] }
-    else { &["Sections", "Bass", "Chords", "Chord melody", "Filler", "Arp"] } // chorus / drop / hook / default
+    // Pad is the atmospheric bed — it plays under everything
+    if l.contains("intro") || l.contains("outro") { &["Sections", "Bass", "Chords", "Pad"] }
+    else if l.contains("pre") || l.contains("build") { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler"] }
+    else if l.contains("break") || l.contains("bridge") { &["Sections", "Bass", "Chords", "Pad", "Filler"] }
+    else if l.contains("verse") { &["Sections", "Bass", "Chords", "Pad", "Chord melody"] }
+    else { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp"] } // chorus / drop / hook / default
 }
 
 /// Generate the MIDI notes for one part over a section, honoring each chord's beats
@@ -748,6 +749,11 @@ fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, groove: bool) -> 
                 out.push(mk_note(36 + pc, start, dur * 0.6, 106));
                 out.push(mk_note(36 + pc + 7, start + dur * 0.6, dur * 0.4, 88));
             },
+            // wide sustained pad bed: triad octave-up held the full chord, soft, with an airy top octave
+            "Pad" => {
+                for t in &tones { out.push(mk_note(60 + pc + t, start, dur, 50)); }
+                out.push(mk_note(72 + pc, start, dur, 38));
+            }
             // sustained pad for the chord's length, or two stabs when grooving
             "Chords" => if groove {
                 for t in &tones { out.push(mk_note(48 + pc + t, start, (dur * 0.25).min(0.9), 90)); }
@@ -854,7 +860,7 @@ async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<St
         let _ = ableton_cmd(&mut s, serde_json::json!({"type":"switch_to_arrangement_view","params":{}}));
 
         // create the 6 tracks, capture their indices
-        let track_names = ["Sections", "Bass", "Chords", "Chord melody", "Filler", "Arp"];
+        let track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp"];
         let mut tracks: Vec<i64> = Vec::new();
         for name in track_names {
             let ti = ableton_cmd(&mut s, serde_json::json!({"type":"create_midi_track","params":{"index":-1}}))
