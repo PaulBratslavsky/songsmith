@@ -729,49 +729,48 @@ fn section_parts(label: &str) -> &'static [&'static str] {
     else { &["Sections", "Bass", "Chords", "Chord melody", "Filler", "Arp"] } // chorus / drop / hook / default
 }
 
-/// Generate the MIDI notes for one part over a section (bars × looped chords).
-/// `groove` (genre-driven) swaps sustained pads for rhythmic stabs/faster arps.
-/// Velocities are accented on beat 1 and ghosted off-beat to avoid a robotic grid.
-fn part_notes(part: &str, chords: &[String], bars: i64, groove: bool) -> Vec<serde_json::Value> {
+/// Generate the MIDI notes for one part over a section, honoring each chord's beats
+/// (chord events of any length). `groove` (genre-driven) swaps sustained pads for
+/// rhythmic stabs/faster arps; velocities accent the chord's start and ghost the rest.
+fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, groove: bool) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    if chords.is_empty() { return out; }
-    for b in 0..bars {
-        let name = &chords[b as usize % chords.len()];
-        let Some((pc, tones)) = chord_tones(name) else { continue };
-        let start = (b * 4) as f64; // 4/4, one chord per bar
+    for (name, start, dur) in chord_events(chords, bars) {
+        let Some((pc, tones)) = chord_tones(&name) else { continue };
         let third = tones.get(1).copied().unwrap_or(4);
         let top = tones.last().copied().unwrap_or(7);
         match part {
-            // root octave 2 with movement to the 5th on beat 3; punchy on 1
+            // root octave 2, moving to the 5th halfway; punchy attack
             "Bass" => if groove {
-                out.push(mk_note(36 + pc, start, 1.0, 112));
-                out.push(mk_note(36 + pc, start + 1.5, 0.5, 82));        // off-beat sub push
-                out.push(mk_note(36 + pc + 7, start + 2.0, 1.5, 96));   // 5th on 3
+                out.push(mk_note(36 + pc, start, (dur * 0.4).min(1.0), 112));
+                if dur >= 2.0 { out.push(mk_note(36 + pc, start + dur * 0.375, 0.4, 82)); }   // off-beat sub
+                out.push(mk_note(36 + pc + 7, start + dur * 0.5, dur * 0.45, 94));
             } else {
-                out.push(mk_note(36 + pc, start, 2.5, 106));
-                out.push(mk_note(36 + pc + 7, start + 2.0, 2.0, 88));
+                out.push(mk_note(36 + pc, start, dur * 0.6, 106));
+                out.push(mk_note(36 + pc + 7, start + dur * 0.6, dur * 0.4, 88));
             },
-            // sustained pad, or two stabs (1 + 3) when grooving
+            // sustained pad for the chord's length, or two stabs when grooving
             "Chords" => if groove {
-                for (off, vel) in [(0.0_f64, 90), (2.0, 76)] { for t in &tones { out.push(mk_note(48 + pc + t, start + off, 0.9, vel)); } }
+                for t in &tones { out.push(mk_note(48 + pc + t, start, (dur * 0.25).min(0.9), 90)); }
+                if dur >= 2.0 { for t in &tones { out.push(mk_note(48 + pc + t, start + dur * 0.5, (dur * 0.2).min(0.9), 74)); } }
             } else {
-                for t in &tones { out.push(mk_note(48 + pc + t, start, 4.0, 78)); }
+                for t in &tones { out.push(mk_note(48 + pc + t, start, dur, 78)); }
             },
-            // a small contour: top tone on 1, step down to the 3rd on 3
+            // contour: top tone on the chord, step to the 3rd halfway through
             "Chord melody" => {
-                out.push(mk_note(60 + pc + top, start, 1.5, 96));
-                out.push(mk_note(60 + pc + third, start + 2.0, 2.0, 82));
+                out.push(mk_note(60 + pc + top, start, dur * 0.45, 96));
+                out.push(mk_note(60 + pc + third, start + dur * 0.5, dur * 0.45, 82));
             }
-            // off-beat triad stabs on the "and" of 2 and 4
-            "Filler" => for off in [1.5_f64, 3.5] { for t in &tones { out.push(mk_note(48 + pc + t, start + off, 0.5, 68)); } },
-            // arpeggio cycling chord tones, climbing an octave each pass (16ths grooving, else 8ths)
+            // off-beat triad stabs within the chord
+            "Filler" => for off in [0.45_f64, 0.85] { for t in &tones { out.push(mk_note(48 + pc + t, start + dur * off, (dur * 0.12).max(0.25), 68)); } },
+            // arpeggio subdividing the chord's length (16ths grooving, else 8ths)
             "Arp" => {
-                let (steps, dur) = if groove { (16, 0.25) } else { (8, 0.5) };
-                for step in 0..steps {
-                    let t = tones[step % tones.len()];
-                    let oct = ((step / tones.len()) % 2) as i64 * 12;
-                    let vel = if step % 4 == 0 { 86 } else { 64 };
-                    out.push(mk_note(60 + pc + t + oct, start + step as f64 * dur, dur, vel));
+                let step = if groove { 0.25 } else { 0.5 };
+                let n = (dur / step).floor() as i64;
+                for k in 0..n {
+                    let t = tones[k as usize % tones.len()];
+                    let oct = ((k as usize / tones.len()) % 2) as i64 * 12;
+                    let vel = if k % 4 == 0 { 86 } else { 64 };
+                    out.push(mk_note(60 + pc + t + oct, start + k as f64 * step, step, vel));
                 }
             }
             _ => {}
@@ -780,10 +779,10 @@ fn part_notes(part: &str, chords: &[String], bars: i64, groove: bool) -> Vec<ser
     out
 }
 
-/// Structure sections enriched with each section's looped chord progression.
-async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, Vec<String>)> {
+/// Structure sections enriched with each section's progression as (chord, beats).
+async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, Vec<(String, i64)>)> {
     let secs = song_sections(conn, song_id).await;
-    let mut cmap: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cmap: HashMap<String, Vec<(String, i64)>> = HashMap::new();
     if let Ok(stages) = db::list_stages(conn, song_id).await {
         if let Some(st) = stages.iter().find(|s| s.r#type == "chords") {
             if let Ok(Some(art)) = db::current_artifact(conn, &st.id).await {
@@ -791,9 +790,11 @@ async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, Vec<S
                     if let Some(arr) = v.pointer("/data/sections").and_then(|s| s.as_array()) {
                         for s in arr {
                             let label = s.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                            let chords = s.get("chords").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|c|
-                                c.as_str().map(String::from).or_else(|| c.get("name").and_then(|n| n.as_str()).map(String::from))
-                            ).collect()).unwrap_or_default();
+                            let chords = s.get("chords").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|c| {
+                                let name = c.as_str().map(String::from).or_else(|| c.get("name").and_then(|n| n.as_str()).map(String::from))?;
+                                let beats = c.get("beats").and_then(|b| b.as_i64()).filter(|&b| b > 0).unwrap_or(4);
+                                Some((name, beats))
+                            }).collect()).unwrap_or_default();
                             cmap.insert(label, chords);
                         }
                     }
@@ -802,6 +803,23 @@ async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, Vec<S
         }
     }
     secs.into_iter().map(|(label, bars)| { let ch = cmap.get(&label).cloned().unwrap_or_default(); (label, bars, ch) }).collect()
+}
+
+/// Lay the looped progression along the section timeline using each chord's beats,
+/// returning (chord, start_beat, duration_beats) events filling `bars` × 4 beats.
+fn chord_events(chords: &[(String, i64)], bars: i64) -> Vec<(String, f64, f64)> {
+    let total = (bars * 4) as f64;
+    let mut out = Vec::new();
+    if chords.is_empty() { return out; }
+    let (mut t, mut i) = (0.0_f64, 0usize);
+    while t < total - 0.01 {
+        let (name, beats) = &chords[i % chords.len()];
+        let len = (*beats as f64).max(0.5);
+        out.push((name.clone(), t, len.min(total - t)));
+        t += len;
+        i += 1;
+    }
+    out
 }
 
 /// Stub the whole song in Ableton's Arrangement: a named "Sections" clip track
