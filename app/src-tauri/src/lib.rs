@@ -718,33 +718,62 @@ fn mk_note(pitch: i64, start: f64, dur: f64, vel: i64) -> serde_json::Value {
     serde_json::json!({ "pitch": pitch.clamp(0, 127), "start_time": start, "duration": dur, "velocity": vel, "mute": false })
 }
 
-/// Generate the MIDI notes for one part over a section (bars × the looped chords).
-fn part_notes(part: &str, chords: &[String], bars: i64) -> Vec<serde_json::Value> {
+/// Which parts play in a section — thins arrangement so it BUILDS with the energy
+/// arc (intro = sparse → chorus/drop = everything) instead of all parts everywhere.
+fn section_parts(label: &str) -> &'static [&'static str] {
+    let l = label.to_lowercase();
+    if l.contains("intro") || l.contains("outro") { &["Sections", "Bass", "Chords"] }
+    else if l.contains("pre") || l.contains("build") { &["Sections", "Bass", "Chords", "Chord melody", "Filler"] }
+    else if l.contains("break") || l.contains("bridge") { &["Sections", "Bass", "Chords", "Filler"] }
+    else if l.contains("verse") { &["Sections", "Bass", "Chords", "Chord melody"] }
+    else { &["Sections", "Bass", "Chords", "Chord melody", "Filler", "Arp"] } // chorus / drop / hook / default
+}
+
+/// Generate the MIDI notes for one part over a section (bars × looped chords).
+/// `groove` (genre-driven) swaps sustained pads for rhythmic stabs/faster arps.
+/// Velocities are accented on beat 1 and ghosted off-beat to avoid a robotic grid.
+fn part_notes(part: &str, chords: &[String], bars: i64, groove: bool) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     if chords.is_empty() { return out; }
     for b in 0..bars {
         let name = &chords[b as usize % chords.len()];
         let Some((pc, tones)) = chord_tones(name) else { continue };
         let start = (b * 4) as f64; // 4/4, one chord per bar
+        let third = tones.get(1).copied().unwrap_or(4);
+        let top = tones.last().copied().unwrap_or(7);
         match part {
-            // root, octave 2, held the whole bar
-            "Bass" => out.push(mk_note(36 + pc, start, 4.0, 100)),
-            // triad, octave 3, sustained
-            "Chords" => for t in &tones { out.push(mk_note(48 + pc + t, start, 4.0, 80)); },
-            // top chord tone an octave up, two half notes for movement
+            // root octave 2 with movement to the 5th on beat 3; punchy on 1
+            "Bass" => if groove {
+                out.push(mk_note(36 + pc, start, 1.0, 112));
+                out.push(mk_note(36 + pc, start + 1.5, 0.5, 82));        // off-beat sub push
+                out.push(mk_note(36 + pc + 7, start + 2.0, 1.5, 96));   // 5th on 3
+            } else {
+                out.push(mk_note(36 + pc, start, 2.5, 106));
+                out.push(mk_note(36 + pc + 7, start + 2.0, 2.0, 88));
+            },
+            // sustained pad, or two stabs (1 + 3) when grooving
+            "Chords" => if groove {
+                for (off, vel) in [(0.0_f64, 90), (2.0, 76)] { for t in &tones { out.push(mk_note(48 + pc + t, start + off, 0.9, vel)); } }
+            } else {
+                for t in &tones { out.push(mk_note(48 + pc + t, start, 4.0, 78)); }
+            },
+            // a small contour: top tone on 1, step down to the 3rd on 3
             "Chord melody" => {
-                let top = 60 + pc + tones.last().copied().unwrap_or(7);
-                out.push(mk_note(top, start, 2.0, 92));
-                out.push(mk_note(top, start + 2.0, 2.0, 84));
+                out.push(mk_note(60 + pc + top, start, 1.5, 96));
+                out.push(mk_note(60 + pc + third, start + 2.0, 2.0, 82));
             }
             // off-beat triad stabs on the "and" of 2 and 4
-            "Filler" => for off in [1.5_f64, 3.5] { for t in &tones { out.push(mk_note(48 + pc + t, start + off, 0.5, 70)); } },
-            // 16th-note arpeggio cycling chord tones, climbing an octave each pass
-            "Arp" => for step in 0..16 {
-                let t = tones[step % tones.len()];
-                let oct = ((step / tones.len()) % 2) as i64 * 12;
-                out.push(mk_note(60 + pc + t + oct, start + step as f64 * 0.25, 0.25, 75));
-            },
+            "Filler" => for off in [1.5_f64, 3.5] { for t in &tones { out.push(mk_note(48 + pc + t, start + off, 0.5, 68)); } },
+            // arpeggio cycling chord tones, climbing an octave each pass (16ths grooving, else 8ths)
+            "Arp" => {
+                let (steps, dur) = if groove { (16, 0.25) } else { (8, 0.5) };
+                for step in 0..steps {
+                    let t = tones[step % tones.len()];
+                    let oct = ((step / tones.len()) % 2) as i64 * 12;
+                    let vel = if step % 4 == 0 { 86 } else { 64 };
+                    out.push(mk_note(60 + pc + t + oct, start + step as f64 * dur, dur, vel));
+                }
+            }
             _ => {}
         }
     }
@@ -788,6 +817,14 @@ async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<St
         return Ok("No sections found — run the Structure stage first.".into());
     }
     let bpm = song.bpm;
+    // genre-driven groove: rhythmic (stabs / fast arp / punchy bass) vs sustained
+    let groove = db::get_preset(&state.conn, &song.style_preset_id).await.ok().flatten()
+        .map(|p| {
+            let g = p.genre.to_lowercase();
+            ["phonk", "trap", "electronic", "edm", "house", "techno", "dnb", "drum", "dance", "hip", "beat", "synthwave", "drill", "wave", "bass"]
+                .iter().any(|k| g.contains(k))
+        })
+        .unwrap_or(true);
     tokio::task::spawn_blocking(move || -> Result<String, String> {
         let addr = "127.0.0.1:9877".parse().map_err(e2s)?;
         let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
@@ -810,19 +847,21 @@ async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<St
             nap();
         }
 
-        let mut log = vec![format!("tempo {bpm} BPM · {} sections × {} tracks", sections.len(), track_names.len())];
+        let mut log = vec![format!("tempo {bpm} BPM · {} feel · {} sections × up to {} tracks (density per section)", if groove { "rhythmic groove" } else { "sustained" }, sections.len(), track_names.len())];
         let mut bar = 1i64;
         for (i, (label, bars, chords)) in sections.iter().enumerate() {
             let ci = i as i64;
             let length = (*bars as f64) * 4.0;
             let dest = ((bar - 1) as f64) * 4.0;
+            let active = section_parts(label);
             for (t, &ti) in tracks.iter().enumerate() {
                 let part = track_names[t];
+                if !active.contains(&part) { continue; } // section-aware density: leave a gap so it builds
                 let _ = ableton_cmd(&mut s, serde_json::json!({"type":"create_clip","params":{"track_index": ti, "clip_index": ci, "length": length}}));
                 if part == "Sections" {
                     let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
                 } else {
-                    let notes = part_notes(part, chords, *bars);
+                    let notes = part_notes(part, chords, *bars, groove);
                     if !notes.is_empty() {
                         let _ = ableton_cmd(&mut s, serde_json::json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                     }
