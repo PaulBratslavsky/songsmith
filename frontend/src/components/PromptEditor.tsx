@@ -24,7 +24,9 @@ export function promptToMarkdown(d: PromptData): string {
   ].join("\n");
 }
 
-const norm = (s: string) => s.replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").trim();
+// compare the WORDS that get sung — ignore chord-tag spelling/quality differences
+// (Bb vs A#, Am vs Am(add9)) so only a real lyric-text mismatch warns.
+const wordsOnly = (s: string) => s.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 
 export function PromptEditor({
   songId, stageId, kind, content, onChanged, lyricsTagged,
@@ -38,7 +40,7 @@ export function PromptEditor({
   const set = (patch: Partial<PromptData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
   // the tagged lyrics should mirror the Lyrics stage verbatim; flag drift + offer a one-click pull
   const lyr = (lyricsTagged ?? "").trim();
-  const lyricsDiffer = !!lyr && norm(d.taggedLyrics) !== norm(lyr);
+  const lyricsDiffer = !!lyr && wordsOnly(d.taggedLyrics) !== wordsOnly(lyr);
   const pullFromLyrics = () => set({ taggedLyrics: lyr });
   const save = useMutation({
     mutationFn: () => api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: promptToMarkdown(d), data: d })),

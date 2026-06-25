@@ -9,15 +9,10 @@ import { FieldChat } from "./FieldChat";
 type Word = { text: string; chord?: string };
 type Section = { label: string; lines: Word[][] };
 
-// flats → sharps, so placed chords stay consistent with the rest of the app
-const FLAT2SHARP: Record<string, string> = { Db: "C#", Eb: "D#", Gb: "F#", Ab: "G#", Bb: "A#", Cb: "B", Fb: "E" };
-function sharpen(name: string): string {
-  const m = name.match(/^([A-G])(b|#)?(.*)$/);
-  if (!m) return name;
-  const root = m[1] + (m[2] ?? "");
-  return (FLAT2SHARP[root] ?? root) + (m[3] ?? "");
-}
-
+// Preserve chord names exactly as authored — do NOT auto-sharpen. Flats are often
+// the musically-correct spelling (e.g. Bb = bII Neapolitan in A minor), and the
+// AI's qualities (Am(add9), "Bb (ghost)") carry intent. Mangling them also caused
+// false "doesn't match Lyrics" warnings in the Generation Prompt.
 const TOKEN_RE = /\[([^\]]+)\]|(\S+)/g;
 /** Parse a ChordPro line ("[Dm]The dashboard [Bb]glows") into words+chords. */
 function parseLine(s: string): Word[] {
@@ -26,7 +21,7 @@ function parseLine(s: string): Word[] {
   let m: RegExpExecArray | null;
   TOKEN_RE.lastIndex = 0;
   while ((m = TOKEN_RE.exec(s))) {
-    if (m[1] != null) pending = sharpen(m[1].trim());
+    if (m[1] != null) pending = m[1].trim();
     else { words.push({ text: m[2], chord: pending }); pending = undefined; }
   }
   if (pending) words.push({ text: "", chord: pending }); // trailing chord, no word
@@ -92,7 +87,7 @@ function progressionsByLabel(chordsData: any): Record<string, string[]> {
   const map: Record<string, string[]> = {};
   for (const s of chordsData?.sections ?? []) {
     const lbl = s.label || s.type; if (!lbl) continue;
-    map[lbl] = (s.chords ?? []).map((c: any) => (typeof c === "string" ? c : c?.name)).filter(Boolean).map(sharpen);
+    map[lbl] = (s.chords ?? []).map((c: any) => (typeof c === "string" ? c : c?.name)).filter(Boolean);
   }
   return map;
 }
@@ -145,7 +140,7 @@ export function LyricsEditor({
     const map: Record<string, string[]> = {};
     for (const s of chordsData?.sections ?? []) {
       const lbl = s.label || s.type; if (!lbl) continue;
-      map[lbl] = (s.chords ?? []).map((c: any) => (typeof c === "string" ? c : c?.name)).filter(Boolean).map(sharpen);
+      map[lbl] = (s.chords ?? []).map((c: any) => (typeof c === "string" ? c : c?.name)).filter(Boolean);
     }
     return map;
   }, [chordsData]);
@@ -254,7 +249,7 @@ export function LyricsEditor({
                 {paletteFor(sec.label).length === 0 && <span className="faint" style={{ fontSize: 11 }}>no chords yet — run the Chords stage, or type one →</span>}
                 <input
                   value={custom} onChange={(e) => setCustom(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && custom.trim()) { setSel(sharpen(custom.trim())); setCustom(""); } }}
+                  onKeyDown={(e) => { if (e.key === "Enter" && custom.trim()) { setSel(custom.trim()); setCustom(""); } }}
                   placeholder="+chord ⏎" style={{ width: 78, fontSize: 11 }}
                 />
                 {sel && <span className="faint" style={{ fontSize: 11 }}>armed: <b>{sel}</b> — click a word</span>}
