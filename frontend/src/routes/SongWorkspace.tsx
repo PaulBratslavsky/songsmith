@@ -47,7 +47,7 @@ export function SongWorkspace() {
   useEffect(() => { setNavSlot(document.getElementById("song-nav-slot")); }, []);
   // navigating to a different song clears the stage selection (avoids stale highlight)
   useEffect(() => { setSelectedId(null); fd?.close?.(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const buildAbleton = async () => { setAbMsg("Building locators in Ableton…"); try { setAbMsg(await api.abletonBuild(id)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); } };
+  const buildAbleton = async () => { setAbMsg("Stubbing the song in Ableton — Sections + Bass / Chords / Melody / Filler / Arp…"); try { setAbMsg(await api.abletonBuildSong(id)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); } };
 
   const song = useQuery({ queryKey: ["song", id], queryFn: () => api.getSong(id) });
   const currentType = song.data?.song.current_stage ?? "concept";
@@ -99,7 +99,7 @@ export function SongWorkspace() {
   const v = song.data.song;
   const preset = song.data.preset;
   const sd = stage.data;
-  const structureDone = song.data.stages.find((s) => s.type === "structure")?.status === "done";
+  const allStagesDone = song.data.stages.length > 0 && song.data.stages.every((s) => s.status === "done");
   const isStale = !!sd?.stage && staleStageIds(song.data.stages).has(sd.stage.id);
 
   return (
@@ -127,7 +127,7 @@ export function SongWorkspace() {
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button onClick={buildAbleton} disabled={!structureDone} title={structureDone ? "create a named Arrangement locator per section in Ableton (direct, no chat)" : "Complete the Structure stage first — it provides the section map and bar counts"}>⚡ Build in Ableton</button>
+          <button onClick={buildAbleton} disabled={!allStagesDone} title={allStagesDone ? "Stub the whole song in Ableton — a named Sections clip track + Bass/Chords/Melody/Filler/Arp MIDI parts from your progression (direct, no chat)" : "Complete every song-spec stage first (Concept → Generation Prompt)"}>⚡ Build in Ableton</button>
           {v.status !== "done" ? (
             <button className="primary" onClick={() => setStatus.mutate("done")}>Mark done</button>
           ) : (

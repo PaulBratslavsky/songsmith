@@ -138,6 +138,7 @@ export const api = {
   resetAbleton: () => call<string>("reset_ableton"),
   abletonBuild: (songId: string) => call<string>("ableton_build", { songId }),
   abletonBuildClips: (songId: string) => call<string>("ableton_build_clips", { songId }),
+  abletonBuildSong: (songId: string) => call<string>("ableton_build_song", { songId }),
   detectAbletonMcp: () => call<{ found: boolean; name?: string; entry?: any }>("detect_ableton_mcp"),
   chatSend: (message: string, sessionId?: string, songId?: string) =>
     call<string>("chat_send", { message, sessionId: sessionId ?? null, songId: songId ?? null }),

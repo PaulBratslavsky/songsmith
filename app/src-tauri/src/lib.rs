@@ -3,7 +3,7 @@
 //! Claude (the user's Claude Code subscription) is the engine, via the CLI + MCP.
 
 use libsql::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 use song_core::models::*;
@@ -683,6 +683,158 @@ async fn ableton_build_clips(state: State<'_, AppState>, song_id: String) -> R<S
     .map_err(e2s)?
 }
 
+// --- song-stub generation: chords -> MIDI parts ---------------------------------
+
+/// Parse a chord name into (root pitch-class 0-11, chord-tone semitone offsets).
+fn chord_tones(name: &str) -> Option<(i64, Vec<i64>)> {
+    let b = name.as_bytes();
+    if b.is_empty() { return None; }
+    let mut pc: i64 = match b[0].to_ascii_uppercase() {
+        b'C' => 0, b'D' => 2, b'E' => 4, b'F' => 5, b'G' => 7, b'A' => 9, b'B' => 11, _ => return None,
+    };
+    let mut i = 1;
+    if i < b.len() && b[i] == b'#' { pc = (pc + 1) % 12; i += 1; }
+    else if i < b.len() && b[i] == b'b' { pc = (pc + 11) % 12; i += 1; }
+    let rest = &name[i..];
+    let tones = if rest.starts_with("dim") { vec![0, 3, 6] }
+        else if rest.starts_with("aug") { vec![0, 4, 8] }
+        else if rest.starts_with("sus2") { vec![0, 2, 7] }
+        else if rest.starts_with("sus4") { vec![0, 5, 7] }
+        else if rest.starts_with("maj7") { vec![0, 4, 7, 11] }
+        else if rest.starts_with('m') && !rest.starts_with("maj") {
+            if rest.contains('7') { vec![0, 3, 7, 10] } else { vec![0, 3, 7] }
+        }
+        else if rest.starts_with('7') || rest.starts_with("dom7") { vec![0, 4, 7, 10] }
+        else { vec![0, 4, 7] };
+    Some((pc, tones))
+}
+
+fn mk_note(pitch: i64, start: f64, dur: f64, vel: i64) -> serde_json::Value {
+    serde_json::json!({ "pitch": pitch.clamp(0, 127), "start_time": start, "duration": dur, "velocity": vel, "mute": false })
+}
+
+/// Generate the MIDI notes for one part over a section (bars × the looped chords).
+fn part_notes(part: &str, chords: &[String], bars: i64) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    if chords.is_empty() { return out; }
+    for b in 0..bars {
+        let name = &chords[b as usize % chords.len()];
+        let Some((pc, tones)) = chord_tones(name) else { continue };
+        let start = (b * 4) as f64; // 4/4, one chord per bar
+        match part {
+            // root, octave 2, held the whole bar
+            "Bass" => out.push(mk_note(36 + pc, start, 4.0, 100)),
+            // triad, octave 3, sustained
+            "Chords" => for t in &tones { out.push(mk_note(48 + pc + t, start, 4.0, 80)); },
+            // top chord tone an octave up, two half notes for movement
+            "Chord melody" => {
+                let top = 60 + pc + tones.last().copied().unwrap_or(7);
+                out.push(mk_note(top, start, 2.0, 92));
+                out.push(mk_note(top, start + 2.0, 2.0, 84));
+            }
+            // off-beat triad stabs on the "and" of 2 and 4
+            "Filler" => for off in [1.5_f64, 3.5] { for t in &tones { out.push(mk_note(48 + pc + t, start + off, 0.5, 70)); } },
+            // 16th-note arpeggio cycling chord tones, climbing an octave each pass
+            "Arp" => for step in 0..16 {
+                let t = tones[step % tones.len()];
+                let oct = ((step / tones.len()) % 2) as i64 * 12;
+                out.push(mk_note(60 + pc + t + oct, start + step as f64 * 0.25, 0.25, 75));
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Structure sections enriched with each section's looped chord progression.
+async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, Vec<String>)> {
+    let secs = song_sections(conn, song_id).await;
+    let mut cmap: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(stages) = db::list_stages(conn, song_id).await {
+        if let Some(st) = stages.iter().find(|s| s.r#type == "chords") {
+            if let Ok(Some(art)) = db::current_artifact(conn, &st.id).await {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&art.content) {
+                    if let Some(arr) = v.pointer("/data/sections").and_then(|s| s.as_array()) {
+                        for s in arr {
+                            let label = s.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                            let chords = s.get("chords").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|c|
+                                c.as_str().map(String::from).or_else(|| c.get("name").and_then(|n| n.as_str()).map(String::from))
+                            ).collect()).unwrap_or_default();
+                            cmap.insert(label, chords);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    secs.into_iter().map(|(label, bars)| { let ch = cmap.get(&label).cloned().unwrap_or_default(); (label, bars, ch) }).collect()
+}
+
+/// Stub the whole song in Ableton's Arrangement: a named "Sections" clip track
+/// plus Bass / Chords / Chord melody / Filler / Arp MIDI parts generated from the
+/// chord progression — direct socket, no MCP/LLM. MIDI-only (you pick the sounds).
+#[tauri::command]
+async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<String> {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let song = db::get_song(&state.conn, &song_id).await.map_err(e2s)?.ok_or("song not found")?;
+    let sections = song_parts(&state.conn, &song_id).await;
+    if sections.is_empty() {
+        return Ok("No sections found — run the Structure stage first.".into());
+    }
+    let bpm = song.bpm;
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let addr = "127.0.0.1:9877".parse().map_err(e2s)?;
+        let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+            .map_err(|e| format!("Can't reach Ableton on 9877 ({e}). Open Live (AbletonMCP on) and free the connection."))?;
+        s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+        s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
+        let nap = || std::thread::sleep(Duration::from_millis(35));
+        let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_tempo","params":{"tempo": bpm as f64}}));
+        let _ = ableton_cmd(&mut s, serde_json::json!({"type":"switch_to_arrangement_view","params":{}}));
+
+        // create the 6 tracks, capture their indices
+        let track_names = ["Sections", "Bass", "Chords", "Chord melody", "Filler", "Arp"];
+        let mut tracks: Vec<i64> = Vec::new();
+        for name in track_names {
+            let ti = ableton_cmd(&mut s, serde_json::json!({"type":"create_midi_track","params":{"index":-1}}))
+                .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()))
+                .unwrap_or(tracks.last().map(|t| t + 1).unwrap_or(0));
+            let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_track_name","params":{"track_index": ti, "name": name}}));
+            tracks.push(ti);
+            nap();
+        }
+
+        let mut log = vec![format!("tempo {bpm} BPM · {} sections × {} tracks", sections.len(), track_names.len())];
+        let mut bar = 1i64;
+        for (i, (label, bars, chords)) in sections.iter().enumerate() {
+            let ci = i as i64;
+            let length = (*bars as f64) * 4.0;
+            let dest = ((bar - 1) as f64) * 4.0;
+            for (t, &ti) in tracks.iter().enumerate() {
+                let part = track_names[t];
+                let _ = ableton_cmd(&mut s, serde_json::json!({"type":"create_clip","params":{"track_index": ti, "clip_index": ci, "length": length}}));
+                if part == "Sections" {
+                    let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
+                } else {
+                    let notes = part_notes(part, chords, *bars);
+                    if !notes.is_empty() {
+                        let _ = ableton_cmd(&mut s, serde_json::json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
+                    }
+                }
+                let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": ci, "name": label}}));
+                let _ = ableton_cmd(&mut s, serde_json::json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": ci, "destination_time": dest}}));
+                nap();
+            }
+            log.push(format!("✓ {label} @ bar {bar} ({bars} bars · {} chords)", chords.len()));
+            bar += bars;
+        }
+        Ok(log.join("\n"))
+    })
+    .await
+    .map_err(e2s)?
+}
+
 /// Free the single Ableton socket by stopping stray standalone `ableton-mcp`
 /// processes squatting on it (run this when Test reports "busy").
 #[tauri::command]
@@ -763,6 +915,7 @@ pub fn run() {
             reset_ableton,
             ableton_build,
             ableton_build_clips,
+            ableton_build_song,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

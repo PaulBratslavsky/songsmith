@@ -254,6 +254,7 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
     case "reset_ableton": return r("(mock) reset runs only in the desktop app.");
     case "ableton_build": return r("(mock) Ableton build runs only in the desktop app.");
     case "ableton_build_clips": return r("(mock) Ableton clip build runs only in the desktop app.");
+    case "ableton_build_song": return r("(mock) Ableton song stub runs only in the desktop app.");
     case "chat_send": return r("mock-session");
     default: throw new Error(`mock: unknown command '${cmd}'`);
   }
