@@ -244,6 +244,7 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
       sections: [{ start_sec: 0, end_sec: 32, approx_bars: 8, chords: ["Am", "F", "C", "E"] }],
     });
     case "import_reference": return r(db.songs[0]?.id ?? null); // mock: just open the demo song
+    case "self_check_stage": return r(currentArtifact(a.stageId)); // mock: no-op refine
     case "get_settings": return r(db.settings);
     case "set_settings": db.settings = a.settings; return r(db.settings);
     case "list_tools": return r(MOCK_TOOLS);

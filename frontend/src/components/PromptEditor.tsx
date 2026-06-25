@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { FieldChat } from "./FieldChat";
@@ -42,6 +42,12 @@ export function PromptEditor({
   const lyr = (lyricsTagged ?? "").trim();
   const lyricsDiffer = !!lyr && wordsOnly(d.taggedLyrics) !== wordsOnly(lyr);
   const pullFromLyrics = () => set({ taggedLyrics: lyr });
+  // auto-mirror: when the Lyrics stage loads and the words differ, sync once so the
+  // generator always sings the real lyrics (the prompt can never silently drift).
+  const mirrored = useRef(false);
+  useEffect(() => {
+    if (!mirrored.current && lyr && wordsOnly(d.taggedLyrics) !== wordsOnly(lyr)) { mirrored.current = true; set({ taggedLyrics: lyr }); }
+  }, [lyr]); // eslint-disable-line react-hooks/exhaustive-deps
   const save = useMutation({
     mutationFn: () => api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: promptToMarkdown(d), data: d })),
     onSuccess: () => { setSaved("Saved."); onChanged(); },

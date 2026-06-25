@@ -194,6 +194,13 @@ export function LyricsEditor({
     onSuccess: () => { setDirty(false); onChanged(); },
   });
 
+  // self-test + refine: the model critiques its own lyrics (title lands as hook,
+  // sections coherent, no clichés) and rewrites them as a new revision
+  const selfCheck = useMutation({
+    mutationFn: () => api.selfCheckStage(stageId),
+    onSuccess: () => { setDirty(false); onChanged(); },
+  });
+
   return (
     <div>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
@@ -201,6 +208,10 @@ export function LyricsEditor({
           <button className={"sm" + (mode === "place" ? " primary" : "")} onClick={() => setMode("place")} title="click words to place chords above them">🎵 Place chords</button>
           <button className={"sm" + (mode === "text" ? " primary" : "")} onClick={() => setMode("text")} title="edit raw ChordPro: [C]word">✎ Text</button>
           {mode === "place" && <button className="sm" onClick={autoPlaceAll} title="spread each section's progression across its lyrics as a starting draft — then nudge">⚡ Auto-place</button>}
+          <button className="sm" disabled={selfCheck.isPending || dirty} onClick={() => selfCheck.mutate()}
+            title={dirty ? "save your edits first" : "Claude self-tests the lyrics (title lands as the hook, sections coherent, no clichés) and rewrites them as a new revision"}>
+            {selfCheck.isPending ? "checking…" : "✓ Self-check & refine"}
+          </button>
         </div>
         <button className="sm primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "saving…" : dirty ? "save revision" : "saved"}

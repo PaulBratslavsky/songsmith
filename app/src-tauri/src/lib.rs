@@ -87,6 +87,11 @@ async fn import_reference(state: State<'_, AppState>, audio_path: String) -> R<S
     song_core::agent::import_reference(&state.conn, &settings, &audio_path).await.map_err(e2s)
 }
 #[tauri::command]
+async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<Artifact> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    song_core::agent::self_check_stage(&state.conn, &settings, &stage_id).await.map_err(e2s)
+}
+#[tauri::command]
 async fn refine_field(state: State<'_, AppState>, stage_label: String, field_label: String, current: String, instruction: String) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     agent::refine_field(&settings, &stage_label, &field_label, &current, &instruction).await.map_err(|e| e.to_string())
@@ -880,6 +885,7 @@ pub fn run() {
             update_song_key,
             update_song_voicings,
             import_reference,
+            self_check_stage,
             refine_field,
             delete_song,
             get_stage,

@@ -67,6 +67,41 @@ where
     Ok(RunOutcome { artifact, raw_output: text })
 }
 
+/// Self-test + refine pass: the model critiques its own stage output against the
+/// skill and coherence checks (title lands as the hook, sections fit the spec, no
+/// clichés / over-writing), then returns a revised version saved as a new revision.
+pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: &str) -> Result<Artifact> {
+    let stage = db::get_stage(conn, stage_id).await?.ok_or_else(|| anyhow!("stage not found"))?;
+    let song = db::get_song(conn, &stage.song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let preset = db::get_preset(conn, &song.style_preset_id).await?.ok_or_else(|| anyhow!("style preset not found"))?;
+    let skill = db::get_active_skill_for_stage(conn, &stage.r#type).await?
+        .ok_or_else(|| anyhow!("no enabled skill for stage '{}'", stage.r#type))?;
+    let current = db::current_artifact(conn, stage_id).await?
+        .ok_or_else(|| anyhow!("nothing to self-check yet — run this stage first"))?;
+    let cur_text = serde_json::from_str::<Value>(&current.content).ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| current.content.clone());
+
+    let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
+    let system = build_system_prompt(&skill, &preset, &song);
+    let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
+1. TITLE/HOOK: does the song's title (from the Concept) actually land as the chorus hook line? If not, work it in so the chorus sings the title. ONLY if the song clearly found a stronger, more specific hook, build the chorus around that instead and keep it consistent across every chorus.\n\
+2. COHERENCE: every section must fit the Lyric Spec's beat sheet and the concept — no section that drifts off-theme, contradicts the story, or repeats instead of develops.\n\
+3. CRAFT: cut clichés, weak \"to be\" verbs, abstract emotion-words, forced rhymes, and over-written \"poetic\" lines that no one would actually sing; keep it human and singable.\n\
+4. Preserve the inline [chord] tags and the section labels exactly.\n\
+Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
+    let user = format!(
+        "Prior stages (context):\n\n{prior}\n\n---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
+        stage_label(&stage.r#type)
+    );
+
+    let text = call_claude(settings, &system, &user, &|_| {}).await?;
+    let data = extract_json(&text);
+    let content = json!({ "kind": kind_for_stage(&stage.r#type), "text": text, "data": data }).to_string();
+    let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
+    Ok(artifact)
+}
+
 /// Auto-generate a style preset from a seed (name / vibe / reference), grounded
 /// in the style-level skill. Returns a filled `StyleInput`; `name` is verbatim.
 pub async fn generate_style_preset<F>(
