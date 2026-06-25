@@ -172,6 +172,84 @@ fn build_user_prompt(stage_type: &str, prior: &str, user_input: Option<&str>) ->
     p
 }
 
+/// Import a reference track: run the local analyzer (perception), have the
+/// Reference Analyst skill interpret it (cognition), then create a new song with
+/// its Structure + Chords populated. Returns the new song id. Audio stays local.
+pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path: &str) -> Result<String> {
+    // 1. perception — reuse the analyzer the MCP tool runs
+    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path })).await?;
+
+    // 2. cognition — the Reference Analyst skill turns raw MIR into Structure + Chords
+    let skill = db::get_active_skill_for_stage(conn, "reference").await?
+        .ok_or_else(|| anyhow!("the Reference Analyst skill is missing"))?;
+    let user = format!("Analyzer output (raw perception):\n\n{}", serde_json::to_string_pretty(&raw)?);
+    let out = call_claude(settings, &skill.instructions, &user, &|_| {}).await?;
+    let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
+    let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
+    let chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
+
+    // 3. a song to hold it (reuse the first preset, or a minimal one)
+    let preset_id = match db::list_presets(conn).await?.into_iter().next() {
+        Some(p) => p.id,
+        None => db::create_preset(conn, StyleInput {
+            name: "Imported".into(), genre: String::new(), mood: String::new(), influences: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(),
+        }).await?.id,
+    };
+    let title = std::path::Path::new(audio_path).file_stem()
+        .map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Imported reference".into());
+    let song = db::create_song(conn, &preset_id, &title).await?;
+
+    // 4. key/tempo + Structure + Chords artifacts
+    let root = structure.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("A");
+    let mode = structure.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("minor");
+    let bpm = structure.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
+    db::update_song_key(conn, &song.id, root, mode, bpm).await?;
+
+    let stages = db::list_stages(conn, &song.id).await?;
+    let stage_id = |t: &str| stages.iter().find(|s| s.r#type == t).map(|s| s.id.clone());
+    if let Some(sid) = stage_id("structure") {
+        let content = json!({ "kind": "structure", "text": structure_text(&structure), "data": structure }).to_string();
+        db::save_artifact(conn, &song.id, Some(&sid), "structure", &content).await?;
+        let _ = db::set_stage_status(conn, &sid, "done").await;
+    }
+    if let Some(cid) = stage_id("chords") {
+        let content = json!({ "kind": "chords", "text": chords_text(&chords), "data": chords }).to_string();
+        db::save_artifact(conn, &song.id, Some(&cid), "chords", &content).await?;
+        let _ = db::set_stage_status(conn, &cid, "done").await;
+    }
+    Ok(song.id)
+}
+
+fn structure_text(s: &Value) -> String {
+    let root = s.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("");
+    let mode = s.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("");
+    let bpm = s.get("bpm").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mut out = format!("**KEY:** {root} {mode}\n**TEMPO:** {bpm} BPM\n\n**SECTION MAP**\n");
+    if let Some(arr) = s.get("sections").and_then(|v| v.as_array()) {
+        for (i, sec) in arr.iter().enumerate() {
+            let label = sec.get("label").and_then(|v| v.as_str()).unwrap_or("Section");
+            let bars = sec.get("bars").and_then(|v| v.as_i64()).unwrap_or(0);
+            let role = sec.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!("{}. **{label}** ({bars} bars) — {role}\n", i + 1));
+        }
+    }
+    out
+}
+
+fn chords_text(c: &Value) -> String {
+    let mut out = String::new();
+    if let Some(arr) = c.get("sections").and_then(|v| v.as_array()) {
+        for sec in arr {
+            let label = sec.get("label").and_then(|v| v.as_str()).unwrap_or("Section");
+            let names: Vec<&str> = sec.get("chords").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+            out.push_str(&format!("{label}: {}\n", names.join(" ")));
+        }
+    }
+    out
+}
+
 /// Refine a single field of a song spec via Claude — returns ONLY the new value
 /// for that field, so the caller can drop it straight into the structured object.
 pub async fn refine_field(settings: &Settings, stage_label: &str, field_label: &str, current: &str, instruction: &str) -> Result<String> {

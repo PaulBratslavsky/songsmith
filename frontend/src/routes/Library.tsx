@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, STAGE_ORDER, STAGE_LABELS } from "../ipc/api";
+import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS } from "../ipc/api";
 import type { Song } from "../ipc/generated";
 
 function StageTrack({ song }: { song: Song }) {
@@ -64,8 +64,24 @@ function NewSongButton() {
 
 export function Library() {
   const nav = useNavigate();
+  const qc = useQueryClient();
   const songs = useQuery({ queryKey: ["songs"], queryFn: api.listSongs });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.listStylePresets });
+  const [importMsg, setImportMsg] = useState("");
+
+  const importRef = useMutation({
+    mutationFn: async () => {
+      const path = await pickAudioFile();
+      if (!path) return null;
+      setImportMsg(`Analyzing ${path.split("/").pop()} — tempo, key, chords, sections… (local, ~10–30s)`);
+      return api.importReference(path);
+    },
+    onSuccess: (id) => {
+      setImportMsg("");
+      if (id) { qc.invalidateQueries({ queryKey: ["songs"] }); nav({ to: "/song/$id", params: { id } }); }
+    },
+    onError: (e: any) => setImportMsg("Import failed: " + String(e?.message ?? e)),
+  });
 
   return (
     <div>
@@ -74,8 +90,15 @@ export function Library() {
           <h1>Library</h1>
           <span className="muted">Every song mock and the stage it's on.</span>
         </div>
-        <NewSongButton />
+        <div className="row" style={{ gap: 8 }}>
+          <button onClick={() => importRef.mutate()} disabled={importRef.isPending}
+            title="Import an audio file → analyze locally → new song with Structure + Chords filled in">
+            {importRef.isPending ? "Analyzing…" : "⤵ Import reference"}
+          </button>
+          <NewSongButton />
+        </div>
       </div>
+      {importMsg && <div className="banner" style={{ marginBottom: 12 }}>{importMsg}</div>}
 
       {presets.data && presets.data.length === 0 && (
         <div className="banner warn">No style presets yet. Create one in <b>Style presets</b> before starting a song.</div>

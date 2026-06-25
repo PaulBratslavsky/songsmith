@@ -92,6 +92,7 @@ export const api = {
   updateSongTitle: (id: string, title: string) => call<Song>("update_song_title", { id, title }),
   updateSongKey: (id: string, root: string, mode: string, bpm: number) => call<Song>("update_song_key", { id, root, mode, bpm }),
   updateSongVoicings: (id: string, voicings: string) => call<Song>("update_song_voicings", { id, voicings }),
+  importReference: (audioPath: string) => call<string>("import_reference", { audioPath }),
   refineField: (stageLabel: string, fieldLabel: string, current: string, instruction: string) =>
     call<string>("refine_field", { stageLabel, fieldLabel, current, instruction }),
   deleteSong: (id: string) => call<void>("delete_song", { id }),
