@@ -718,6 +718,22 @@ fn mk_note(pitch: i64, start: f64, dur: f64, vel: i64) -> serde_json::Value {
     serde_json::json!({ "pitch": pitch.clamp(0, 127), "start_time": start, "duration": dur, "velocity": vel, "mute": false })
 }
 
+/// The pitch with pitch-class `pc` nearest to `reference` — for voice-leading
+/// (the bass walks to the closest root instead of leaping a fixed octave).
+fn nearest_pitch(pc: i64, reference: i64) -> i64 {
+    let base = reference - reference.rem_euclid(12) + pc;
+    [base - 12, base, base + 12].into_iter().min_by_key(|&p| (p - reference).abs()).unwrap()
+}
+
+/// A distinct clip color per part so the arrangement reads at a glance.
+fn part_color(part: &str) -> i64 {
+    match part {
+        "Bass" => 0x5C7CFA, "Chords" => 0x12B886, "Pad" => 0x9775FA,
+        "Chord melody" => 0x4DABF7, "Filler" => 0x51CF66, "Arp" => 0xFFD43B,
+        _ => 0xCBCBCB,
+    }
+}
+
 /// Which parts play in a section — thins arrangement so it BUILDS with the energy
 /// arc (intro = sparse → chorus/drop = everything) instead of all parts everywhere.
 fn section_parts(label: &str) -> &'static [&'static str] {
@@ -735,20 +751,26 @@ fn section_parts(label: &str) -> &'static [&'static str] {
 /// rhythmic stabs/faster arps; velocities accent the chord's start and ghost the rest.
 fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, groove: bool) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
+    let mut prev_bass = -1i64; // for bass voice-leading across the section
     for (name, start, dur) in chord_events(chords, bars) {
         let Some((pc, tones)) = chord_tones(&name) else { continue };
         let third = tones.get(1).copied().unwrap_or(4);
         let top = tones.last().copied().unwrap_or(7);
         match part {
-            // root octave 2, moving to the 5th halfway; punchy attack
-            "Bass" => if groove {
-                out.push(mk_note(36 + pc, start, (dur * 0.4).min(1.0), 112));
-                if dur >= 2.0 { out.push(mk_note(36 + pc, start + dur * 0.375, 0.4, 82)); }   // off-beat sub
-                out.push(mk_note(36 + pc + 7, start + dur * 0.5, dur * 0.45, 94));
-            } else {
-                out.push(mk_note(36 + pc, start, dur * 0.6, 106));
-                out.push(mk_note(36 + pc + 7, start + dur * 0.6, dur * 0.4, 88));
-            },
+            // walk the root to the nearest octave (no big leaps), move to the 5th halfway
+            "Bass" => {
+                let root = (if prev_bass < 0 { 36 + pc } else { nearest_pitch(pc, prev_bass) }).clamp(31, 47);
+                prev_bass = root;
+                let fifth = root + 7;
+                if groove {
+                    out.push(mk_note(root, start, (dur * 0.4).min(1.0), 112));
+                    if dur >= 2.0 { out.push(mk_note(root, start + dur * 0.375, 0.4, 82)); }   // off-beat sub
+                    out.push(mk_note(fifth, start + dur * 0.5, dur * 0.45, 94));
+                } else {
+                    out.push(mk_note(root, start, dur * 0.6, 106));
+                    out.push(mk_note(fifth, start + dur * 0.6, dur * 0.4, 88));
+                }
+            }
             // wide sustained pad bed: triad octave-up held the full chord, soft, with an airy top octave
             "Pad" => {
                 for t in &tones { out.push(mk_note(60 + pc + t, start, dur, 50)); }
@@ -889,6 +911,7 @@ async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<St
                     if !notes.is_empty() {
                         let _ = ableton_cmd(&mut s, serde_json::json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                     }
+                    let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": part_color(part)}}));
                 }
                 let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": ci, "name": label}}));
                 let _ = ableton_cmd(&mut s, serde_json::json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": ci, "destination_time": dest}}));
