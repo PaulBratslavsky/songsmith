@@ -74,6 +74,18 @@ export async function savePng(defaultName: string, bytes: number[]): Promise<str
 export type ToolInfo = { name: string; description: string; destructive: boolean };
 export type McpConfig = { db_path: string; token: string; command_hint: string };
 export type ClaudeStatus = { found: boolean; version: string | null; model: string; bin: string };
+export type ClaudeAuthStatus = {
+  found: boolean;
+  bin: string;
+  logged_in: boolean;
+  account: string | null;
+  subscription: string | null;
+  api_key_set: boolean;
+  connectors_hint: string;
+  connectors_url: string;
+};
+export type LoginResult = { url: string | null; instructions: string };
+export type LoginSubmitResult = { success: boolean; message: string };
 
 export const api = {
   // style presets
@@ -135,6 +147,16 @@ export const api = {
   listTools: () => call<ToolInfo[]>("list_tools"),
   mcpConfig: () => call<McpConfig>("mcp_config"),
   claudeStatus: () => call<ClaudeStatus>("claude_status"),
+
+  // claude.ai account auth (subscription only — never an API key)
+  claudeAuthStatus: () => call<ClaudeAuthStatus>("claude_auth_status"),
+  claudeLogin: () => call<LoginResult>("claude_login"),
+  claudeLoginSubmitCode: (code: string) => call<LoginSubmitResult>("claude_login_submit_code", { code }),
+  claudeLoginCancel: () => call<void>("claude_login_cancel"),
+  claudeLogout: () => call<void>("claude_logout"),
+  openUrl: (url: string) => call<void>("open_url", { url }),
+  testClaude: () => call<string>("test_claude"),
+
   testAbleton: () => call<string>("test_ableton"),
   resetAbleton: () => call<string>("reset_ableton"),
   abletonBuild: (songId: string) => call<string>("ableton_build", { songId }),

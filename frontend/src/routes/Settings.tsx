@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { api, pickFolder } from "../ipc/api";
+import { api, listen, pickFolder } from "../ipc/api";
 import type { Settings } from "../ipc/generated";
 
 export function SettingsPage() {
@@ -12,6 +12,88 @@ export function SettingsPage() {
   const [saved, setSaved] = useState("");
   const [detectMsg, setDetectMsg] = useState("");
   const [abletonMsg, setAbletonMsg] = useState("");
+
+  // ---- Connect Claude account (subscription auth — never an API key) ----
+  const auth = useQuery({ queryKey: ["claude-auth"], queryFn: api.claudeAuthStatus });
+  const [loginLog, setLoginLog] = useState("");
+  const [loginUrl, setLoginUrl] = useState<string | null>(null);
+  const [loginStarted, setLoginStarted] = useState(false);
+  const [authCode, setAuthCode] = useState("");
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const logBoxRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    const unLine = listen<{ line?: string; url?: string }>("login_event", (p) => {
+      if (p.url) setLoginUrl(p.url);
+      if (p.line) setLoginLog((s) => s + p.line + "\n");
+    });
+    const unDone = listen("login_done", () => {});
+    return () => {
+      unLine.then((u) => u());
+      unDone.then((u) => u());
+    };
+  }, []);
+
+  useEffect(() => {
+    logBoxRef.current?.scrollTo(0, logBoxRef.current.scrollHeight);
+  }, [loginLog]);
+
+  const login = useMutation({
+    mutationFn: async () => {
+      setLoginLog("");
+      setLoginUrl(null);
+      setAuthCode("");
+      setLoginStarted(true);
+      return api.claudeLogin();
+    },
+    onSuccess: (rr) => {
+      if (rr.url) setLoginUrl(rr.url);
+      if (rr.instructions) setLoginLog((s) => s + rr.instructions + "\n");
+    },
+    onError: (e: any) => {
+      setLoginStarted(false);
+      setLoginLog((s) => s + `Error: ${e?.message ?? e}\n`);
+    },
+  });
+
+  // Paste-back step: write the OAuth code to the held login process's stdin,
+  // then auto Re-check status when it completes.
+  const submitCode = useMutation({
+    mutationFn: () => api.claudeLoginSubmitCode(authCode),
+    onSuccess: (rr) => {
+      setLoginLog((s) => s + (rr.message ?? "Signed in.") + "\n");
+      setLoginStarted(false);
+      setAuthCode("");
+      setLoginUrl(null);
+      auth.refetch();
+    },
+    onError: (e: any) => setLoginLog((s) => s + `Error: ${e?.message ?? e}\n`),
+  });
+
+  const cancelLogin = useMutation({
+    mutationFn: api.claudeLoginCancel,
+    onSettled: () => {
+      setLoginStarted(false);
+      setAuthCode("");
+      setLoginUrl(null);
+    },
+  });
+
+  const logout = useMutation({
+    mutationFn: api.claudeLogout,
+    onSuccess: () => {
+      setTestResult(null);
+      auth.refetch();
+    },
+    onError: (e: any) => setTestResult(`❌ ${e?.message ?? e}`),
+  });
+
+  const test = useMutation({
+    mutationFn: api.testClaude,
+    onMutate: () => setTestResult(null),
+    onSuccess: (rr) => setTestResult(rr),
+    onError: (e: any) => setTestResult(`❌ ${e?.message ?? e}`),
+  });
 
   // pin a uv-managed Python so cryptography uses a prebuilt arm64 wheel (the
   // default x86_64 framework Python forces a source build that fails on Apple Silicon)
@@ -47,6 +129,112 @@ export function SettingsPage() {
       </div>
 
       <div className="grid2" style={{ alignItems: "start" }}>
+        <div>
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <h2 style={{ margin: 0 }}>Connect Claude account</h2>
+            {auth.data && (
+              <span className={`badge ${auth.data.api_key_set ? "error" : auth.data.logged_in ? "done" : "pending"}`}>
+                {auth.data.api_key_set
+                  ? "⚠ API key set — connectors off"
+                  : auth.data.logged_in
+                  ? `● connected${auth.data.account ? ` as ${auth.data.account}` : ""}${auth.data.subscription ? ` (${auth.data.subscription})` : ""}`
+                  : "⚠ not signed in"}
+              </span>
+            )}
+          </div>
+
+          <p className="faint" style={{ marginTop: 8 }}>
+            Sign in with your <b>claude.ai</b> account so Songsmith drives Claude through your subscription —
+            never an API key. Keep <code>ANTHROPIC_API_KEY</code> unset: the app strips it from Claude anyway,
+            and that strip is exactly what keeps your connectors loaded.
+          </p>
+
+          {auth.data?.connectors_hint && (
+            <div className={`banner ${auth.data.api_key_set ? "warn" : auth.data.logged_in ? "ok" : "warn"}`}>
+              {auth.data.connectors_hint}
+            </div>
+          )}
+
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button className="primary" disabled={login.isPending || loginStarted} onClick={() => login.mutate()}>
+              {login.isPending ? "Starting…" : loginStarted ? "Waiting for code…" : "Log in"}
+            </button>
+            {loginStarted && (
+              <button disabled={cancelLogin.isPending} onClick={() => cancelLogin.mutate()}>
+                Cancel
+              </button>
+            )}
+            {auth.data?.logged_in && !loginStarted && (
+              <button
+                className="ghost"
+                disabled={logout.isPending}
+                onClick={() => { if (window.confirm("Log out of your claude.ai account?")) logout.mutate(); }}
+              >
+                {logout.isPending ? "Logging out…" : "Log out"}
+              </button>
+            )}
+            <button disabled={auth.isFetching} onClick={() => auth.refetch()}>
+              {auth.isFetching ? "Checking…" : "Re-check"}
+            </button>
+            <button onClick={() => api.openUrl(auth.data?.connectors_url ?? "https://claude.ai/settings/connectors")}>
+              Connect tools ↗
+            </button>
+            <button disabled={test.isPending} onClick={() => test.mutate()}>
+              {test.isPending ? "Testing…" : "Test"}
+            </button>
+          </div>
+
+          {loginUrl && (
+            <div style={{ marginTop: 10 }}>
+              <label>Auth URL — open this if the browser didn't, then click Re-check</label>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <a href={loginUrl} target="_blank" rel="noreferrer" className="faint" style={{ wordBreak: "break-all", flex: 1 }}>
+                  {loginUrl}
+                </a>
+                <button onClick={() => api.openUrl(loginUrl)}>Open</button>
+              </div>
+            </div>
+          )}
+
+          {loginStarted && (
+            <div style={{ marginTop: 10 }}>
+              <label>Paste authentication code</label>
+              <p className="faint" style={{ marginTop: 4 }}>
+                Finish signing in in the browser, copy the <b>authentication code</b> claude.ai shows,
+                then paste it here.
+              </p>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <input
+                  value={authCode}
+                  onChange={(e) => setAuthCode(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && authCode.trim() && !submitCode.isPending) submitCode.mutate();
+                  }}
+                  placeholder="Authentication code from claude.ai"
+                  style={{ flex: 1 }}
+                  autoFocus
+                />
+                <button className="primary" disabled={!authCode.trim() || submitCode.isPending} onClick={() => submitCode.mutate()}>
+                  {submitCode.isPending ? "Submitting…" : "Submit"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {loginLog && (
+            <pre ref={logBoxRef} className="login-log">
+              {loginLog}
+            </pre>
+          )}
+
+          {testResult && (
+            <div className={`banner ${testResult.startsWith("✅") ? "ok" : "err"}`} style={{ marginTop: 10 }}>
+              {testResult}
+            </div>
+          )}
+        </div>
+
         <div className="card">
           <h2>Claude engine</h2>
           <p className="muted">A harness around Claude for songwriters. No local model — Claude works through the <code>claude</code> CLI and this app's MCP server.</p>
@@ -68,6 +256,7 @@ export function SettingsPage() {
             <button className="primary" onClick={() => save.mutate()}>Save</button>
             {saved && <span className="faint">{saved}</span>}
           </div>
+        </div>
         </div>
 
         <div>

@@ -14,6 +14,9 @@ struct AppState {
     db_path: String,
     /// stage ids with an in-flight run, to dedupe concurrent requests.
     inflight: Mutex<HashSet<String>>,
+    /// the live `claude auth login --claudeai` child, kept alive so its stdin
+    /// stays open for the pasted OAuth code (see `claude_login`).
+    login_child: Mutex<Option<std::process::Child>>,
 }
 
 type R<T> = Result<T, String>;
@@ -452,6 +455,299 @@ async fn claude_status(state: State<'_, AppState>) -> R<serde_json::Value> {
     .await
     .unwrap_or(None);
     Ok(serde_json::json!({ "found": found, "version": version, "model": s.claude_model, "bin": s.claude_bin }))
+}
+
+// ---- Connect Claude account (subscription auth — never an API key) ----------
+
+const CONNECTORS_URL: &str = "https://claude.ai/settings/connectors";
+
+/// Is an Anthropic API key / auth token present in the app's environment? A key
+/// forces API-billing mode and **disables connectors**, so we surface it as a
+/// warning. The app never sets one — it only ever strips it from spawned
+/// `claude` processes (which is exactly what keeps connectors enabled).
+fn api_key_in_env() -> bool {
+    std::env::var_os("ANTHROPIC_API_KEY").is_some() || std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some()
+}
+
+/// Read the subscription auth state from the CLI's own `claude auth status --json`
+/// (API key stripped so we report the *subscription* login, not an inherited key).
+#[tauri::command]
+async fn claude_auth_status(state: State<'_, AppState>) -> R<serde_json::Value> {
+    let s = db::get_settings(&state.conn).await.map_err(e2s)?;
+    let bin = find_claude();
+    let found = bin.is_some();
+    let bin_path = bin
+        .as_ref()
+        .map(|b| b.to_string_lossy().to_string())
+        .unwrap_or_else(|| s.claude_bin.clone());
+    let api_key_set = api_key_in_env();
+
+    // Probe the CLI's own auth status with the API key stripped, so we read the
+    // claude.ai **subscription** login rather than an inherited API key.
+    let probe = tokio::task::spawn_blocking(move || -> Option<serde_json::Value> {
+        let bin = bin?;
+        let out = std::process::Command::new(bin)
+            .args(["auth", "status", "--json"])
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .output()
+            .ok()?;
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).ok()
+    })
+    .await
+    .unwrap_or(None);
+
+    let logged_in = probe.as_ref().and_then(|v| v.get("loggedIn")).and_then(|v| v.as_bool()).unwrap_or(false);
+    let account = probe.as_ref().and_then(|v| {
+        v.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty())
+            .or_else(|| v.get("orgName").and_then(|o| o.as_str()).filter(|o| !o.is_empty()))
+            .map(|s| s.to_string())
+    });
+    let subscription = probe.as_ref().and_then(|v| v.get("subscriptionType")).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let connectors_hint = if api_key_set {
+        "An Anthropic API key is set in this app's environment — it forces API billing and turns OFF your connectors. Unset ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN; the app strips them from Claude anyway, which is what keeps your connectors available.".to_string()
+    } else if logged_in {
+        "Signed in on your subscription with no API key set — your connectors load automatically. Connect them on the claude.ai connectors page.".to_string()
+    } else {
+        "Sign in with your claude.ai account to use your subscription. Keep ANTHROPIC_API_KEY unset so your connectors load.".to_string()
+    };
+
+    Ok(serde_json::json!({
+        "found": found,
+        "bin": bin_path,
+        "logged_in": logged_in,
+        "account": account,
+        "subscription": subscription,
+        "api_key_set": api_key_set,
+        "connectors_hint": connectors_hint,
+        "connectors_url": CONNECTORS_URL,
+    }))
+}
+
+/// Scan a chunk of CLI output for the first `https://…` URL (the printed OAuth
+/// link), returning it trimmed at the first whitespace.
+fn extract_url(text: &str) -> Option<String> {
+    let idx = text.find("https://")?;
+    let url: String = text[idx..].split_whitespace().next().unwrap_or("").to_string();
+    if url.is_empty() { None } else { Some(url) }
+}
+
+/// Spawn the CLI subscription login (`claude auth login --claudeai`) and **stream**
+/// its stdout/stderr as `login_event` events so the UI can show the auth URL and
+/// progress, opening the browser when the URL is printed. The API key is stripped
+/// so this signs into the claude.ai subscription (not an API console).
+///
+/// The CLI's OAuth flow prints the auth URL, then the prompt `Paste code here if
+/// prompted > ` (no trailing newline) and **blocks reading the code on stdin**. So
+/// we spawn it with **stdin = piped** and keep the child alive in
+/// `AppState.login_child`; the user finishes in the browser, copies the code, and
+/// `claude_login_submit_code` writes it to that stdin to complete the flow — no
+/// terminal required.
+#[tauri::command]
+async fn claude_login(app: tauri::AppHandle, state: State<'_, AppState>) -> R<serde_json::Value> {
+    let claude = find_claude().ok_or("The `claude` CLI was not found. Install Claude Code first.")?;
+
+    // If a previous attempt is still around, kill it so we start clean.
+    if let Some(mut old) = state.login_child.lock().unwrap().take() {
+        let _ = old.kill();
+        let _ = old.wait();
+    }
+
+    let mut child = tokio::task::spawn_blocking(move || -> Result<std::process::Child, String> {
+        std::process::Command::new(&claude)
+            .args(["auth", "login", "--claudeai"])
+            // subscription login, never an API key
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            // piped stdin: the flow prints the URL then blocks on `Paste code here`
+            // — we keep the child alive and write the pasted code to this stdin.
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not start claude: {e}"))
+    })
+    .await
+    .map_err(e2s)??;
+
+    // Take stdout/stderr to stream; leave stdin attached on the child we hold.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Stream stdout in chunks (the "Paste code" prompt has no trailing newline,
+    // so line-buffered reads would never surface it; read raw bytes instead).
+    if let Some(mut out) = stdout {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 1024];
+            let mut found_url = false;
+            loop {
+                match out.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                        if !found_url {
+                            if let Some(url) = extract_url(&chunk) {
+                                found_url = true;
+                                let _ = open_url_inner(&url);
+                                let _ = app2.emit("login_event", serde_json::json!({ "url": url }));
+                            }
+                        }
+                        let _ = app2.emit("login_event", serde_json::json!({ "line": chunk.trim_end_matches('\n') }));
+                    }
+                }
+            }
+        });
+    }
+    // Stream stderr (extra hints / errors).
+    if let Some(mut err) = stderr {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 1024];
+            loop {
+                match err.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        let line = chunk.trim();
+                        if !line.is_empty() {
+                            let _ = app2.emit("login_event", serde_json::json!({ "line": line }));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Hold the live child so its stdin stays open for the pasted code.
+    *state.login_child.lock().unwrap() = Some(child);
+
+    Ok(serde_json::json!({
+        "url": null,
+        "instructions": "Finish signing in in the browser tab that opened, then paste the authentication code shown by claude.ai into the box below and click Submit. If no tab opened, copy the auth URL above into your browser first.",
+    }))
+}
+
+/// Write the pasted OAuth **authorization code** (+ newline) to the held login
+/// child's stdin, wait for it to exit, and emit `login_done` with success/failure.
+/// Clears the stored child either way (the attempt is over).
+#[tauri::command]
+async fn claude_login_submit_code(app: tauri::AppHandle, state: State<'_, AppState>, code: String) -> R<serde_json::Value> {
+    let mut child = state
+        .login_child
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("No login in progress. Click Log in first.")?;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        use std::io::Write;
+        {
+            let stdin = child.stdin.as_mut().ok_or("login process has no stdin")?;
+            stdin
+                .write_all(format!("{}\n", code.trim()).as_bytes())
+                .map_err(|e| format!("could not send code: {e}"))?;
+            stdin.flush().ok();
+        }
+        // Dropping stdin signals EOF after the code line; then wait for exit.
+        drop(child.stdin.take());
+        let status = child.wait().map_err(e2s)?;
+        Ok(status.success())
+    })
+    .await
+    .map_err(e2s)?;
+
+    let success = result?;
+    let _ = app.emit("login_done", serde_json::json!({ "success": success }));
+    if success {
+        Ok(serde_json::json!({ "success": true, "message": "Signed in. Re-checking status…" }))
+    } else {
+        Err("Login did not complete — the code may be wrong or expired. Click Log in to try again.".into())
+    }
+}
+
+/// Kill the held login child (so a stuck/abandoned attempt can be reset) and clear it.
+#[tauri::command]
+async fn claude_login_cancel(state: State<'_, AppState>) -> R<()> {
+    if let Some(mut child) = state.login_child.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Ok(())
+}
+
+/// Sign out of the claude.ai subscription via `claude auth logout` (API key
+/// stripped). The UI calls this then re-checks status.
+#[tauri::command]
+async fn claude_logout() -> R<()> {
+    let claude = find_claude().ok_or("The `claude` CLI was not found.")?;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let out = std::process::Command::new(&claude)
+            .args(["auth", "logout"])
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .output()
+            .map_err(|e| format!("could not start claude: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(if msg.is_empty() { "logout failed".into() } else { msg })
+        }
+    })
+    .await
+    .map_err(e2s)?
+}
+
+/// Open a URL in the user's default browser (auth URL, connectors page).
+fn open_url_inner(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let prog = "open";
+    #[cfg(target_os = "linux")]
+    let prog = "xdg-open";
+    #[cfg(target_os = "windows")]
+    let prog = "explorer";
+    std::process::Command::new(prog).arg(url).spawn().map(|_| ()).map_err(e2s)
+}
+
+#[tauri::command]
+fn open_url(url: String) -> R<()> {
+    open_url_inner(&url)
+}
+
+/// Test the live subscription path end-to-end: ask Claude for one word with the
+/// API key stripped. Success confirms the login + engine work; an auth error
+/// means the user needs to (re-)sign in.
+#[tauri::command]
+async fn test_claude(state: State<'_, AppState>) -> R<String> {
+    let claude = find_claude().ok_or("The `claude` CLI was not found. Install Claude Code and sign in.")?;
+    let _ = &state;
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let out = std::process::Command::new(&claude)
+            .args(["-p", "Reply with exactly: READY", "--max-turns", "1"])
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .output()
+            .map_err(|e| format!("could not start claude: {e}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if out.status.success() && !stdout.is_empty() {
+            Ok(format!("✅ Live Claude responded: {stdout}"))
+        } else {
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            let lower = msg.to_lowercase();
+            if lower.contains("login") || lower.contains("auth") || lower.contains("sign in") || lower.contains("unauthor") {
+                Err(format!("Not signed in — run Log in, then Re-check. ({msg})"))
+            } else {
+                Err(format!("Claude returned an error: {msg}"))
+            }
+        }
+    })
+    .await
+    .map_err(e2s)?
 }
 
 /// Write raw bytes (e.g. an exported PNG) to a user-chosen path.
@@ -960,7 +1256,7 @@ pub fn run() {
             std::mem::forget(database);
 
             ensure_claude_bin(&conn);
-            app.manage(AppState { conn, db_path: db_path_str, inflight: Mutex::new(HashSet::new()) });
+            app.manage(AppState { conn, db_path: db_path_str, inflight: Mutex::new(HashSet::new()), login_child: Mutex::new(None) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1006,6 +1302,13 @@ pub fn run() {
             mcp_config,
             mcp_setup_command,
             claude_status,
+            claude_auth_status,
+            claude_login,
+            claude_login_submit_code,
+            claude_login_cancel,
+            claude_logout,
+            open_url,
+            test_claude,
             detect_ableton_mcp,
             chat_send,
             write_png,
@@ -1017,4 +1320,27 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The login flow's load-bearing pure bit: pulling the OAuth URL out of the
+    // exact line `claude auth login --claudeai` prints (verified against the CLI).
+    #[test]
+    fn extracts_auth_url_from_cli_line() {
+        let line = "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=abc&state=xyz";
+        assert_eq!(
+            extract_url(line).as_deref(),
+            Some("https://claude.com/cai/oauth/authorize?code=true&client_id=abc&state=xyz"),
+        );
+    }
+
+    #[test]
+    fn extracts_url_stops_at_whitespace_and_handles_none() {
+        assert_eq!(extract_url("go to https://x.test/auth now").as_deref(), Some("https://x.test/auth"));
+        // The "Paste code here if prompted > " prompt carries no URL.
+        assert_eq!(extract_url("Paste code here if prompted > "), None);
+    }
 }

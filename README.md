@@ -89,6 +89,25 @@ make install
 The frontend also runs standalone in a browser against an in-memory mock (`npm run dev` in
 `frontend/`) for UI work without the backend.
 
+## Connecting your Claude account (in-app)
+
+Songsmith drives Claude through your **claude.ai subscription** — never an API key. Everything
+happens in **Settings → Connect Claude account**; no terminal required:
+
+- **Status** — a badge shows `● connected as <account> (<subscription>)`, `⚠ not signed in`, or
+  `⚠ API key set — connectors off`, plus a one-line hint about your connectors.
+- **Log in** — opens the claude.ai OAuth page in your browser and streams the CLI's progress into
+  a small log box. Finish signing in, copy the **authentication code** claude.ai shows, paste it
+  into the box, and click **Submit** — status re-checks automatically. (**Cancel** abandons a
+  stuck attempt.)
+- **Log out** — signs out of your claude.ai account (`claude auth logout`), then re-checks status.
+- **Re-check** re-reads the auth state; **Test** asks Claude to reply `READY` to confirm the live
+  path works end-to-end; **Connect tools ↗** opens the claude.ai connectors page.
+
+> Keep `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` **unset**. The app strips them from every
+> `claude` process it spawns — that strip is exactly what keeps your subscription login and
+> connectors active. Setting a key forces API billing and turns connectors off.
+
 ## Let Claude drive it (MCP)
 
 The **Chat** tab and the per-stage chats wire this automatically. To drive the harness from

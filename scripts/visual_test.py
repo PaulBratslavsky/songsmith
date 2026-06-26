@@ -25,8 +25,13 @@ PORT = 5173
 
 
 def port_open(p):
-    with socket.socket() as s:
-        return s.connect_ex(("127.0.0.1", p)) == 0
+    # Vite 6 binds the dev server to IPv6 loopback (::1) only, so probe both.
+    for host in ("127.0.0.1", "::1"):
+        fam = socket.AF_INET6 if ":" in host else socket.AF_INET
+        with socket.socket(fam) as s:
+            if s.connect_ex((host, p)) == 0:
+                return True
+    return False
 
 
 def main():
@@ -114,6 +119,15 @@ def main():
             # global chat terminal (docked, reachable from every page)
             pg.click("text=Chat with Claude"); pg.wait_for_timeout(500)
             pg.screenshot(path=f"{OUT}/terminal.png", full_page=True)
+
+            # Settings → Connect Claude account card: signed-in (mock starts signed
+            # in), then the Log-in / paste-code state after clicking Log in
+            pg.click(".nav >> text=Settings"); pg.wait_for_timeout(500)
+            pg.screenshot(path=f"{OUT}/connect-account.png", full_page=True)
+            login_btn = pg.locator("button:has-text('Log in')")
+            if login_btn.count() > 0:
+                login_btn.first.click(); pg.wait_for_timeout(500)  # reveals the paste-code input + auth URL
+                pg.screenshot(path=f"{OUT}/connect-account-paste-code.png", full_page=True)
             b.close()
         print(f"screenshots written to {OUT}")
         return 0

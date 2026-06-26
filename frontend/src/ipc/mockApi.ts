@@ -119,6 +119,8 @@ function seed(): Any {
     ],
     skills, progressions: [], renders: [],
     settings: { claude_model: "", claude_bin: "", mcp_token: "mock-token", ableton_mcp: "", music_folder: "", analyzer_cmd: "" },
+    // mock claude.ai subscription auth — starts signed in so the card looks real
+    auth: { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" },
   };
 }
 
@@ -250,6 +252,31 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
     case "list_tools": return r(MOCK_TOOLS);
     case "mcp_config": return r({ db_path: "(browser mock)", token: "mock-token", command_hint: "Run the Tauri app for a real MCP config." });
     case "claude_status": return r({ found: false, version: null, model: db.settings.claude_model, bin: "" });
+    case "claude_auth_status": {
+      if (!db.auth) db.auth = { logged_in: false, account: null, subscription: null };
+      const li = !!db.auth.logged_in;
+      return r({
+        found: true, bin: "/opt/homebrew/bin/claude",
+        logged_in: li, account: db.auth.account ?? null, subscription: db.auth.subscription ?? null,
+        api_key_set: false,
+        connectors_hint: li
+          ? "Signed in on your subscription with no API key set — your connectors load automatically."
+          : "Sign in with your claude.ai account to use your subscription. Keep ANTHROPIC_API_KEY unset so your connectors load.",
+        connectors_url: "https://claude.ai/settings/connectors",
+      });
+    }
+    case "claude_login":
+      return r({ url: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock",
+        instructions: "(mock) Finish signing in in the browser, then paste the code below and Submit." });
+    case "claude_login_submit_code":
+      db.auth = { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" };
+      return r({ success: true, message: "Signed in. Re-checking status…" });
+    case "claude_login_cancel": return r(undefined);
+    case "claude_logout":
+      db.auth = { logged_in: false, account: null, subscription: null };
+      return r(undefined);
+    case "open_url": return r(undefined);
+    case "test_claude": return r("✅ Live Claude responded: READY (mock)");
     case "detect_ableton_mcp": return r({ found: false });
     case "test_ableton": return r("(mock) Ableton test runs only in the desktop app.");
     case "reset_ableton": return r("(mock) reset runs only in the desktop app.");

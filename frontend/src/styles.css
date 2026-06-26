@@ -169,6 +169,7 @@ button.sm { padding: 3px 7px; font-size: 11px; }
 .badge.in_progress { color: var(--warn); border-color: #4a4226; }
 .badge.pending { color: var(--ink-faint); }
 .badge.published { color: var(--accent); border-color: var(--accent-dim); }
+.badge.error { color: var(--danger); border-color: #43292b; }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-faint); }
 .dot.done { background: var(--ok); }
@@ -210,6 +211,15 @@ button.sm { padding: 3px 7px; font-size: 11px; }
 .banner { padding: 9px 12px; border-radius: var(--r); border: 1px solid var(--line); font-size: 12px; margin-bottom: 12px; }
 .banner.warn { border-color: #4a4226; color: var(--warn); background: #1a160c; }
 .banner.err { border-color: #43292b; color: var(--danger); background: #1a0d0d; }
+.banner.ok { border-color: #294234; color: var(--ok); background: #0c1a12; }
+
+/* ---- streaming login log (Connect Claude account) ---- */
+.login-log {
+  margin-top: 10px; padding: 9px 11px; max-height: 180px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--paper-2); color: var(--ink-dim);
+}
 
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal { background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; width: 440px; max-width: 90vw; }
