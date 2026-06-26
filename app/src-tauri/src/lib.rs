@@ -881,8 +881,14 @@ async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<St
         let _ = ableton_cmd(&mut s, serde_json::json!({"type":"set_tempo","params":{"tempo": bpm as f64}}));
         let _ = ableton_cmd(&mut s, serde_json::json!({"type":"switch_to_arrangement_view","params":{}}));
 
-        // create the 6 tracks, capture their indices
+        // clear our previously-built tracks so re-running rebuilds cleanly instead
+        // of stacking duplicate track sets (needs the patched Remote Script)
         let track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp"];
+        let cleared = ableton_cmd(&mut s, serde_json::json!({"type":"clear_named_tracks","params":{"names": track_names}}))
+            .ok().and_then(|v| v.get("result").and_then(|r| r.get("deleted")).and_then(|n| n.as_i64())).unwrap_or(0);
+        nap();
+
+        // create the tracks fresh, capture their indices
         let mut tracks: Vec<i64> = Vec::new();
         for name in track_names {
             let ti = ableton_cmd(&mut s, serde_json::json!({"type":"create_midi_track","params":{"index":-1}}))
@@ -893,7 +899,7 @@ async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<St
             nap();
         }
 
-        let mut log = vec![format!("tempo {bpm} BPM · {} feel · {} sections × up to {} tracks (density per section)", if groove { "rhythmic groove" } else { "sustained" }, sections.len(), track_names.len())];
+        let mut log = vec![format!("{}tempo {bpm} BPM · {} feel · {} sections × up to {} tracks (density per section)", if cleared > 0 { format!("cleared {cleared} old tracks · ") } else { String::new() }, if groove { "rhythmic groove" } else { "sustained" }, sections.len(), track_names.len())];
         let mut bar = 1i64;
         for (i, (label, bars, chords)) in sections.iter().enumerate() {
             let ci = i as i64;
