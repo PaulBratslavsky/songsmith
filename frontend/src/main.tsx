@@ -37,7 +37,7 @@ function Shell() {
         <nav className="nav">
           <Link to="/" className={is("/") ? "active" : ""}>Library</Link>
           <Link to="/presets" className={is("/presets") ? "active" : ""}>Style presets</Link>
-          <Link to="/builder" className={is("/builder") ? "active" : ""}>Builder</Link>
+          <Link to="/builder" className={is("/builder") ? "active" : ""}>Chord Builder</Link>
           <Link to="/skills" className={is("/skills") ? "active" : ""}>Skills</Link>
           <Link to="/settings" className={is("/settings") ? "active" : ""}>Settings</Link>
         </nav>
