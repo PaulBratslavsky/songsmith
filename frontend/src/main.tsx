@@ -18,6 +18,7 @@ import { Presets } from "./routes/Presets";
 import { SongWorkspace } from "./routes/SongWorkspace";
 import { Skills } from "./routes/Skills";
 import { Builder } from "./routes/Builder";
+import { ComposerRoute } from "./routes/ComposerRoute";
 import { SettingsPage } from "./routes/Settings";
 import { GlobalTerminal } from "./components/GlobalTerminal";
 import { FieldDrawerProvider } from "./components/FieldDrawer";
@@ -38,6 +39,7 @@ function Shell() {
           <Link to="/" className={is("/") ? "active" : ""}>Library</Link>
           <Link to="/presets" className={is("/presets") ? "active" : ""}>Style presets</Link>
           <Link to="/builder" className={is("/builder") ? "active" : ""}>Chord Builder</Link>
+          <Link to="/composer" className={is("/composer") ? "active" : ""}>Composer</Link>
           <Link to="/skills" className={is("/skills") ? "active" : ""}>Skills</Link>
           <Link to="/settings" className={is("/settings") ? "active" : ""}>Settings</Link>
         </nav>
@@ -64,9 +66,10 @@ const presetsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/pres
 const songRoute = createRoute({ getParentRoute: () => rootRoute, path: "/song/$id", component: SongWorkspace });
 const skillsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/skills", component: Skills });
 const builderRoute = createRoute({ getParentRoute: () => rootRoute, path: "/builder", component: Builder });
+const composerRoute = createRoute({ getParentRoute: () => rootRoute, path: "/composer", component: ComposerRoute });
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage });
 
-const routeTree = rootRoute.addChildren([indexRoute, presetsRoute, songRoute, skillsRoute, builderRoute, settingsRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, presetsRoute, songRoute, skillsRoute, builderRoute, composerRoute, settingsRoute]);
 const router = createRouter({ routeTree });
 declare module "@tanstack/react-router" {
   interface Register {

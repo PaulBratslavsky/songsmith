@@ -38,6 +38,10 @@ The output feeds a real pipeline:
   progression straight into a song section.
 - **Absolute-chord composer** — the Chords stage stores real chord names per section (never
   collapsed to scale degrees), editable by hand, by palette, by import, or by chat.
+- **Composer** (dedicated tab) — a Hookpad-style 8-bar **visual sketchpad**: drag chord blocks,
+  melody, and bass notes onto a shared scale-degree grid and loop it through the per-voice synth;
+  change the key and everything transposes. Degree-based + key-relative (in-memory for now;
+  persistence + song import/export are upcoming phases). See `docs/COMPOSER-SPEC.md`.
 - **Suno-accurate prompts** — the Generation Prompt stage follows current best practice: key +
   tempo in the **style** line, chords as `[Am]` tags **inline in the lyrics** (not sung).
 - **Final renders** — reference your generated audio versions on disk (multiple takes), play
@@ -59,10 +63,10 @@ songsmith-studio/
 ├── app/src-tauri/        # Tauri v2 shell — IPC commands, chat_send, dialog/opener plugins
 ├── frontend/             # React + TanStack, single styles.css
 │   └── src/
-│       ├── routes/       # /, /presets, /song/$id, /builder, /skills, /chat, /settings
+│       ├── routes/       # /, /presets, /song/$id, /builder, /composer, /skills, /chat, /settings
 │       ├── components/   # StageChecklist, Composer, StageChat, ChordBuilder, GuitarView,
-│       │                 #   FinalRenders, ChatPanel, …
-│       ├── lib/music/    # ported music-kb engine (theory, voicings, instruments) + tonal
+│       │                 #   FinalRenders, ChatPanel, compose/ (visual Composer), …
+│       ├── lib/music/    # ported music-kb engine (theory, voicings, instruments, compose) + tonal
 │       └── ipc/          # typed bindings + generated/ types (ts-rs) + mockApi.ts
 └── mcp-shim/             # stdio MCP server over the shared DB (server name: "songsmith")
 ```

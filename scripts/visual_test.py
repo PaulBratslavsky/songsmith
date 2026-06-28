@@ -58,6 +58,16 @@ def main():
             pg.click("text=Builder"); pg.wait_for_timeout(600)
             pg.screenshot(path=f"{OUT}/builder.png", full_page=True)
 
+            # Composer: the Hookpad-style visual sketchpad (melody + chords +
+            # bass lanes over a shared 8-bar grid, palette chips, transport).
+            pg.click(".nav >> text=Composer"); pg.wait_for_timeout(700)
+            pg.screenshot(path=f"{OUT}/composer.png", full_page=True)
+            # select the first chord block → shades its triad tones in the melody grid
+            block = pg.locator(".main [aria-label='Remove chord']")
+            if block.count() > 0:
+                block.first.locator("xpath=..").click(); pg.wait_for_timeout(300)
+                pg.screenshot(path=f"{OUT}/composer-chord-selected.png", full_page=True)
+
             pg.click("text=Library"); pg.wait_for_timeout(300)
             pg.click("text=Cyber Dreams"); pg.wait_for_timeout(500)
             pg.click("text=Builder / manage"); pg.wait_for_timeout(700)

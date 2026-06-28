@@ -3,6 +3,22 @@
 This file is the **source of truth** for what "the Composer" means in Songsmith, so it survives
 across sessions / context resets. If a future session is unsure what the Composer is, read THIS.
 
+## Status
+- **Phase 1 (engine port) — DONE.** Ported to `frontend/src/lib/music/compose/`
+  ({types,spans,playback,labels,colors,schema,useCompositionState,useCompositionPlayback}.ts).
+  `playback.ts` wires degree→MIDI + diatonic-triad resolution to Songsmith's existing theory
+  engine (`lib/music/theory/*`) — no theory duplicated. `synth.ts` (`frontend/src/music/synth.ts`)
+  gained selectable voices (piano/string/bass) as a `synth` object; old call sites unchanged.
+- **Phase 2 (visual builder UI) — DONE.** New surface under `frontend/src/components/compose/`
+  ({Composer,ChordLane,NoteLane,ChordPalette,BeatRuler}.tsx + {useSpanDrag,laneLayout,chordHighlight}.ts),
+  rebuilt with Songsmith's plain-CSS dark neon-green aesthetic (no Tailwind). Route `/composer`
+  (`routes/ComposerRoute.tsx`) + sidebar **Composer** nav link. Composition is **in-memory** (seeded
+  with a demo sketch); `schema.ts`'s zod + `parseStoredComposition`/`reidentify` are kept as the
+  load seam but no Strapi/network code exists.
+- **Phase 3 (persistence) — NOT STARTED.** libSQL `composition` table + mcp-shim tools.
+- **Phase 4 (song import/export) — NOT STARTED.** Degree↔absolute chord mapping bidirectional with
+  a song's Chords stage.
+
 ## What it is
 A **visual melody + chords + bass sketchpad** — a Hookpad-style 8-bar grid where you lay down a
 chord progression, a melody, and a bassline visually (drag blocks/notes), and loop it back through
