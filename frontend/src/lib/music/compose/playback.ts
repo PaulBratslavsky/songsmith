@@ -10,7 +10,8 @@ import type { Note, PitchClass, ScaleSelection, ScaleType } from '../types';
 import { midiFromNote, notesAscending } from '../theory/notes';
 import { getScalePitchClasses } from '../theory/scales';
 import { getDiatonicChords } from '../theory/diatonic';
-import type { Composition, Degree, KeyMode } from './types';
+import { parseChordSymbol } from '../theory/parse-chord';
+import type { ChordSpan, Composition, Degree, KeyMode } from './types';
 import { TICKS_PER_BEAT, TOTAL_TICKS } from './types';
 
 // Octave bands per track. Chords in the middle, melody on top, bass
@@ -88,6 +89,25 @@ export function resolveChordMidis(
   return notesAscending(pcs, CHORD_OCTAVE).map(midiFromNote);
 }
 
+/**
+ * MIDI for an absolute chord *name* (imported songs), e.g. "Am", "Bb",
+ * "Dm7" — parsed to its pitch classes and voiced from CHORD_OCTAVE. Falls
+ * back to the degree-based triad when the name can't be parsed, so a
+ * malformed/empty name still sounds something in the right key.
+ */
+export function resolveNamedChordMidis(
+  comp: Composition,
+  span: ChordSpan,
+): number[] {
+  if (span.name) {
+    const parsed = parseChordSymbol(span.name);
+    if (parsed && parsed.pitchClasses.length) {
+      return notesAscending(parsed.pitchClasses, CHORD_OCTAVE).map(midiFromNote);
+    }
+  }
+  return resolveChordMidis(comp, span.degree, span.seventh);
+}
+
 /** One tick's worth of notes to fire, with each layer's sustain in ticks. */
 export type StepEvent = {
   step: number;
@@ -117,7 +137,7 @@ export function buildSchedule(comp: Composition): StepEvent[] {
   };
 
   for (const span of comp.chords) {
-    const midis = resolveChordMidis(comp, span.degree, span.seventh);
+    const midis = resolveNamedChordMidis(comp, span);
     if (midis.length) {
       const e = ensure(span.start);
       e.chord = midis;

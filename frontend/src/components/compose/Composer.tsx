@@ -18,13 +18,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { PITCH_CLASSES, type PitchClass } from '../../lib/music/types';
 import {
   DURATIONS,
-  TOTAL_TICKS,
   emptyComposition,
   type Composition,
   type Degree,
   type KeyMode,
 } from '../../lib/music/compose/types';
-import { LABEL_W } from './laneLayout';
+import { LABEL_W, BAR_MIN_PX } from './laneLayout';
 import { useCompositionState } from '../../lib/music/compose/useCompositionState';
 import { useCompositionPlayback } from '../../lib/music/compose/useCompositionPlayback';
 import { synth } from '../../music/synth';
@@ -46,6 +45,8 @@ import { BeatRuler } from './BeatRuler';
 import { ChordPalette } from './ChordPalette';
 import { ChordLane } from './ChordLane';
 import { NoteLane } from './NoteLane';
+import { SectionBand } from './SectionBand';
+import { LyricRow } from './LyricRow';
 
 const MELODY_COLOR = '#2563eb';
 const BASS_COLOR = '#9333ea';
@@ -76,14 +77,33 @@ function demoComposition(id: string): Composition {
   return c;
 }
 
-export function Composer({ initialRoot = 'C' }: { initialRoot?: PitchClass }) {
+export function Composer({
+  initialRoot = 'C',
+  initial,
+}: {
+  initialRoot?: PitchClass;
+  /** A full-song (or any) Composition to seed/load — full-song import.
+   *  When absent, the blank-sketch demo is used (unchanged behavior). */
+  initial?: Composition | null;
+}) {
   // Composition + edit state (comp, cursor, selected) live in the reducer;
-  // only ephemeral UI stays local here. Seeded with a small demo sketch.
+  // only ephemeral UI stays local here. Seeded with the supplied initial
+  // composition (full-song import) or a small demo sketch.
   const { comp, cursor, selected, actions } = useCompositionState(
     initialRoot,
-    demoComposition,
+    initial ? () => initial : demoComposition,
   );
   const selectedId = selected?.id ?? null; // for lane render (selection ring)
+
+  // If the imported composition changes (navigating to a different song,
+  // or the song's chords/lyrics load in), load it into the editor.
+  const loadedId = useRef<string | null>(initial?.id ?? null);
+  useEffect(() => {
+    if (initial && initial.id !== loadedId.current) {
+      loadedId.current = initial.id;
+      actions.load(initial);
+    }
+  }, [initial, actions]);
 
   const [muted, setMuted] = useState(false);
   const [durTicks, setDurTicks] = useState(4); // default 1/4 note
@@ -366,9 +386,10 @@ export function Composer({ initialRoot = 'C' }: { initialRoot?: PitchClass }) {
           : `Click a beat in the chord lane to set where the next chord lands, then a palette chip. "7th" ${seventhMode ? 'is on — new chords are sevenths.' : 'makes new chords sevenths.'} Click melody/bass cells to add notes at the chosen duration.`}
       </p>
 
-      {/* Timeline */}
+      {/* Timeline — horizontally scrollable; long (full-song) compositions
+          get a wide track so sections/chords stay legible. */}
       <div className="card" style={{ overflowX: 'auto' }}>
-        <div style={{ position: 'relative', minWidth: 820 }}>
+        <div style={{ position: 'relative', minWidth: Math.max(820, comp.bars * BAR_MIN_PX) }}>
           {/* Moving playhead — spans all lanes at the current tick. The
               track starts after the LABEL_W gutter, so offset by it. */}
           {currentStep != null && (
@@ -382,17 +403,19 @@ export function Composer({ initialRoot = 'C' }: { initialRoot?: PitchClass }) {
                 width: 2,
                 background: 'var(--accent)',
                 opacity: 0.7,
-                left: `calc(${LABEL_W} + (100% - ${LABEL_W}) * ${(currentStep + 0.5) / TOTAL_TICKS})`,
+                left: `calc(${LABEL_W} + (100% - ${LABEL_W}) * ${(currentStep + 0.5) / comp.totalTicks})`,
               }}
             />
           )}
-          <BeatRuler />
+          <SectionBand sections={comp.sections} totalTicks={comp.totalTicks} />
+          <BeatRuler bars={comp.bars} totalTicks={comp.totalTicks} />
           <div style={{ marginTop: 4 }}>
             <NoteLane
               lane="melody"
               notes={comp.melody}
               pcs={pcs}
               color={MELODY_COLOR}
+              totalTicks={comp.totalTicks}
               highlight={melodyHighlight}
               selectedId={selectedId}
               {...melodyHandlers}
@@ -402,16 +425,19 @@ export function Composer({ initialRoot = 'C' }: { initialRoot?: PitchClass }) {
             <ChordLane
               chords={comp.chords}
               labels={labels}
+              totalTicks={comp.totalTicks}
               selectedId={selectedId}
               cursor={cursor}
               {...chordHandlers}
             />
           </div>
+          <LyricRow lyrics={comp.lyrics} totalTicks={comp.totalTicks} />
           <NoteLane
             lane="bass"
             notes={comp.bass}
             pcs={pcs}
             color={BASS_COLOR}
+            totalTicks={comp.totalTicks}
             selectedId={selectedId}
             {...bassHandlers}
           />

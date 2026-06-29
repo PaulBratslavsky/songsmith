@@ -22,7 +22,6 @@ import {
 } from './spans';
 import {
   DEFAULT_CHORD_TICKS,
-  TOTAL_TICKS,
   emptyComposition,
   type Composition,
   type Degree,
@@ -69,6 +68,7 @@ type Action =
 
 function reducer(s: EditorState, a: Action): EditorState {
   const { comp } = s;
+  const tt = comp.totalTicks;
   switch (a.type) {
     case 'setKeyRoot':
       return { ...s, comp: { ...comp, key: { ...comp.key, root: a.root } } };
@@ -92,17 +92,17 @@ function reducer(s: EditorState, a: Action): EditorState {
       if (s.selected?.kind === 'chord') {
         return { ...s, comp: { ...comp, chords: setChordDegree(comp.chords, s.selected.id, a.degree) } };
       }
-      const chords = addChord(comp.chords, a.newId, a.degree, s.cursor, DEFAULT_CHORD_TICKS, a.seventh);
+      const chords = addChord(comp.chords, a.newId, a.degree, s.cursor, DEFAULT_CHORD_TICKS, a.seventh, tt);
       const placed = spanAt(chords, s.cursor);
       const cursor = placed
-        ? Math.min(placed.start + placed.length, TOTAL_TICKS - 1)
+        ? Math.min(placed.start + placed.length, tt - 1)
         : s.cursor;
       return { ...s, comp: { ...comp, chords }, cursor };
     }
     case 'moveChord':
-      return { ...s, comp: { ...comp, chords: moveSpan(comp.chords, a.id, a.start) } };
+      return { ...s, comp: { ...comp, chords: moveSpan(comp.chords, a.id, a.start, tt) } };
     case 'resizeChord':
-      return { ...s, comp: { ...comp, chords: resizeSpan(comp.chords, a.id, a.length) } };
+      return { ...s, comp: { ...comp, chords: resizeSpan(comp.chords, a.id, a.length, tt) } };
     case 'setSeventh':
       return { ...s, comp: { ...comp, chords: setChordSeventh(comp.chords, a.id, a.seventh) } };
     case 'removeChord':
@@ -114,20 +114,20 @@ function reducer(s: EditorState, a: Action): EditorState {
 
     case 'placeNote': {
       const cell: NoteSpan = { id: a.newId, degree: a.degree, octave: 0, start: a.tick, length: a.length };
-      return { ...s, comp: { ...comp, [a.lane]: addNote(comp[a.lane], cell.id, cell.degree, cell.octave, cell.start, cell.length) } };
+      return { ...s, comp: { ...comp, [a.lane]: addNote(comp[a.lane], cell.id, cell.degree, cell.octave, cell.start, cell.length, tt) } };
     }
     case 'moveNote':
       return {
         ...s,
         comp: {
           ...comp,
-          [a.lane]: moveSpan(comp[a.lane], a.id, a.start).map((n) =>
+          [a.lane]: moveSpan(comp[a.lane], a.id, a.start, tt).map((n) =>
             n.id === a.id ? { ...n, degree: a.degree } : n,
           ),
         },
       };
     case 'resizeNote':
-      return { ...s, comp: { ...comp, [a.lane]: resizeSpan(comp[a.lane], a.id, a.length) } };
+      return { ...s, comp: { ...comp, [a.lane]: resizeSpan(comp[a.lane], a.id, a.length, tt) } };
     case 'removeNote':
       return {
         ...s,

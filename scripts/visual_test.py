@@ -58,8 +58,9 @@ def main():
             pg.click("text=Builder"); pg.wait_for_timeout(600)
             pg.screenshot(path=f"{OUT}/builder.png", full_page=True)
 
-            # Composer: the Hookpad-style visual sketchpad (melody + chords +
-            # bass lanes over a shared 8-bar grid, palette chips, transport).
+            # Composer (blank sketch): the Hookpad-style visual sketchpad
+            # (melody + chords + bass lanes over a shared 8-bar grid, palette
+            # chips, transport). MUST still render unchanged with no ?song.
             pg.click(".nav >> text=Composer"); pg.wait_for_timeout(700)
             pg.screenshot(path=f"{OUT}/composer.png", full_page=True)
             # select the first chord block → shades its triad tones in the melody grid
@@ -76,6 +77,15 @@ def main():
             # workspace: stage nav now lives in the sidebar (.song-nav), editor full-width
             pg.click("button:has-text('Workspace')"); pg.wait_for_timeout(500)
             pg.screenshot(path=f"{OUT}/workspace.png", full_page=True)
+
+            # Full-song export → Composer: "Open in Composer" loads the WHOLE
+            # song as one long, scrollable, multi-section timeline — labeled
+            # section band, the real named chords on the chord lane, the lyric
+            # line under each chord, melody + bass lanes spanning the song.
+            pg.click("button:has-text('Open in Composer')"); pg.wait_for_timeout(900)
+            pg.screenshot(path=f"{OUT}/composer-fullsong.png", full_page=True)
+            # back to the song to continue the rest of the captures
+            pg.go_back(); pg.wait_for_timeout(500)
 
             # Chords stage = per-section progressions with section add/remove/reorder
             pg.click(".song-nav >> text=Chords"); pg.wait_for_timeout(500)

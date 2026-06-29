@@ -127,6 +127,7 @@ export function SongWorkspace() {
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
+          <button onClick={() => nav({ to: "/composer", search: { song: id } })} title="Open the whole song in the visual Composer — every section on one timeline, chords synced to the lyrics, melody + bass editable across the song">🎹 Open in Composer</button>
           <button onClick={buildAbleton} disabled={!allStagesDone} title={allStagesDone ? "Stub the whole song in Ableton — a named Sections clip track + Bass/Chords/Melody/Filler/Arp MIDI parts from your progression (direct, no chat)" : "Complete every song-spec stage first (Concept → Generation Prompt)"}>⚡ Build in Ableton</button>
           {v.status !== "done" ? (
             <button className="primary" onClick={() => setStatus.mutate("done")}>Mark done</button>

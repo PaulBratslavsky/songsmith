@@ -2,28 +2,48 @@
 // persistence (libSQL `composition` table via the mcp-shim CRUD pattern) —
 // NOT wired to any network/Strapi code yet. The lenient read path
 // (parseStoredComposition) + reidentify are the seams the persistence
-// layer will load through.
+// layer will load through. compositionFromSong (the song→Composition
+// builder) also runs its output through parseStoredComposition so the
+// invariants hold for imported songs too.
 
 import { z } from 'zod';
 import type { Composition } from './types';
-import { SCHEMA_VERSION, TOTAL_TICKS } from './types';
+import {
+  DEFAULT_BARS,
+  DEFAULT_TOTAL_TICKS,
+  MAX_TOTAL_TICKS,
+  SCHEMA_VERSION,
+  TICKS_PER_BAR,
+} from './types';
 
 const DegreeSchema = z.number().int().min(1).max(7);
 
 const SpanBase = {
   id: z.string().min(1).max(64),
   degree: DegreeSchema,
-  start: z.number().int().min(0).max(TOTAL_TICKS - 1),
-  length: z.number().int().min(1).max(TOTAL_TICKS),
+  start: z.number().int().min(0).max(MAX_TOTAL_TICKS - 1),
+  length: z.number().int().min(1).max(MAX_TOTAL_TICKS),
 };
 
 const ChordSpanSchema = z.object({
   ...SpanBase,
   seventh: z.boolean(),
+  name: z.string().min(1).max(32).optional(),
 });
 const NoteSpanSchema = z.object({
   ...SpanBase,
   octave: z.union([z.literal(0), z.literal(1)]),
+});
+
+const SectionSchema = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(120),
+  startTick: z.number().int().min(0).max(MAX_TOTAL_TICKS),
+  lengthTicks: z.number().int().min(1).max(MAX_TOTAL_TICKS),
+});
+const LyricLineSchema = z.object({
+  tick: z.number().int().min(0).max(MAX_TOTAL_TICKS),
+  text: z.string().max(400),
 });
 
 // Lenient chord schema for stored rows: v1 rows have no `seventh`, so
@@ -31,6 +51,7 @@ const NoteSpanSchema = z.object({
 const StoredChordSpanSchema = z.object({
   ...SpanBase,
   seventh: z.boolean().default(false),
+  name: z.string().min(1).max(32).optional(),
 });
 
 /**
@@ -46,30 +67,42 @@ export const CompositionSchema = z.object({
     mode: z.enum(['major', 'minor']),
   }),
   bpm: z.number().int().min(20).max(400),
-  chords: z.array(ChordSpanSchema).max(64),
-  melody: z.array(NoteSpanSchema).max(512),
-  bass: z.array(NoteSpanSchema).max(512),
+  bars: z.number().int().min(1).max(MAX_TOTAL_TICKS / TICKS_PER_BAR),
+  totalTicks: z.number().int().min(TICKS_PER_BAR).max(MAX_TOTAL_TICKS),
+  chords: z.array(ChordSpanSchema).max(2048),
+  melody: z.array(NoteSpanSchema).max(8192),
+  bass: z.array(NoteSpanSchema).max(8192),
+  sections: z.array(SectionSchema).max(256),
+  lyrics: z.array(LyricLineSchema).max(2048),
 });
 
 // Lenient variant for reading stored rows: pre-versioning rows (saved
-// before `version` existed) are missing the field, so default it.
+// before `version` existed) are missing the field, so default it. v1/v2
+// rows have no length/sections/lyrics, so default to an 8-bar sketch with
+// no sections/lyrics.
 const StoredCompositionSchema = CompositionSchema.extend({
   version: z.number().int().default(SCHEMA_VERSION),
-  chords: z.array(StoredChordSpanSchema).max(64),
+  bars: z.number().int().min(1).max(MAX_TOTAL_TICKS / TICKS_PER_BAR).default(DEFAULT_BARS),
+  totalTicks: z.number().int().min(TICKS_PER_BAR).max(MAX_TOTAL_TICKS).default(DEFAULT_TOTAL_TICKS),
+  chords: z.array(StoredChordSpanSchema).max(2048),
+  sections: z.array(SectionSchema).max(256).default([]),
+  lyrics: z.array(LyricLineSchema).max(2048).default([]),
 });
 
 /**
- * Validate + migrate a Composition read from storage. Returns null when
- * the blob can't be coerced into the current shape (so callers can drop
- * the row instead of crashing the editor). Add migration branches here
- * keyed on the parsed `version` as the shape evolves.
+ * Validate + migrate a Composition read from storage (or built by
+ * compositionFromSong). Returns null when the blob can't be coerced into
+ * the current shape (so callers can drop the row instead of crashing the
+ * editor). Add migration branches here keyed on the parsed `version`.
  */
 export function parseStoredComposition(raw: unknown): Composition | null {
   const result = StoredCompositionSchema.safeParse(raw);
   if (!result.success) return null;
   const parsed = result.data;
-  // Future: if (parsed.version < SCHEMA_VERSION) migrate step-by-step.
-  return { ...parsed, version: SCHEMA_VERSION } as Composition;
+  // Keep totalTicks consistent with bars (older rows or hand-built blobs
+  // might disagree); bars is the source of truth.
+  const totalTicks = parsed.bars * TICKS_PER_BAR;
+  return { ...parsed, totalTicks, version: SCHEMA_VERSION } as Composition;
 }
 
 let loadIdCounter = 0;
@@ -78,6 +111,8 @@ let loadIdCounter = 0;
  * Fresh span/note ids for a composition loaded from storage, so they
  * can't collide with ids minted later in an editing session. Phase 3's
  * load path runs stored rows through parseStoredComposition then this.
+ * Sections/lyrics carry no editable ids that collide, but section ids are
+ * reminted too for tidiness.
  */
 export function reidentify(comp: Composition): Composition {
   const mint = (prefix: string) => `${prefix}-load-${(loadIdCounter += 1)}`;
@@ -86,5 +121,6 @@ export function reidentify(comp: Composition): Composition {
     chords: comp.chords.map((s) => ({ ...s, id: mint('span') })),
     melody: comp.melody.map((n) => ({ ...n, id: mint('note') })),
     bass: comp.bass.map((n) => ({ ...n, id: mint('note') })),
+    sections: comp.sections.map((sec) => ({ ...sec, id: mint('sec') })),
   };
 }

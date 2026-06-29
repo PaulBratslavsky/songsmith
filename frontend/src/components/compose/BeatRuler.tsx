@@ -1,15 +1,16 @@
-// The bar-number header row above the lanes. Eight bar labels, each
-// spanning its 16 ticks, aligned to the shared track grid.
+// The bar-number header row above the lanes. One label per bar, each
+// spanning its 16 ticks, aligned to the shared track grid. Bar count is
+// per-composition (variable length), so it's passed in.
 
-import { BARS, TICKS_PER_BAR } from '../../lib/music/compose/types';
-import { LABEL_W, TRACK_COLS } from './laneLayout';
+import { TICKS_PER_BAR } from '../../lib/music/compose/types';
+import { LABEL_W, trackCols } from './laneLayout';
 
-export function BeatRuler() {
+export function BeatRuler({ bars, totalTicks }: { bars: number; totalTicks: number }) {
   return (
     <div style={{ display: 'flex', alignItems: 'flex-end' }}>
       <div style={{ width: LABEL_W, flexShrink: 0 }} />
-      <div style={{ display: 'grid', flex: 1, gridTemplateColumns: TRACK_COLS }}>
-        {Array.from({ length: BARS }, (_, bar) => (
+      <div style={{ display: 'grid', flex: 1, gridTemplateColumns: trackCols(totalTicks) }}>
+        {Array.from({ length: bars }, (_, bar) => (
           <div
             key={bar}
             style={{

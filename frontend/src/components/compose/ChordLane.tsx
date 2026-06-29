@@ -11,15 +11,15 @@
 
 import { memo, useRef } from 'react';
 import type { ChordSpan } from '../../lib/music/compose/types';
-import { TOTAL_TICKS } from '../../lib/music/compose/types';
 import type { DegreeLabel } from '../../lib/music/compose/labels';
 import { degreeColor } from '../../lib/music/compose/colors';
-import { LABEL_W, TRACK_COLS, isBarStart, isBeatStart } from './laneLayout';
+import { LABEL_W, trackCols, isBarStart, isBeatStart } from './laneLayout';
 import { useSpanDrag } from './useSpanDrag';
 
 function ChordLaneImpl({
   chords,
   labels,
+  totalTicks,
   selectedId,
   cursor,
   onSelect,
@@ -31,6 +31,7 @@ function ChordLaneImpl({
   chords: ChordSpan[];
   /** Triad + seventh labels per diatonic degree for the current key. */
   labels: Record<number, DegreeLabel>;
+  totalTicks: number;
   selectedId: string | null;
   cursor: number;
   onSelect: (id: string | null) => void;
@@ -42,10 +43,11 @@ function ChordLaneImpl({
   const trackRef = useRef<HTMLDivElement>(null);
   const { begin, onPointerMove, onPointerUp } = useSpanDrag({
     trackRef,
-    totalTicks: TOTAL_TICKS,
+    totalTicks,
     onMove: (id, start) => onMove(id, start),
     onResize,
   });
+  const TRACK_COLS = trackCols(totalTicks);
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: 56 }}>
@@ -72,7 +74,7 @@ function ChordLaneImpl({
           ref={trackRef}
           style={{ display: 'grid', height: '100%', gridTemplateColumns: TRACK_COLS }}
         >
-          {Array.from({ length: TOTAL_TICKS }, (_, step) => {
+          {Array.from({ length: totalTicks }, (_, step) => {
             const isCursor = step === cursor && selectedId == null;
             return (
               <button
@@ -118,6 +120,11 @@ function ChordLaneImpl({
               : undefined;
             const selected = span.id === selectedId;
             const color = degreeColor(span.degree);
+            // Imported chords print their absolute name (e.g. "Am"); the
+            // roman numeral becomes the subtitle. Blank sketches stay
+            // degree-based (roman on top, chord name below).
+            const titleText = span.name ?? label?.roman ?? String(span.degree);
+            const subText = span.name ? (label?.roman ?? '') : (label?.name ?? '');
             return (
               <div
                 key={span.id}
@@ -147,10 +154,10 @@ function ChordLaneImpl({
                 }}
               >
                 <span style={{ fontSize: 13, fontWeight: 700, lineHeight: 1 }}>
-                  {label?.roman ?? span.degree}
+                  {titleText}
                 </span>
                 <span style={{ fontSize: 10, lineHeight: 1.1, opacity: 0.9 }}>
-                  {label?.name ?? ''}
+                  {subText}
                 </span>
                 {/* Clear button — top-left so it never sits under the
                     right-edge resize handle. */}

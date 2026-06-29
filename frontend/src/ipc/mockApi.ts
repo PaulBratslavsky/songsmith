@@ -52,12 +52,15 @@ function seed(): Any {
     id: uid(), song_id: songId, stage_id: stageOf(stageType).id, kind,
     content: JSON.stringify({ kind, text: "", data }), version: 1, approved: true, created_at: ts,
   });
+  // chords carry explicit per-chord beats so the Composer lays them out at
+  // the right widths (full-song export). Strings still work (default 4 beats).
+  const ch = (name: string, beats = 4) => ({ name, beats });
   const chordsData = {
     sections: [
-      { label: "Intro", chords: ["Am", "Am", "F", "F"] },
-      { label: "Verse 1", chords: ["Dm", "Bb", "F", "Am", "Dm", "Bb", "F", "Am"] },
-      { label: "Pre-Chorus / Build 1", chords: ["Dm", "Em", "F", "G"] },
-      { label: "Chorus 1", chords: ["C", "G", "Am", "F", "C", "G", "Am", "F"] },
+      { label: "Intro", chords: [ch("Am"), ch("Am"), ch("F"), ch("F")] },
+      { label: "Verse 1", chords: [ch("Dm"), ch("Bb"), ch("F"), ch("Am"), ch("Dm"), ch("Bb"), ch("F"), ch("Am")] },
+      { label: "Pre-Chorus / Build 1", chords: [ch("Dm", 2), ch("Em", 2), ch("F", 2), ch("G", 2)] },
+      { label: "Chorus 1", chords: [ch("C"), ch("G"), ch("Am"), ch("F"), ch("C"), ch("G"), ch("Am"), ch("F")] },
     ],
   };
   const taggedLyrics = [

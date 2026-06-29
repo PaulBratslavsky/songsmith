@@ -38,10 +38,13 @@ The output feeds a real pipeline:
   progression straight into a song section.
 - **Absolute-chord composer** — the Chords stage stores real chord names per section (never
   collapsed to scale degrees), editable by hand, by palette, by import, or by chat.
-- **Composer** (dedicated tab) — a Hookpad-style 8-bar **visual sketchpad**: drag chord blocks,
-  melody, and bass notes onto a shared scale-degree grid and loop it through the per-voice synth;
-  change the key and everything transposes. Degree-based + key-relative (in-memory for now;
-  persistence + song import/export are upcoming phases). See `docs/COMPOSER-SPEC.md`.
+- **Composer** (dedicated tab) — a Hookpad-style **visual sketchpad**: drag chord blocks, melody,
+  and bass notes onto a shared scale-degree grid and loop it through the per-voice synth; change the
+  key and everything transposes. A blank sketch is 8 bars; from any song, **"Open in Composer"** loads
+  the *whole song* onto one long, scrollable, multi-section timeline — sections laid end-to-end, the
+  real chords on the chord lane with the lyric line under each, melody + bass editable across the song.
+  Degree-based + key-relative (in-memory for now; save/export-back are upcoming phases).
+  See `docs/COMPOSER-SPEC.md`.
 - **Suno-accurate prompts** — the Generation Prompt stage follows current best practice: key +
   tempo in the **style** line, chords as `[Am]` tags **inline in the lyrics** (not sung).
 - **Final renders** — reference your generated audio versions on disk (multiple takes), play

@@ -11,12 +11,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { synth } from '../../../music/synth';
 import type { Composition } from './types';
-import { TOTAL_TICKS } from './types';
 import { buildSchedule, msPerTick } from './playback';
 
 export type CompositionPlayback = {
   isPlaying: boolean;
-  /** Current tick cursor 0..TOTAL_TICKS-1, or null when stopped. */
+  /** Current tick cursor 0..totalTicks-1, or null when stopped. */
   currentStep: number | null;
   play: () => void;
   stop: () => void;
@@ -43,6 +42,9 @@ export function useCompositionPlayback(
   eventsRef.current = eventsByStep;
   const tickMsRef = useRef(msPerTick(comp.bpm));
   tickMsRef.current = msPerTick(comp.bpm);
+  // Read live so a key/length change while playing wraps at the right tick.
+  const totalTicksRef = useRef(comp.totalTicks);
+  totalTicksRef.current = comp.totalTicks;
 
   const stepRef = useRef(0);
 
@@ -71,7 +73,7 @@ export function useCompositionPlayback(
     let timer: ReturnType<typeof setTimeout>;
     const advance = () => {
       const next = stepRef.current + 1;
-      if (next >= TOTAL_TICKS) {
+      if (next >= totalTicksRef.current) {
         if (!loop) {
           setIsPlaying(false);
           setCurrentStep(null);

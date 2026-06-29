@@ -3,9 +3,13 @@
 // user drags blocks, resizes them, and drops new ones. Generic over any
 // TimeSpan ({id,start,length}); chord/note specifics are thin builders.
 // All clamping lives here so the UI never reasons about neighbours.
+//
+// Composition length is variable, so the grid-bound helpers
+// (freeGapAt/moveSpan/resizeSpan/addChord/addNote) take `totalTicks` as
+// an argument rather than reading a module constant.
 
 import type { ChordSpan, Degree, NoteSpan, TimeSpan } from './types';
-import { TOTAL_TICKS } from './types';
+import { DEFAULT_TOTAL_TICKS } from './types';
 
 export function sortSpans<T extends TimeSpan>(spans: T[]): T[] {
   return [...spans].sort((a, b) => a.start - b.start);
@@ -24,11 +28,12 @@ export function spanAt<T extends TimeSpan>(spans: T[], tick: number): T | null {
 export function freeGapAt(
   spans: TimeSpan[],
   tick: number,
+  totalTicks: number = DEFAULT_TOTAL_TICKS,
 ): { start: number; length: number } | null {
-  if (tick < 0 || tick >= TOTAL_TICKS) return null;
+  if (tick < 0 || tick >= totalTicks) return null;
   if (spanAt(spans, tick)) return null;
   let lo = 0;
-  let hi = TOTAL_TICKS;
+  let hi = totalTicks;
   for (const s of sortSpans(spans)) {
     const end = s.start + s.length;
     if (end <= tick) lo = Math.max(lo, end);
@@ -48,13 +53,14 @@ export function removeById<T extends TimeSpan>(spans: T[], id: string): T[] {
 function neighbours<T extends TimeSpan>(
   spans: T[],
   id: string,
+  totalTicks: number,
 ): { prevEnd: number; nextStart: number; self: T | null } {
   const sorted = sortSpans(spans);
   const idx = sorted.findIndex((s) => s.id === id);
-  if (idx === -1) return { prevEnd: 0, nextStart: TOTAL_TICKS, self: null };
+  if (idx === -1) return { prevEnd: 0, nextStart: totalTicks, self: null };
   const prevEnd = idx > 0 ? sorted[idx - 1].start + sorted[idx - 1].length : 0;
   const nextStart =
-    idx < sorted.length - 1 ? sorted[idx + 1].start : TOTAL_TICKS;
+    idx < sorted.length - 1 ? sorted[idx + 1].start : totalTicks;
   return { prevEnd, nextStart, self: sorted[idx] };
 }
 
@@ -63,8 +69,9 @@ export function moveSpan<T extends TimeSpan>(
   spans: T[],
   id: string,
   newStart: number,
+  totalTicks: number = DEFAULT_TOTAL_TICKS,
 ): T[] {
-  const { prevEnd, nextStart, self } = neighbours(spans, id);
+  const { prevEnd, nextStart, self } = neighbours(spans, id, totalTicks);
   if (!self) return spans;
   const maxStart = nextStart - self.length;
   const start = Math.max(prevEnd, Math.min(newStart, maxStart));
@@ -76,8 +83,9 @@ export function resizeSpan<T extends TimeSpan>(
   spans: T[],
   id: string,
   newLength: number,
+  totalTicks: number = DEFAULT_TOTAL_TICKS,
 ): T[] {
-  const { nextStart, self } = neighbours(spans, id);
+  const { nextStart, self } = neighbours(spans, id, totalTicks);
   if (!self) return spans;
   const maxLength = nextStart - self.start;
   const length = Math.max(1, Math.min(newLength, maxLength));
@@ -93,8 +101,9 @@ export function addChord(
   tick: number,
   desiredLength: number,
   seventh = false,
+  totalTicks: number = DEFAULT_TOTAL_TICKS,
 ): ChordSpan[] {
-  const gap = freeGapAt(spans, tick);
+  const gap = freeGapAt(spans, tick, totalTicks);
   if (!gap) return spans;
   const length = Math.max(1, Math.min(desiredLength, gap.length));
   const start = Math.min(tick, gap.start + gap.length - length);
@@ -126,8 +135,9 @@ export function addNote(
   octave: 0 | 1,
   tick: number,
   desiredLength: number,
+  totalTicks: number = DEFAULT_TOTAL_TICKS,
 ): NoteSpan[] {
-  const gap = freeGapAt(spans, tick);
+  const gap = freeGapAt(spans, tick, totalTicks);
   if (!gap) return spans;
   const length = Math.max(1, Math.min(desiredLength, gap.length));
   const start = Math.min(tick, gap.start + gap.length - length);

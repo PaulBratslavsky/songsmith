@@ -13,9 +13,8 @@
 
 import { memo, useRef } from 'react';
 import type { Degree, NoteSpan } from '../../lib/music/compose/types';
-import { TOTAL_TICKS } from '../../lib/music/compose/types';
 import type { PitchClass } from '../../lib/music/types';
-import { LABEL_W, TRACK_COLS, isBarStart, isBeatStart } from './laneLayout';
+import { LABEL_W, trackCols, isBarStart, isBeatStart } from './laneLayout';
 import type { ChordToneHighlight } from './chordHighlight';
 import { useSpanDrag } from './useSpanDrag';
 
@@ -29,6 +28,7 @@ function NoteLaneImpl({
   notes,
   pcs,
   color,
+  totalTicks,
   highlight,
   selectedId,
   onPlace,
@@ -43,6 +43,7 @@ function NoteLaneImpl({
   /** Note label per degree, index 0 = degree 1, for the current key. */
   pcs: PitchClass[];
   color: string;
+  totalTicks: number;
   highlight?: ChordToneHighlight | null;
   selectedId: string | null;
   onPlace: (degree: Degree, tick: number) => void;
@@ -57,12 +58,13 @@ function NoteLaneImpl({
   const overlayRef = useRef<HTMLDivElement>(null);
   const { begin, onPointerMove, onPointerUp } = useSpanDrag({
     trackRef: overlayRef,
-    totalTicks: TOTAL_TICKS,
+    totalTicks,
     rowHeight: ROW_H,
     onMove: (id, start, degree) => onMove(id, start, degree as Degree),
     onResize,
     onDegreeChange: (degree) => previewNote(degree as Degree),
   });
+  const TRACK_COLS = trackCols(totalTicks);
 
   return (
     <div style={{ position: 'relative' }}>
@@ -87,7 +89,7 @@ function NoteLaneImpl({
             <span style={{ fontWeight: 500, color: 'var(--ink-dim)' }}>{pcs[degree - 1] ?? ''}</span>
           </div>
           <div style={{ display: 'grid', flex: 1, gridTemplateColumns: TRACK_COLS }}>
-            {Array.from({ length: TOTAL_TICKS }, (_, tick) => {
+            {Array.from({ length: totalTicks }, (_, tick) => {
               const toned =
                 highlight != null &&
                 highlight.degrees.has(degree) &&
