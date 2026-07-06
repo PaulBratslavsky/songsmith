@@ -14,6 +14,9 @@ struct AppState {
     db_path: String,
     /// stage ids with an in-flight run, to dedupe concurrent requests.
     inflight: Mutex<HashSet<String>>,
+    /// cancel handles for in-flight stage runs, keyed by stage id — `cancel_stage`
+    /// fires the token; the run's own error path resets status + inflight.
+    running: Mutex<HashMap<String, agent::CancelToken>>,
     /// the live `claude auth login --claudeai` child, kept alive so its stdin
     /// stays open for the pasted OAuth code (see `claude_login`).
     login_child: Mutex<Option<std::process::Child>>,
@@ -108,7 +111,8 @@ async fn get_stage(state: State<'_, AppState>, id: String) -> R<Option<StageDeta
     db::get_stage_detail(&state.conn, &id).await.map_err(e2s)
 }
 
-/// Run a stage. Streams `stage_token` then a final `stage_done`. Deduped.
+/// Run a stage. Streams `stage_token` then a final `stage_done`. Deduped and
+/// cancellable via `cancel_stage`.
 #[tauri::command]
 async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: String, user_input: Option<String>) -> R<Artifact> {
     {
@@ -118,17 +122,52 @@ async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: 
         }
         set.insert(stage_id.clone());
     }
+    let cancel = agent::CancelToken::new();
+    state.running.lock().unwrap().insert(stage_id.clone(), cancel.clone());
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     let app2 = app.clone();
     let sid = stage_id.clone();
     let result = agent::run_stage(&state.conn, &settings, &stage_id, user_input, move |tok| {
         let _ = app2.emit("stage_token", serde_json::json!({ "stage_id": sid, "token": tok }));
-    })
+    }, Some(cancel))
     .await;
+    state.running.lock().unwrap().remove(&stage_id);
     state.inflight.lock().unwrap().remove(&stage_id);
     let outcome = result.map_err(e2s)?;
     let _ = app.emit("stage_done", serde_json::json!({ "stage_id": stage_id, "artifact_id": outcome.artifact.id }));
     Ok(outcome.artifact)
+}
+
+/// Cancel an in-flight stage run: fire its cancel token — the run's Claude child
+/// is killed + reaped, `run_stage`'s error path restores the stage status and
+/// clears the inflight entry. With no live run this doubles as a stranded-stage
+/// rescue (e.g. after a crash left a stage stuck "in_progress").
+#[tauri::command]
+async fn cancel_stage(state: State<'_, AppState>, stage_id: String) -> R<()> {
+    let token = state.running.lock().unwrap().remove(&stage_id);
+    let had_run = token.is_some();
+    if let Some(t) = token {
+        t.cancel();
+    }
+    // defensive: idempotent no-op when the run's own cleanup already got there
+    state.inflight.lock().unwrap().remove(&stage_id);
+    if !had_run {
+        // stranded-stage rescue: reset a stuck "in_progress" with no live run
+        if let Ok(Some(stage)) = db::get_stage(&state.conn, &stage_id).await {
+            if stage.status == "in_progress" {
+                let cur = db::current_artifact(&state.conn, &stage_id).await.ok().flatten();
+                match cur {
+                    // an approved artifact means the stage had finished — restore "done"
+                    Some(a) if a.approved => { let _ = db::set_stage_status(&state.conn, &stage_id, "done").await; }
+                    // an unapproved artifact + in_progress is the normal post-run state — leave it
+                    Some(_) => {}
+                    // no artifact at all: the run died before producing anything
+                    None => { let _ = db::set_stage_status(&state.conn, &stage_id, "pending").await; }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -146,6 +185,10 @@ async fn advance_stage(state: State<'_, AppState>, song_id: String) -> R<serde_j
 async fn get_artifact(state: State<'_, AppState>, id: String) -> R<Option<Artifact>> {
     db::get_artifact(&state.conn, &id).await.map_err(e2s)
 }
+/// TRUST MODEL: this command is the USER's own editor saving — it is the
+/// unlock/rewrite authority and deliberately bypasses the freeze guard (that is
+/// how unfreezing works). Claude-driven writes go through the guarded MCP tool
+/// arms in `tools::dispatch` instead and can never violate frozen sections.
 #[tauri::command]
 async fn save_artifact(state: State<'_, AppState>, song_id: String, stage_id: Option<String>, kind: String, content: String) -> R<Artifact> {
     db::save_artifact(&state.conn, &song_id, stage_id.as_deref(), &kind, &content).await.map_err(e2s)
@@ -408,6 +451,17 @@ section, placed at the running bar offset from these counts: {}.",
             .spawn()
             .map_err(|e| format!("could not start claude: {e}"))?;
         let stdout = child.stdout.take().unwrap();
+        // drain stderr CONCURRENTLY — reading it only after wait() deadlocks once
+        // the CLI writes more than the pipe buffer (~64KB) mid-run
+        let stderr = child.stderr.take();
+        let stderr_thread = std::thread::spawn(move || {
+            let mut buf = String::new();
+            if let Some(mut se) = stderr {
+                use std::io::Read;
+                let _ = se.read_to_string(&mut buf);
+            }
+            buf
+        });
         for line in std::io::BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             if line.trim().is_empty() { continue; }
@@ -416,12 +470,9 @@ section, placed at the running bar offset from these counts: {}.",
             }
         }
         let status = child.wait().map_err(e2s)?;
+        let err = stderr_thread.join().unwrap_or_default();
         if !status.success() {
-            let mut err = String::new();
-            if let Some(mut se) = child.stderr.take() {
-                use std::io::Read;
-                let _ = se.read_to_string(&mut err);
-            }
+            let err = err.trim().to_string();
             return Err(if err.is_empty() { "claude exited with an error".into() } else { err });
         }
         Ok(())
@@ -1252,11 +1303,13 @@ pub fn run() {
             let db_path_str = db_path.to_string_lossy().to_string();
 
             let database = tauri::async_runtime::block_on(song_core::db::open(&db_path)).expect("open database");
-            let conn = database.connect().expect("connect database");
+            // db::connect sets PRAGMA busy_timeout so writes racing the mcp-shim
+            // wait for the lock instead of erroring "database is locked"
+            let conn = tauri::async_runtime::block_on(song_core::db::connect(&database)).expect("connect database");
             std::mem::forget(database);
 
             ensure_claude_bin(&conn);
-            app.manage(AppState { conn, db_path: db_path_str, inflight: Mutex::new(HashSet::new()), login_child: Mutex::new(None) });
+            app.manage(AppState { conn, db_path: db_path_str, inflight: Mutex::new(HashSet::new()), running: Mutex::new(HashMap::new()), login_child: Mutex::new(None) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1278,6 +1331,7 @@ pub fn run() {
             delete_song,
             get_stage,
             run_stage,
+            cancel_stage,
             approve_stage,
             advance_stage,
             get_artifact,

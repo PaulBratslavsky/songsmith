@@ -69,6 +69,18 @@ fn norm_label(s: &str) -> String {
     s.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Does this artifact `data` carry any frozen sections? The write-boundary guard
+/// and the merge path share this one detection (same section-array keys).
+fn has_frozen_sections(stage_type: &str, data: &Value) -> bool {
+    if !is_section_stage(stage_type) {
+        return false;
+    }
+    let (arr_key, _) = section_keys(stage_type);
+    data.get(arr_key)
+        .and_then(|v| v.as_array())
+        .is_some_and(|secs| secs.iter().any(|s| s.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false)))
+}
+
 /// Deterministically splice prior **frozen** sections into the regenerated
 /// artifact's `data`. Match by label (case/space-insensitive); if Claude dropped
 /// a frozen section, re-insert it at its original index; always carry `frozen:true`.
@@ -276,38 +288,144 @@ fn frozen_prompt_block(stage_type: &str, prior_data: &Value) -> Option<String> {
 
 /// Build the merged, frozen-spliced artifact `content` JSON string from Claude's
 /// raw `text` + the stage's prior current artifact. When nothing was frozen this
-/// produces exactly the same `{kind,text,data}` as before (no-op).
-fn build_merged_content(stage_type: &str, raw_text: &str, prior_content: Option<&str>) -> String {
+/// produces exactly the same `{kind,text,data}` as before (no-op). When the prior
+/// has frozen sections and the model output has no parseable JSON, this is an
+/// error — never save `{data: null}` over locked content.
+fn build_merged_content(stage_type: &str, raw_text: &str, prior_content: Option<&str>) -> Result<String> {
     let kind = kind_for_stage(stage_type);
     let new_data = extract_json(raw_text);
 
     // Only section stages with prior frozen sections trigger a splice.
     if is_section_stage(stage_type) {
-        if let (Some(pc), Some(nd)) = (prior_content, new_data.clone()) {
+        if let Some(pc) = prior_content {
             let prior_data = serde_json::from_str::<Value>(pc)
                 .ok()
                 .and_then(|v| v.get("data").cloned());
             if let Some(prior_data) = prior_data {
-                let has_frozen = frozen_prompt_block(stage_type, &prior_data).is_some();
-                if has_frozen {
+                if has_frozen_sections(stage_type, &prior_data) {
+                    let Some(nd) = new_data else {
+                        return Err(anyhow!(
+                            "model output had no parseable JSON; refusing to overwrite an artifact with locked sections — the prior revision stays current"
+                        ));
+                    };
                     let merged = merge_frozen_sections(stage_type, &prior_data, &nd);
                     let text = render_stage_text(stage_type, &merged).unwrap_or_else(|| raw_text.to_string());
-                    return json!({ "kind": kind, "text": text, "data": merged }).to_string();
+                    return Ok(json!({ "kind": kind, "text": text, "data": merged }).to_string());
                 }
             }
         }
     }
-    json!({ "kind": kind, "text": raw_text, "data": new_data }).to_string()
+    Ok(json!({ "kind": kind, "text": raw_text, "data": new_data }).to_string())
+}
+
+// ---- The freeze write-boundary ----------------------------------------------
+//
+// TRUST MODEL: UI editor saves are the *user's* authority — they call
+// `db::save_artifact` directly and may unlock/rewrite anything (that is how
+// unfreezing works). Claude-driven writes (the MCP `save_artifact` /
+// `revert_artifact` tools, and the agent loop via `build_merged_content`) must
+// NEVER violate frozen sections, so they come through these guarded wrappers.
+
+/// Guarded artifact save for Claude-originated writes. For a section-based stage
+/// whose prior current artifact has frozen sections: parse the incoming content,
+/// splice the frozen sections back verbatim (`merge_frozen_sections`), re-render
+/// `text` from the merged data, and save that. Incoming content that is not
+/// valid JSON while the prior has frozen sections is an error — nothing is
+/// saved. Non-section stages / no frozen sections fall through to a plain save
+/// (behavior identical to an unguarded save).
+pub async fn save_artifact_guarded(
+    conn: &Connection,
+    song_id: &str,
+    stage_id: Option<&str>,
+    kind: &str,
+    content: &str,
+) -> Result<Artifact> {
+    if let Some(sid) = stage_id {
+        if let Some(stage) = db::get_stage(conn, sid).await? {
+            if is_section_stage(&stage.r#type) {
+                if let Some(prior) = db::current_artifact(conn, sid).await? {
+                    let prior_data = serde_json::from_str::<Value>(&prior.content)
+                        .ok()
+                        .and_then(|v| v.get("data").cloned());
+                    if let Some(prior_data) = prior_data {
+                        if has_frozen_sections(&stage.r#type, &prior_data) {
+                            let incoming = serde_json::from_str::<Value>(content).map_err(|_| anyhow!(
+                                "this stage has locked (frozen) sections and the incoming content is not valid JSON — refusing to save. Unlock the sections in the app to rewrite them."
+                            ))?;
+                            // accept the `{kind,text,data}` wrapper or bare data
+                            // (an object already carrying the stage's section array)
+                            let (arr_key, _) = section_keys(&stage.r#type);
+                            let incoming_data = incoming
+                                .get("data")
+                                .cloned()
+                                .or_else(|| incoming.get(arr_key).is_some().then(|| incoming.clone()))
+                                .unwrap_or(Value::Null);
+                            let merged = merge_frozen_sections(&stage.r#type, &prior_data, &incoming_data);
+                            let text = render_stage_text(&stage.r#type, &merged)
+                                .or_else(|| incoming.get("text").and_then(|t| t.as_str()).map(String::from))
+                                .unwrap_or_default();
+                            let guarded = json!({ "kind": kind, "text": text, "data": merged }).to_string();
+                            return db::save_artifact(conn, song_id, Some(sid), kind, &guarded).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    db::save_artifact(conn, song_id, stage_id, kind, content).await
+}
+
+/// Guarded revert for Claude-originated calls: restoring an old revision must
+/// not resurrect pre-freeze content over currently-frozen sections — the
+/// reverted content passes through the same write-boundary guard.
+pub async fn revert_artifact_guarded(conn: &Connection, artifact_id: &str) -> Result<Artifact> {
+    let t = db::get_artifact(conn, artifact_id).await?.ok_or_else(|| anyhow!("artifact not found"))?;
+    save_artifact_guarded(conn, &t.song_id, t.stage_id.as_deref(), &t.kind, &t.content).await
+}
+
+// ---- Cancellation ------------------------------------------------------------
+
+/// Cancels an in-flight Claude call. Clone it freely; `cancel()` releases every
+/// current *and future* `cancelled().await` (a pre-fired token resolves
+/// immediately, so there is no arm-before-fire race).
+#[derive(Clone)]
+pub struct CancelToken(std::sync::Arc<tokio::sync::watch::Sender<bool>>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self(std::sync::Arc::new(tokio::sync::watch::channel(false).0))
+    }
+    pub fn cancel(&self) {
+        // send_replace, not send: `send` is a no-op while no receiver exists yet,
+        // which would drop a cancel fired before the call loop starts listening
+        let _ = self.0.send_replace(true);
+    }
+    /// Resolves once `cancel()` has been called (immediately if it already was).
+    pub async fn cancelled(&self) {
+        let mut rx = self.0.subscribe();
+        // wait_for checks the current value first; Err (sender dropped) cannot
+        // happen while `self` holds the sender.
+        let _ = rx.wait_for(|c| *c).await;
+    }
+}
+
+impl Default for CancelToken {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Run a stage. `user_input` carries an optional seed (the producer's own
-/// chords/lyrics/title). `on_token` receives streamed text chunks.
+/// chords/lyrics/title). `on_token` receives streamed text chunks. `cancel`
+/// (when given) aborts the in-flight Claude call — the run errors out and the
+/// stage status is restored.
 pub async fn run_stage<F>(
     conn: &Connection,
     settings: &Settings,
     stage_id: &str,
     user_input: Option<String>,
     on_token: F,
+    cancel: Option<CancelToken>,
 ) -> Result<RunOutcome>
 where
     F: Fn(String) + Send,
@@ -319,33 +437,46 @@ where
         .await?
         .ok_or_else(|| anyhow!("no enabled skill for stage '{}'", stage.r#type))?;
 
+    let prior_status = stage.status.clone();
     db::set_stage_status(conn, stage_id, "in_progress").await?;
-    db::set_song_current_stage(conn, &song.id, &stage.r#type).await?;
-    if stage.skill_id.as_deref() != Some(skill.id.as_str()) {
-        db::set_stage_skill(conn, stage_id, &skill.id).await?;
-    }
 
-    // the stage's prior current artifact — its frozen sections are protected
-    let prior_artifact = db::current_artifact(conn, stage_id).await?;
-    let prior_data = prior_artifact.as_ref().and_then(|a| {
-        serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned())
-    });
+    let run = async {
+        db::set_song_current_stage(conn, &song.id, &stage.r#type).await?;
+        if stage.skill_id.as_deref() != Some(skill.id.as_str()) {
+            db::set_stage_skill(conn, stage_id, &skill.id).await?;
+        }
 
-    let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
-    let system = build_system_prompt(&skill, &preset, &song);
-    let mut user = build_user_prompt(&stage.r#type, &prior, user_input.as_deref());
-    if let Some(pd) = &prior_data {
-        if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
-            user.push_str("\n\n");
-            user.push_str(&block);
+        // the stage's prior current artifact — its frozen sections are protected
+        let prior_artifact = db::current_artifact(conn, stage_id).await?;
+        let prior_data = prior_artifact.as_ref().and_then(|a| {
+            serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned())
+        });
+
+        let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
+        let system = build_system_prompt(&skill, &preset, &song);
+        let mut user = build_user_prompt(&stage.r#type, &prior, user_input.as_deref());
+        if let Some(pd) = &prior_data {
+            if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
+                user.push_str("\n\n");
+                user.push_str(&block);
+            }
+        }
+
+        let text = call_claude(settings, &system, &user, &on_token, cancel.as_ref()).await?;
+        let content = build_merged_content(&stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str()))?;
+
+        let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
+        Ok::<RunOutcome, anyhow::Error>(RunOutcome { artifact, raw_output: text })
+    };
+
+    match run.await {
+        Ok(outcome) => Ok(outcome),
+        Err(e) => {
+            // never strand the stage "in_progress" on a failed/cancelled run
+            let _ = db::set_stage_status(conn, stage_id, &prior_status).await;
+            Err(e)
         }
     }
-
-    let text = call_claude(settings, &system, &user, &on_token).await?;
-    let content = build_merged_content(&stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str()));
-
-    let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
-    Ok(RunOutcome { artifact, raw_output: text })
 }
 
 /// Self-test + refine pass: the model critiques its own stage output against the
@@ -363,31 +494,45 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
         .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
         .unwrap_or_else(|| current.content.clone());
 
-    let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
-    let system = build_system_prompt(&skill, &preset, &song);
-    let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
+    // busy signal + reset-on-error, same as run_stage
+    let prior_status = stage.status.clone();
+    db::set_stage_status(conn, stage_id, "in_progress").await?;
+
+    let run = async {
+        let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
+        let system = build_system_prompt(&skill, &preset, &song);
+        let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
 1. TITLE/HOOK: does the song's title (from the Concept) actually land as the chorus hook line? If not, work it in so the chorus sings the title. ONLY if the song clearly found a stronger, more specific hook, build the chorus around that instead and keep it consistent across every chorus.\n\
 2. COHERENCE: every section must fit the Lyric Spec's beat sheet and the concept — no section that drifts off-theme, contradicts the story, or repeats instead of develops.\n\
 3. CRAFT: cut clichés, weak \"to be\" verbs, abstract emotion-words, forced rhymes, and over-written \"poetic\" lines that no one would actually sing; keep it human and singable.\n\
 4. Preserve the inline [chord] tags and the section labels exactly.\n\
 Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
-    let mut user = format!(
-        "Prior stages (context):\n\n{prior}\n\n---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
-        stage_label(&stage.r#type)
-    );
-    // frozen sections are FINAL even through a self-test/revise pass
-    let prior_data = serde_json::from_str::<Value>(&current.content).ok().and_then(|v| v.get("data").cloned());
-    if let Some(pd) = &prior_data {
-        if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
-            user.push_str("\n\n");
-            user.push_str(&block);
+        let mut user = format!(
+            "Prior stages (context):\n\n{prior}\n\n---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
+            stage_label(&stage.r#type)
+        );
+        // frozen sections are FINAL even through a self-test/revise pass
+        let prior_data = serde_json::from_str::<Value>(&current.content).ok().and_then(|v| v.get("data").cloned());
+        if let Some(pd) = &prior_data {
+            if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
+                user.push_str("\n\n");
+                user.push_str(&block);
+            }
+        }
+
+        let text = call_claude(settings, &system, &user, &|_| {}, None).await?;
+        let content = build_merged_content(&stage.r#type, &text, Some(&current.content))?;
+        let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
+        Ok::<Artifact, anyhow::Error>(artifact)
+    };
+
+    match run.await {
+        Ok(artifact) => Ok(artifact),
+        Err(e) => {
+            let _ = db::set_stage_status(conn, stage_id, &prior_status).await;
+            Err(e)
         }
     }
-
-    let text = call_claude(settings, &system, &user, &|_| {}).await?;
-    let content = build_merged_content(&stage.r#type, &text, Some(&current.content));
-    let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
-    Ok(artifact)
 }
 
 /// Auto-generate a style preset from a seed (name / vibe / reference), grounded
@@ -420,7 +565,7 @@ where
     );
     let user = format!("Seed / name: {seed_name}\nNotes: {notes}\n\nProduce the style preset JSON now.", notes = seed_notes.unwrap_or("(none)"));
 
-    let text = call_claude(settings, &system, &user, &on_token).await?;
+    let text = call_claude(settings, &system, &user, &on_token, None).await?;
     let d = extract_json(&text).ok_or_else(|| anyhow!("the model did not return a JSON preset. Raw output:\n{}", text.trim()))?;
     let g = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     Ok(StyleInput {
@@ -506,7 +651,7 @@ pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path
     let skill = db::get_active_skill_for_stage(conn, "reference").await?
         .ok_or_else(|| anyhow!("the Reference Analyst skill is missing"))?;
     let user = format!("Analyzer output (raw perception):\n\n{}", serde_json::to_string_pretty(&raw)?);
-    let out = call_claude(settings, &skill.instructions, &user, &|_| {}).await?;
+    let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
     let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
     let chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
@@ -580,7 +725,7 @@ pub async fn refine_field(settings: &Settings, stage_label: &str, field_label: &
     let user = format!(
         "Stage: {stage_label}\nField: {field_label}\n\nCurrent value:\n{current}\n\nProducer's request: {instruction}\n\nReturn ONLY the new {field_label} value.",
     );
-    let text = call_claude(settings, system, &user, &|_: String| {}).await?;
+    let text = call_claude(settings, system, &user, &|_: String| {}, None).await?;
     let t = text.trim();
     // strip an accidental ```fence``` or wrapping quotes if the model added them
     let t = t.strip_prefix("```").map(|s| s.trim_start_matches(|c: char| c.is_alphanumeric()).trim()).unwrap_or(t);
@@ -589,9 +734,23 @@ pub async fn refine_field(settings: &Settings, stage_label: &str, field_label: &
     Ok(t.trim().to_string())
 }
 
+/// Wall-clock limit for one Claude CLI call: 600s, overridable via the
+/// `SONGSMITH_CLAUDE_TIMEOUT_SECS` env var.
+fn claude_timeout() -> std::time::Duration {
+    let secs = std::env::var("SONGSMITH_CLAUDE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(600);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Generate text with Claude by driving the `claude` CLI headless with
 /// stream-json. Streams text deltas via `on_token`, returns the final answer.
-async fn call_claude<F>(settings: &Settings, system: &str, user: &str, on_token: &F) -> Result<String>
+/// Hardened: `kill_on_drop`, concurrent stderr drain (read-after-wait deadlocks
+/// past ~64KB), a wall-clock timeout, an optional `cancel` token, and the
+/// `result` event's `is_error`/`subtype` treated as failure.
+async fn call_claude<F>(settings: &Settings, system: &str, user: &str, on_token: &F, cancel: Option<&CancelToken>) -> Result<String>
 where
     F: Fn(String) + Send,
 {
@@ -617,59 +776,118 @@ where
         .arg("--include-partial-messages")
         .arg("--no-session-persistence")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // no zombie `claude` if this future is dropped (timeout / cancel / panic)
+        .kill_on_drop(true);
     if !settings.claude_model.is_empty() {
         cmd.arg("--model").arg(&settings.claude_model);
     }
 
     let mut child = cmd.spawn().map_err(|e| anyhow!("could not start the claude CLI ({bin}): {e}. Install Claude Code and sign in."))?;
-    let stdout = child.stdout.take().unwrap();
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("claude stdout unavailable"))?;
+
+    // Drain stderr CONCURRENTLY with the stdout read — reading it only after
+    // `wait()` deadlocks once the CLI writes more than the pipe buffer (~64KB).
+    let stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(mut se) = stderr {
+            let _ = se.read_to_string(&mut buf).await;
+        }
+        buf
+    });
+
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let (mut result_text, mut assistant_text, mut streamed) = (String::new(), String::new(), String::new());
+    let (mut result_is_error, mut result_subtype) = (false, None::<String>);
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
+    let read_loop = async {
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            match v["type"].as_str() {
+                Some("stream_event") => {
+                    let ev = &v["event"];
+                    if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
+                        if let Some(tok) = ev["delta"]["text"].as_str() {
+                            if !tok.is_empty() {
+                                streamed.push_str(tok);
+                                on_token(tok.to_string());
+                            }
+                        }
+                    }
+                }
+                Some("assistant") => {
+                    if let Some(content) = v["message"]["content"].as_array() {
+                        let mut t = String::new();
+                        for b in content {
+                            if b["type"] == "text" {
+                                if let Some(s) = b["text"].as_str() { t.push_str(s); }
+                            }
+                        }
+                        if !t.is_empty() { assistant_text = t; }
+                    }
+                }
+                Some("result") => {
+                    if let Some(r) = v["result"].as_str() { result_text = r.to_string(); }
+                    result_is_error = v["is_error"].as_bool().unwrap_or(false);
+                    result_subtype = v["subtype"].as_str().map(String::from);
+                }
+                _ => {}
+            }
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        match v["type"].as_str() {
-            Some("stream_event") => {
-                let ev = &v["event"];
-                if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
-                    if let Some(tok) = ev["delta"]["text"].as_str() {
-                        if !tok.is_empty() {
-                            streamed.push_str(tok);
-                            on_token(tok.to_string());
-                        }
-                    }
-                }
-            }
-            Some("assistant") => {
-                if let Some(content) = v["message"]["content"].as_array() {
-                    let mut t = String::new();
-                    for b in content {
-                        if b["type"] == "text" {
-                            if let Some(s) = b["text"].as_str() { t.push_str(s); }
-                        }
-                    }
-                    if !t.is_empty() { assistant_text = t; }
-                }
-            }
-            Some("result") => {
-                if let Some(r) = v["result"].as_str() { result_text = r.to_string(); }
-            }
-            _ => {}
+        Ok::<(), anyhow::Error>(())
+    };
+
+    // Read until EOF, a timeout, or a cancel — whichever comes first.
+    let timeout = claude_timeout();
+    let cancel_token = cancel.cloned().unwrap_or_default(); // a fresh token never fires
+    enum End { Done(Result<()>), TimedOut, Cancelled }
+    let end = tokio::select! {
+        r = tokio::time::timeout(timeout, read_loop) => match r {
+            Ok(inner) => End::Done(inner),
+            Err(_) => End::TimedOut,
+        },
+        _ = cancel_token.cancelled() => End::Cancelled,
+    };
+    match end {
+        End::Done(Ok(())) => {}
+        End::Done(Err(e)) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await; // reap
+            return Err(anyhow!("error reading claude output: {e}"));
+        }
+        End::TimedOut => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(anyhow!(
+                "claude timed out after {}s and the run was stopped (set SONGSMITH_CLAUDE_TIMEOUT_SECS to change the limit)",
+                timeout.as_secs()
+            ));
+        }
+        End::Cancelled => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(anyhow!("run cancelled"));
         }
     }
 
     let status = child.wait().await?;
+    let stderr_buf = stderr_task.await.unwrap_or_default();
     if !status.success() {
-        let mut err = String::new();
-        if let Some(mut se) = child.stderr.take() {
-            let _ = se.read_to_string(&mut err).await;
-        }
-        let err = err.trim();
+        let err = stderr_buf.trim();
         return Err(anyhow!("claude CLI failed: {}", if err.is_empty() { "is Claude Code signed in? run `claude` once to authenticate." } else { err }));
+    }
+
+    // An error-shaped `result` event (is_error / non-"success" subtype) must be
+    // surfaced as the failure it is — never saved as an artifact.
+    if result_is_error || result_subtype.as_deref().is_some_and(|s| s != "success") {
+        let msg = if !result_text.trim().is_empty() { result_text.trim().to_string() }
+            else if !assistant_text.trim().is_empty() { assistant_text.trim().to_string() }
+            else { "no error detail".to_string() };
+        return Err(anyhow!("claude reported an error ({}): {msg}", result_subtype.as_deref().unwrap_or("is_error")));
     }
 
     let out = if !result_text.trim().is_empty() { result_text }
@@ -836,7 +1054,7 @@ mod tests {
         ]}).to_string() + "\n```";
 
         std::env::set_var("SONGSMITH_MOCK_CLAUDE", &claude_out);
-        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}).await.unwrap();
+        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}, None).await.unwrap();
         std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
 
         let new = serde_json::from_str::<Value>(&outcome.artifact.content).unwrap();
@@ -875,10 +1093,173 @@ mod tests {
         ]}).to_string() + "\n```";
 
         std::env::set_var("SONGSMITH_MOCK_CLAUDE", &claude_out);
-        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}).await.unwrap();
+        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}, None).await.unwrap();
         std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
 
         let expected = json!({ "kind": "chords", "text": claude_out, "data": extract_json(&claude_out) }).to_string();
         assert_eq!(outcome.artifact.content, expected, "no-frozen path must match the legacy content exactly");
+    }
+
+    /// Shared fixture: a song whose chords stage has a current artifact with
+    /// Verse 1 FROZEN (Am F) and Chorus unlocked (C). Returns (song, stage,
+    /// prior artifact content, the frozen section's exact JSON).
+    async fn frozen_chords_fixture(conn: &libsql::Connection) -> (Song, Stage, String, Value) {
+        let preset = db::create_preset(conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(conn, &preset.id, "Test Song").await.unwrap();
+        let stages = db::list_stages(conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap().clone();
+
+        let prior_data = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Am","beats":4},{"name":"F","beats":4}], "frozen": true },
+            { "label": "Chorus", "chords": [{"name":"C","beats":4}] }
+        ]});
+        let prior_content = json!({ "kind": "chords", "text": chords_editor_text(&prior_data), "data": prior_data }).to_string();
+        db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &prior_content).await.unwrap();
+        let prior_frozen = serde_json::from_str::<Value>(&prior_content).unwrap()["data"]["sections"][0].clone();
+        (song, chords_stage, prior_content, prior_frozen)
+    }
+
+    /// (a) A Claude-driven MCP `save_artifact` with a frozen prior keeps the
+    /// frozen section byte-identical (and its `frozen` flag), while unlocked
+    /// sections take the incoming values.
+    #[tokio::test]
+    async fn mcp_save_artifact_respects_frozen() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let (song, stage, _prior, prior_frozen) = frozen_chords_fixture(&conn).await;
+
+        // Claude tries to rewrite BOTH sections and drop the frozen flag
+        let incoming = json!({ "kind": "chords", "text": "whatever", "data": { "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Dm","beats":2}] },
+            { "label": "Chorus", "chords": [{"name":"G","beats":4}] }
+        ]}}).to_string();
+        let saved = crate::tools::dispatch(&conn, &settings, "save_artifact", &json!({
+            "song_id": song.id, "stage_id": stage.id, "kind": "chords", "content": incoming,
+        })).await.unwrap();
+
+        let content = serde_json::from_str::<Value>(saved["content"].as_str().unwrap()).unwrap();
+        let secs = content["data"]["sections"].as_array().unwrap();
+        let verse = secs.iter().find(|s| s["label"] == "Verse 1").unwrap();
+        let chorus = secs.iter().find(|s| s["label"] == "Chorus").unwrap();
+        assert_eq!(*verse, prior_frozen, "frozen section must survive an MCP save byte-identical");
+        assert_eq!(verse["frozen"], json!(true));
+        assert_eq!(chorus["chords"][0]["name"], "G", "unlocked section takes the incoming value");
+        // text is re-rendered from the merged data
+        let text = content["text"].as_str().unwrap();
+        assert!(text.contains("Verse 1: Am F"), "rebuilt text keeps frozen chords, got: {text}");
+        assert!(text.contains("Chorus: G"), "rebuilt text has the new chorus, got: {text}");
+    }
+
+    /// (b) Unparseable MCP content + a frozen prior is an ERROR — nothing is
+    /// saved and the prior revision stays current.
+    #[tokio::test]
+    async fn mcp_save_artifact_unparseable_with_frozen_errors() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let (song, stage, prior_content, _f) = frozen_chords_fixture(&conn).await;
+
+        let res = crate::tools::dispatch(&conn, &settings, "save_artifact", &json!({
+            "song_id": song.id, "stage_id": stage.id, "kind": "chords", "content": "definitely {{ not json",
+        })).await;
+        assert!(res.is_err(), "unparseable content over a frozen prior must error");
+
+        let cur = db::current_artifact(&conn, &stage.id).await.unwrap().unwrap();
+        assert_eq!(cur.version, 1, "no new revision may be created");
+        assert_eq!(cur.content, prior_content, "the frozen prior stays current");
+    }
+
+    /// (c) The direct (UI editor) path is the user's authority: it can unfreeze
+    /// and rewrite a frozen section — that is how unlocking works.
+    #[tokio::test]
+    async fn ui_save_artifact_can_unfreeze_and_rewrite() {
+        let (_db, conn) = mem_conn().await;
+        let (song, stage, _prior, _f) = frozen_chords_fixture(&conn).await;
+
+        // the editor saves with the lock removed and the verse rewritten
+        let unlocked = json!({ "kind": "chords", "text": "Verse 1: Dm", "data": { "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Dm","beats":4}] }
+        ]}}).to_string();
+        db::save_artifact(&conn, &song.id, Some(&stage.id), "chords", &unlocked).await.unwrap();
+
+        let cur = db::current_artifact(&conn, &stage.id).await.unwrap().unwrap();
+        assert_eq!(cur.content, unlocked, "the user's direct save wins verbatim (unlock path)");
+    }
+
+    /// (d) `revert_artifact` over MCP cannot resurrect pre-freeze content over a
+    /// currently-frozen section: the revert passes through the same guard.
+    #[tokio::test]
+    async fn mcp_revert_respects_frozen() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+
+        // v1: pre-freeze (Verse 1 = C, Chorus = F, nothing locked)
+        let v1_data = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"C","beats":4}] },
+            { "label": "Chorus", "chords": [{"name":"F","beats":4}] }
+        ]});
+        let v1_content = json!({ "kind": "chords", "text": chords_editor_text(&v1_data), "data": v1_data }).to_string();
+        let v1 = db::save_artifact(&conn, &song.id, Some(&stage.id), "chords", &v1_content).await.unwrap();
+
+        // v2: the user froze Verse 1 as Am
+        let v2_data = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Am","beats":4}], "frozen": true },
+            { "label": "Chorus", "chords": [{"name":"G","beats":4}] }
+        ]});
+        let v2_content = json!({ "kind": "chords", "text": chords_editor_text(&v2_data), "data": v2_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&stage.id), "chords", &v2_content).await.unwrap();
+        let frozen_verse = serde_json::from_str::<Value>(&v2_content).unwrap()["data"]["sections"][0].clone();
+
+        // Claude reverts to v1 over MCP — the frozen Verse 1 must survive
+        let reverted = crate::tools::dispatch(&conn, &settings, "revert_artifact", &json!({ "artifact_id": v1.id })).await.unwrap();
+        let content = serde_json::from_str::<Value>(reverted["content"].as_str().unwrap()).unwrap();
+        let secs = content["data"]["sections"].as_array().unwrap();
+        let verse = secs.iter().find(|s| s["label"] == "Verse 1").unwrap();
+        let chorus = secs.iter().find(|s| s["label"] == "Chorus").unwrap();
+        assert_eq!(*verse, frozen_verse, "revert must not resurrect the pre-freeze verse");
+        assert_eq!(verse["frozen"], json!(true));
+        assert_eq!(chorus["chords"][0]["name"], "F", "unlocked section reverts to v1's value");
+    }
+
+    /// Parse-failure hole: frozen prior + model output with no parseable JSON →
+    /// the run fails, the prior stays current, and the stage status is reset
+    /// (not stranded "in_progress").
+    #[tokio::test]
+    async fn run_stage_parse_failure_with_frozen_errors_and_resets_status() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let (_song, stage, prior_content, _f) = frozen_chords_fixture(&conn).await;
+        let prior_status = db::get_stage(&conn, &stage.id).await.unwrap().unwrap().status;
+
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", "sorry, here are some vibes but no JSON");
+        let res = run_stage(&conn, &settings, &stage.id, None, |_| {}, None).await;
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
+
+        assert!(res.is_err(), "unparseable output over a frozen prior must fail the run");
+        let cur = db::current_artifact(&conn, &stage.id).await.unwrap().unwrap();
+        assert_eq!(cur.version, 1);
+        assert_eq!(cur.content, prior_content, "prior artifact stays current");
+        let after = db::get_stage(&conn, &stage.id).await.unwrap().unwrap();
+        assert_eq!(after.status, prior_status, "stage status must be reset on error");
+    }
+
+    /// A pre-fired cancel token resolves immediately (no arm-before-fire race).
+    #[tokio::test]
+    async fn cancel_token_pre_fired_resolves_immediately() {
+        let t = CancelToken::new();
+        t.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(200), t.cancelled())
+            .await
+            .expect("a pre-cancelled token must resolve immediately");
     }
 }

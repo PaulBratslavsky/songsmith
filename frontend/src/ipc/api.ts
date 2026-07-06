@@ -111,6 +111,7 @@ export const api = {
   getStage: (id: string) => call<StageDetail | null>("get_stage", { id }),
   runStage: (stageId: string, userInput?: string) =>
     call<Artifact>("run_stage", { stageId, userInput: userInput ?? null }),
+  cancelStage: (stageId: string) => call<void>("cancel_stage", { stageId }),
   selfCheckStage: (stageId: string) => call<Artifact>("self_check_stage", { stageId }),
   approveStage: (stageId: string) => call<unknown>("approve_stage", { stageId }),
   advanceStage: (songId: string) => call<unknown>("advance_stage", { songId }),

@@ -4,7 +4,7 @@
 //! through these functions.
 
 use crate::models::*;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use libsql::{params, Builder, Connection, Database};
 use std::path::Path;
 
@@ -17,10 +17,22 @@ pub fn new_id() -> String {
 
 pub async fn open(path: &Path) -> Result<Database> {
     let db = Builder::new_local(path).build().await?;
-    let conn = db.connect()?;
+    let conn = connect(&db).await?;
     migrate(&conn).await?;
     seed_skills(&conn).await?;
     Ok(db)
+}
+
+/// Connect + per-connection PRAGMAs. `busy_timeout` makes concurrent writers
+/// (the app and the mcp-shim share one DB file from two processes) wait up to
+/// 5s for the lock instead of erroring "database is locked". Every consumer of
+/// the core (app, shim, tests) should get its connections through here.
+pub async fn connect(db: &Database) -> Result<Connection> {
+    let conn = db.connect()?;
+    // PRAGMA returns a result row — use query (execute rejects row-returning statements)
+    let mut rows = conn.query("PRAGMA busy_timeout = 5000", ()).await?;
+    while rows.next().await?.is_some() {}
+    Ok(conn)
 }
 
 pub async fn migrate(conn: &Connection) -> Result<()> {
@@ -71,15 +83,38 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     // columns added after v0.1 — idempotent (errors if already present, ignored)
     let _ = conn.execute("ALTER TABLE song ADD COLUMN voicings TEXT NOT NULL DEFAULT '{}'", ()).await;
     // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
-    // songs that predate it — make room by shifting Lyrics/Prompt, then insert. Idempotent.
-    let _ = conn.execute(
+    // songs that predate it — make room by shifting Lyrics/Prompt, then insert.
+    // TRANSACTIONAL: the shift + insert must land together — a crash between them
+    // would re-shift ordinals on the next launch (permanent stage-order corruption).
+    // Errors propagate; the transaction rolls back on failure so a retry is clean.
+    let tx = conn.transaction().await?;
+    tx.execute(
         "UPDATE stage SET ordinal = ordinal + 1 WHERE type IN ('lyrics','prompt') \
-         AND song_id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await;
-    let _ = conn.execute(
+         AND song_id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await?;
+    tx.execute(
         "INSERT INTO stage (id, song_id, type, ordinal, status, created_at, updated_at) \
          SELECT lower(hex(randomblob(16))), s.id, 'lyric_spec', 3, 'pending', \
                 strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now') \
-         FROM song s WHERE s.id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await;
+         FROM song s WHERE s.id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await?;
+    tx.commit().await?;
+    // one version number per (stage, version) — backs the atomic INSERT..SELECT MAX+1
+    // in save_artifact (NULL stage_ids are exempt: SQLite treats NULLs as distinct).
+    if conn
+        .execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_stage_version ON artifact(stage_id, version)", ())
+        .await
+        .is_err()
+    {
+        // a pre-fix race left duplicate versions — renumber per stage (stable order:
+        // old version, then created_at, then id), then the unique index must succeed
+        conn.execute(
+            "UPDATE artifact SET version = (
+               SELECT rn FROM (
+                 SELECT id, ROW_NUMBER() OVER (PARTITION BY stage_id ORDER BY version, created_at, id) AS rn
+                 FROM artifact WHERE stage_id IS NOT NULL
+               ) t WHERE t.id = artifact.id
+             ) WHERE stage_id IS NOT NULL", ()).await?;
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_stage_version ON artifact(stage_id, version)", ()).await?;
+    }
     Ok(())
 }
 
@@ -167,14 +202,14 @@ pub async fn create_preset(conn: &Connection, p: StyleInput) -> Result<StylePres
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
         params![id.clone(), p.name, p.genre, p.mood, p.influences, p.key_tempo_feel, p.vocal_range, p.themes, ts],
     ).await?;
-    Ok(get_preset(conn, &id).await?.unwrap())
+    get_preset(conn, &id).await?.ok_or_else(|| anyhow!("preset not found after create"))
 }
 pub async fn update_preset(conn: &Connection, id: &str, p: StyleInput) -> Result<StylePreset> {
     conn.execute(
         "UPDATE style_preset SET name=?2, genre=?3, mood=?4, influences=?5, key_tempo_feel=?6, vocal_range=?7, themes=?8, updated_at=?9 WHERE id=?1",
         params![id, p.name, p.genre, p.mood, p.influences, p.key_tempo_feel, p.vocal_range, p.themes, now()],
     ).await?;
-    Ok(get_preset(conn, id).await?.unwrap())
+    get_preset(conn, id).await?.ok_or_else(|| anyhow!("preset not found after update"))
 }
 
 // ---- Songs & stages --------------------------------------------------------
@@ -201,19 +236,22 @@ fn map_stage(r: &libsql::Row) -> Stage {
 pub async fn create_song(conn: &Connection, preset_id: &str, title: &str) -> Result<Song> {
     let id = new_id();
     let ts = now();
-    conn.execute(
+    // song + its stage spec land atomically — no half-created songs
+    let tx = conn.transaction().await?;
+    tx.execute(
         "INSERT INTO song (id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'in_progress', 'concept', 'A', 'minor', 120, ?4, ?4)",
         params![id.clone(), preset_id, title, ts.clone()],
     ).await?;
     for (ordinal, stage_type) in STAGE_ORDER.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "INSERT INTO stage (id, song_id, type, ordinal, status, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5)",
             params![new_id(), id.clone(), *stage_type, ordinal as i64, ts.clone()],
         ).await?;
     }
-    Ok(get_song(conn, &id).await?.unwrap())
+    tx.commit().await?;
+    get_song(conn, &id).await?.ok_or_else(|| anyhow!("song not found after create"))
 }
 
 pub async fn list_songs(conn: &Connection) -> Result<Vec<Song>> {
@@ -234,29 +272,32 @@ pub async fn get_song_detail(conn: &Connection, id: &str) -> Result<Option<SongD
 }
 pub async fn update_song_status(conn: &Connection, id: &str, status: &str) -> Result<Song> {
     conn.execute("UPDATE song SET status=?2, updated_at=?3 WHERE id=?1", params![id, status, now()]).await?;
-    Ok(get_song(conn, id).await?.unwrap())
+    get_song(conn, id).await?.ok_or_else(|| anyhow!("song not found after update"))
 }
 pub async fn update_song_title(conn: &Connection, id: &str, title: &str) -> Result<Song> {
     conn.execute("UPDATE song SET title=?2, updated_at=?3 WHERE id=?1", params![id, title, now()]).await?;
-    Ok(get_song(conn, id).await?.unwrap())
+    get_song(conn, id).await?.ok_or_else(|| anyhow!("song not found after update"))
 }
 pub async fn update_song_voicings(conn: &Connection, id: &str, voicings: &str) -> Result<Song> {
     conn.execute("UPDATE song SET voicings=?2, updated_at=?3 WHERE id=?1", params![id, voicings, now()]).await?;
-    Ok(get_song(conn, id).await?.unwrap())
+    get_song(conn, id).await?.ok_or_else(|| anyhow!("song not found after update"))
 }
 pub async fn update_song_key(conn: &Connection, id: &str, root: &str, mode: &str, bpm: i64) -> Result<Song> {
     conn.execute("UPDATE song SET key_root=?2, key_mode=?3, bpm=?4, updated_at=?5 WHERE id=?1", params![id, root, mode, bpm, now()]).await?;
-    Ok(get_song(conn, id).await?.unwrap())
+    get_song(conn, id).await?.ok_or_else(|| anyhow!("song not found after update"))
 }
 pub async fn set_song_current_stage(conn: &Connection, id: &str, stage_type: &str) -> Result<()> {
     conn.execute("UPDATE song SET current_stage=?2, updated_at=?3 WHERE id=?1", params![id, stage_type, now()]).await?;
     Ok(())
 }
 pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute("DELETE FROM artifact WHERE song_id = ?1", params![id]).await?;
-    conn.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
-    conn.execute("DELETE FROM render WHERE song_id = ?1", params![id]).await?;
-    conn.execute("DELETE FROM song WHERE id = ?1", params![id]).await?;
+    // all-or-nothing — never leave orphaned stages/artifacts behind
+    let tx = conn.transaction().await?;
+    tx.execute("DELETE FROM artifact WHERE song_id = ?1", params![id]).await?;
+    tx.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
+    tx.execute("DELETE FROM render WHERE song_id = ?1", params![id]).await?;
+    tx.execute("DELETE FROM song WHERE id = ?1", params![id]).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -347,17 +388,28 @@ pub async fn get_artifact(conn: &Connection, id: &str) -> Result<Option<Artifact
     Ok(rows.next().await?.as_ref().map(map_artifact))
 }
 pub async fn save_artifact(conn: &Connection, song_id: &str, stage_id: Option<&str>, kind: &str, content: &str) -> Result<Artifact> {
-    let next_version = match stage_id {
-        Some(sid) => current_artifact(conn, sid).await?.map(|a| a.version + 1).unwrap_or(1),
-        None => 1,
-    };
     let id = new_id();
-    conn.execute(
-        "INSERT INTO artifact (id, song_id, stage_id, kind, content, version, approved, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-        params![id.clone(), song_id, stage_id, kind, content, next_version, now()],
-    ).await?;
-    Ok(get_artifact(conn, &id).await?.unwrap())
+    match stage_id {
+        // version computed INSIDE the insert — one atomic statement, so concurrent
+        // app/shim saves can't both read the same max and collide (and the UNIQUE
+        // index on (stage_id, version) backstops it)
+        Some(sid) => {
+            conn.execute(
+                "INSERT INTO artifact (id, song_id, stage_id, kind, content, version, approved, created_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5, COALESCE(MAX(version), 0) + 1, 0, ?6 FROM artifact WHERE stage_id = ?3",
+                params![id.clone(), song_id, sid, kind, content, now()],
+            ).await?;
+        }
+        // song-level artifacts (no stage) keep today's behavior: always version 1
+        None => {
+            conn.execute(
+                "INSERT INTO artifact (id, song_id, stage_id, kind, content, version, approved, created_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, 1, 0, ?5)",
+                params![id.clone(), song_id, kind, content, now()],
+            ).await?;
+        }
+    }
+    get_artifact(conn, &id).await?.ok_or_else(|| anyhow!("artifact not found after save"))
 }
 pub async fn list_artifact_revisions(conn: &Connection, stage_id: &str) -> Result<Vec<Artifact>> {
     let mut rows = conn.query(
@@ -369,7 +421,7 @@ pub async fn list_artifact_revisions(conn: &Connection, stage_id: &str) -> Resul
     Ok(out)
 }
 pub async fn revert_artifact(conn: &Connection, artifact_id: &str) -> Result<Artifact> {
-    let t = get_artifact(conn, artifact_id).await?.ok_or_else(|| anyhow::anyhow!("artifact not found"))?;
+    let t = get_artifact(conn, artifact_id).await?.ok_or_else(|| anyhow!("artifact not found"))?;
     save_artifact(conn, &t.song_id, t.stage_id.as_deref(), &t.kind, &t.content).await
 }
 pub async fn set_artifact_approved(conn: &Connection, artifact_id: &str, approved: bool) -> Result<()> {
@@ -411,7 +463,7 @@ pub async fn create_skill(conn: &Connection, input: SkillInput) -> Result<Skill>
          VALUES (?1, ?2, ?3, ?4, ?5, 'user', 1, ?6, ?6)",
         params![id.clone(), input.key, input.name, input.stage_type, input.instructions, ts],
     ).await?;
-    Ok(get_skill(conn, &id).await?.unwrap())
+    get_skill(conn, &id).await?.ok_or_else(|| anyhow!("skill not found after create"))
 }
 pub async fn update_skill(conn: &Connection, id: &str, input: SkillInput) -> Result<Skill> {
     // mark as user-owned so the builtin refresh on startup won't overwrite the edit
@@ -419,11 +471,11 @@ pub async fn update_skill(conn: &Connection, id: &str, input: SkillInput) -> Res
         "UPDATE skill SET key=?2, name=?3, stage_type=?4, instructions=?5, source='user', updated_at=?6 WHERE id=?1",
         params![id, input.key, input.name, input.stage_type, input.instructions, now()],
     ).await?;
-    Ok(get_skill(conn, id).await?.unwrap())
+    get_skill(conn, id).await?.ok_or_else(|| anyhow!("skill not found after update"))
 }
 pub async fn set_skill_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<Skill> {
     conn.execute("UPDATE skill SET enabled=?2, updated_at=?3 WHERE id=?1", params![id, if enabled { 1i64 } else { 0 }, now()]).await?;
-    Ok(get_skill(conn, id).await?.unwrap())
+    get_skill(conn, id).await?.ok_or_else(|| anyhow!("skill not found after update"))
 }
 
 // ---- Saved progressions ----------------------------------------------------
@@ -474,12 +526,15 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
     Ok(st)
 }
 pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
+    // one transaction: settings change as a unit, never a half-applied mix
+    let tx = conn.transaction().await?;
     for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("mcp_token", &st.mcp_token), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd)] {
-        conn.execute(
+        tx.execute(
             "INSERT INTO setting (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2",
             params![k, v.as_str()],
         ).await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 pub async fn ensure_mcp_token(conn: &Connection) -> Result<String> {

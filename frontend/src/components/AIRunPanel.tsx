@@ -36,6 +36,7 @@ export function AIRunPanel({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const streamRef = useRef("");
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     setStream("");
@@ -67,6 +68,7 @@ export function AIRunPanel({
     setError(null);
     setStream("");
     streamRef.current = "";
+    cancelledRef.current = false;
     try {
       // force the picked key to win over a stale key in an earlier stage's context
       const keyDirective = stageType === "chords" && keyRoot
@@ -77,9 +79,16 @@ export function AIRunPanel({
       setRunning(false);
       onChanged();
     } catch (e: any) {
-      setError(String(e?.message ?? e));
+      // a user-initiated cancel is not an error — end quietly
+      if (!cancelledRef.current) setError(String(e?.message ?? e));
       setRunning(false);
+      onChanged();
     }
+  };
+  const cancel = async () => {
+    cancelledRef.current = true;
+    try { await api.cancelStage(stageId); } catch {}
+    setRunning(false);
   };
   const approve = async () => { await api.approveStage(stageId); onChanged(); };
   // key/scale override for the Chords stage — updates the song key (one source of
@@ -103,6 +112,7 @@ export function AIRunPanel({
         <button className="primary" onClick={run} disabled={running}>
           {running ? (<><span className="spin">▮</span> Running…</>) : hasArtifact ? "Re-run / refine" : "Run stage"}
         </button>
+        {running && <button onClick={cancel}>Cancel</button>}
         {hasArtifact && (
           <button onClick={approve} disabled={approved}>{approved ? "Approved ✓" : "Approve & advance"}</button>
         )}

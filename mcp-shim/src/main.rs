@@ -17,7 +17,9 @@ use song_core::{db, tools};
 async fn main() -> anyhow::Result<()> {
     let db_path = std::env::var("SONGSMITH_DB").unwrap_or_else(|_| default_db_path());
     let database = db::open(std::path::Path::new(&db_path)).await?;
-    let conn = database.connect()?;
+    // db::connect sets PRAGMA busy_timeout so writes racing the desktop app wait
+    // for the lock instead of surfacing "database is locked" as raw tool errors
+    let conn = db::connect(&database).await?;
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

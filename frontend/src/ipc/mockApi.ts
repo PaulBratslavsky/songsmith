@@ -205,6 +205,7 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
       db.artifacts.push(art);
       return r(art);
     }
+    case "cancel_stage": return r(undefined); // mock runs finish instantly — nothing to cancel
     case "approve_stage": {
       const stage = db.stages.find((s: Any) => s.id === a.stageId);
       const art = currentArtifact(a.stageId);

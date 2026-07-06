@@ -154,13 +154,17 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "update_song_title" => v(db::update_song_title(conn, arg(args, "id")?, arg(args, "title")?).await?),
         "delete_song" => { db::delete_song(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
         "get_stage" => v(db::get_stage_detail(conn, arg(args, "id")?).await?),
-        "run_stage" => v(agent::run_stage(conn, settings, arg(args, "stage_id")?, arg_opt(args, "user_input").map(String::from), |_| {}).await?.artifact),
+        "run_stage" => v(agent::run_stage(conn, settings, arg(args, "stage_id")?, arg_opt(args, "user_input").map(String::from), |_| {}, None).await?.artifact),
         "approve_stage" => approve_stage(conn, arg(args, "stage_id")?).await,
         "advance_stage" => advance_song(conn, arg(args, "song_id")?).await,
         "get_artifact" => v(db::get_artifact(conn, arg(args, "id")?).await?),
-        "save_artifact" => v(db::save_artifact(conn, arg(args, "song_id")?, arg_opt(args, "stage_id"), arg(args, "kind")?, arg(args, "content")?).await?),
+        // TRUST MODEL: these two arms are Claude's write path (MCP / chat) — they go
+        // through the freeze guard so frozen sections can never be overwritten or
+        // resurrected-over. The user's own editor saves use the direct Tauri command
+        // (`db::save_artifact`), which is the unlock/rewrite authority.
+        "save_artifact" => v(agent::save_artifact_guarded(conn, arg(args, "song_id")?, arg_opt(args, "stage_id"), arg(args, "kind")?, arg(args, "content")?).await?),
         "list_artifact_revisions" => v(db::list_artifact_revisions(conn, arg(args, "stage_id")?).await?),
-        "revert_artifact" => v(db::revert_artifact(conn, arg(args, "artifact_id")?).await?),
+        "revert_artifact" => v(agent::revert_artifact_guarded(conn, arg(args, "artifact_id")?).await?),
         "list_skills" => v(db::list_skills(conn).await?),
         "get_skill" => v(db::get_skill(conn, arg(args, "id")?).await?),
         "create_skill" => v(db::create_skill(conn, skill_input(args)).await?),
