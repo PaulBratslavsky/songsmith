@@ -136,6 +136,10 @@ export function Composer({
     onSuccess: () => { setDirty(false); onChanged(); },
   });
 
+  // NOTE: all hooks must run before this early return — adding/removing the last
+  // section must not change the hook count (Rules of Hooks).
+  const check = useMemo(() => keyCheck(sections.flatMap((s) => s.chords.map((c) => c.name)), keyRoot, keyMode), [sections, keyRoot, keyMode]);
+
   if (sections.length === 0) {
     return (
       <div className="banner">
@@ -148,7 +152,6 @@ export function Composer({
     );
   }
 
-  const check = useMemo(() => keyCheck(sections.flatMap((s) => s.chords.map((c) => c.name)), keyRoot, keyMode), [sections, keyRoot, keyMode]);
   const inKey = check.out.length === 0 && check.hasTonic;
   return (
     <div>

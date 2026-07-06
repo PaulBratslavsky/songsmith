@@ -41,8 +41,19 @@ function useSongComposition(songId: string | null): {
   const chords = useQuery({ queryKey: ["stage", chordsStageId], queryFn: () => api.getStage(chordsStageId!), enabled: !!chordsStageId });
   const lyrics = useQuery({ queryKey: ["stage", lyricsStageId], queryFn: () => api.getStage(lyricsStageId!), enabled: !!lyricsStageId });
 
+  // Both stage queries must have SETTLED before we build the composition.
+  // The stage query keys are shared with SongWorkspace's cache, so chords can
+  // resolve instantly from cache while lyrics is still on its first fetch —
+  // building `comp` at that moment would seed the Composer lyric-less, and since
+  // `comp.id` is stable it would never reload for the session (the late-lyrics
+  // race). A stage that doesn't exist counts as settled.
+  const stagesSettled =
+    !!song.data &&
+    (!chordsStageId || chords.isFetched) &&
+    (!lyricsStageId || lyrics.isFetched);
+
   const comp = useMemo<Composition | null>(() => {
-    if (!songId || !song.data) return null;
+    if (!songId || !song.data || !stagesSettled) return null;
     const v = song.data.song;
     const cd = dataOf(chords.data?.artifact?.content);
     const ld = dataOf(lyrics.data?.artifact?.content);
@@ -52,12 +63,12 @@ function useSongComposition(songId: string | null): {
       name: v.title || "Imported song",
       bpm: Number(v.bpm) || undefined,
     });
-  }, [songId, song.data, chords.data, lyrics.data]);
+  }, [songId, song.data, stagesSettled, chords.data, lyrics.data]);
 
   return {
     comp,
     title: song.data?.song.title ?? null,
-    loading: !!songId && (song.isLoading || chords.isLoading || lyrics.isLoading),
+    loading: !!songId && (song.isLoading || !stagesSettled),
   };
 }
 
