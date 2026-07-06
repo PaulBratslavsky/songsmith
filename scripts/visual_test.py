@@ -110,6 +110,14 @@ def main():
             pg.click(".song-nav >> text=Lyrics"); pg.wait_for_timeout(500)
             pg.screenshot(path=f"{OUT}/lyrics-chordpro.png", full_page=True)
 
+            # Section freeze: lock the first section (🔓 → 🔒) so regeneration keeps it.
+            lock = pg.locator(".card button:has-text('🔓')")
+            if lock.count() > 0:
+                lock.first.click(); pg.wait_for_timeout(300)
+                pg.screenshot(path=f"{OUT}/lyrics-frozen.png", full_page=True)
+                lock2 = pg.locator(".card button:has-text('🔒')")
+                if lock2.count() > 0: lock2.first.click(); pg.wait_for_timeout(200)
+
             # per-section 💬 refine drawer (slides in as the right inspector flyout)
             refine = pg.locator(".card button:has-text('💬')")
             if refine.count() > 0:

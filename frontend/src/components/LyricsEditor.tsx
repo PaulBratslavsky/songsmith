@@ -7,7 +7,7 @@ import { FieldChat } from "./FieldChat";
 // a chord that lands on its first syllable. Stored back as inline "[C]word" text
 // so the chord is anchored to the word and stays aligned when lyrics are edited.
 type Word = { text: string; chord?: string };
-type Section = { label: string; lines: Word[][] };
+type Section = { label: string; lines: Word[][]; frozen?: boolean };
 
 // Preserve chord names exactly as authored — do NOT auto-sharpen. Flats are often
 // the musically-correct spelling (e.g. Bb = bII Neapolitan in A minor), and the
@@ -97,8 +97,20 @@ function progressionsByLabel(chordsData: any): Record<string, string[]> {
  *  A sung section with no saved chord placements gets the SAME derived placement the
  *  Sheet shows (auto-spread the progression), so the editor never looks empty and
  *  matches the export — without needing a manual "auto-place + save". */
+/** Which of this stage's own sections are frozen (locked), keyed by label. */
+function frozenByLabel(content: string): Record<string, boolean> {
+  const { data } = parse(content);
+  const out: Record<string, boolean> = {};
+  for (const s of data?.sections ?? []) {
+    const label = s.label || s.type || "Section";
+    if (s.frozen === true) out[label] = true;
+  }
+  return out;
+}
+
 function buildSections(content: string, chordsData: any): Section[] {
   const byLabel = wordsByLabel(content);
+  const frozen = frozenByLabel(content);
   const prog = progressionsByLabel(chordsData);
   const out: Section[] = [];
   const seen = new Set<string>();
@@ -106,7 +118,7 @@ function buildSections(content: string, chordsData: any): Section[] {
     const hasWords = lines.some((l) => l.some((w) => w.text.trim()));
     const hasChords = lines.some((l) => l.some((w) => w.chord));
     if (hasWords && !hasChords && prog[label]?.length) autoPlaceSection(lines, prog[label]);
-    out.push({ label, lines });
+    out.push({ label, lines, ...(frozen[label] ? { frozen: true } : {}) });
   };
   for (const cs of chordsData?.sections ?? []) {
     const label = cs.label || cs.type;
@@ -187,7 +199,7 @@ export function LyricsEditor({
 
   const save = useMutation({
     mutationFn: () => {
-      const data = { sections: sections.map((s) => ({ label: s.label, lines: s.lines.map(lineToChordPro) })) };
+      const data = { sections: sections.map((s) => ({ label: s.label, lines: s.lines.map(lineToChordPro), ...(s.frozen ? { frozen: true } : {}) })) };
       const text = sections.map((s) => `[${s.label}]\n${s.lines.map(lineToChordPro).join("\n")}`).join("\n\n");
       return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data }));
     },
@@ -218,6 +230,8 @@ export function LyricsEditor({
         </button>
       </div>
 
+      <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>🔒 Locked sections are kept as-is when you regenerate this stage.</p>
+
       {mode === "place" && (
         <p className="faint" style={{ margin: "0 0 8px" }}>
           Pick a chord, then click the word it lands on — it pins above that word and stays aligned on the Sheet. Click a placed chord to remove it.
@@ -230,8 +244,10 @@ export function LyricsEditor({
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <b>{sec.label}</b>
               {isInstrumental(sec) && <span className="badge" title="no sung words — plays as an instrumental">🎸 instrumental</span>}
+              {sec.frozen && <span className="badge done" title="locked — kept as-is when you regenerate this stage">locked</span>}
             </div>
             <div className="row" style={{ gap: 6, alignItems: "center" }}>
+              <button className={"sm ghost" + (sec.frozen ? " primary" : "")} title={sec.frozen ? "unlock — let regeneration rewrite this section" : "lock — keep this section as-is when you regenerate"} onClick={() => mutate((s) => { s[si].frozen = !s[si].frozen; return s; })}>{sec.frozen ? "🔒" : "🔓"}</button>
               {mode === "place" && !isInstrumental(sec) && <button className="sm ghost" onClick={() => autoPlace(si)} title="spread this section's progression across its lyrics">⚡ auto-place</button>}
               <FieldChat stageLabel="Lyrics" fieldLabel={isInstrumental(sec) ? `${sec.label} (write lyrics)` : sec.label} current={sectionPlain(sec)} onResult={(t) => applyRefine(si, t)} />
             </div>

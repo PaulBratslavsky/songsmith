@@ -4,7 +4,7 @@ import { api } from "../ipc/api";
 import { NOTE_NAMES, pitchClassOf } from "../music/theory";
 import { FieldChat } from "./FieldChat";
 
-export type Section = { type?: string; label: string; bars: number; role: string };
+export type Section = { type?: string; label: string; bars: number; role: string; frozen?: boolean };
 export type StructureData = { root: string; mode: string; bpm: number; keyNote: string; tempoNote: string; sections: Section[] };
 
 export function parseStructure(content: string): StructureData {
@@ -19,7 +19,7 @@ export function parseStructure(content: string): StructureData {
     keyNote: data?.keyNote ?? (km ? km[1].trim() : ""),
     tempoNote: data?.tempoNote ?? (tm ? tm[1].replace(/\([^)]*\)/g, "").trim() : ""),
     sections: Array.isArray(data?.sections)
-      ? data.sections.map((s: any) => ({ type: s.type ?? "", label: s.label ?? s.type ?? "", bars: Number(s.bars ?? 8), role: s.role ?? "" }))
+      ? data.sections.map((s: any) => ({ type: s.type ?? "", label: s.label ?? s.type ?? "", bars: Number(s.bars ?? 8), role: s.role ?? "", frozen: s.frozen === true }))
       : [],
   };
 }
@@ -54,7 +54,9 @@ export function StructureEditor({
 
   const save = useMutation({
     mutationFn: async () => {
-      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: structureToMarkdown(d), data: { key: { root: d.root, mode: d.mode }, bpm: d.bpm, keyNote: d.keyNote, tempoNote: d.tempoNote, sections: d.sections } }));
+      // persist `frozen` only when set, so unfrozen sections stay as before
+      const sections = d.sections.map((s) => ({ type: s.type, label: s.label, bars: s.bars, role: s.role, ...(s.frozen ? { frozen: true } : {}) }));
+      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: structureToMarkdown(d), data: { key: { root: d.root, mode: d.mode }, bpm: d.bpm, keyNote: d.keyNote, tempoNote: d.tempoNote, sections } }));
       // Structure is the source of truth for key/tempo — sync it to the song so
       // the Chords palette, Sheet, and Ableton all infer from one place
       await api.updateSongKey(songId, d.root, d.mode, d.bpm);
@@ -74,11 +76,14 @@ export function StructureEditor({
 
       <div>
         <label>Sections</label>
+        <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>🔒 Locked sections are kept as-is when you regenerate this stage.</p>
         <div className="col" style={{ gap: 8 }}>
           {d.sections.map((s, i) => (
-            <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 2, padding: 8 }}>
+            <div key={i} className={s.frozen ? "frozen" : ""} style={{ border: "1px solid var(--line)", borderRadius: 2, padding: 8 }}>
               <div className="row" style={{ gap: 6, alignItems: "center" }}>
+                <button className={"sm ghost" + (s.frozen ? " primary" : "")} title={s.frozen ? "unlock — let regeneration rewrite this section" : "lock — keep this section as-is when you regenerate"} onClick={() => setSec(i, { frozen: !s.frozen })}>{s.frozen ? "🔒" : "🔓"}</button>
                 <input value={s.label} onChange={(e) => setSec(i, { label: e.target.value })} placeholder="Verse 1" style={{ flex: 1 }} />
+                {s.frozen && <span className="badge done" title="locked — kept as-is when you regenerate">locked</span>}
                 <input type="number" value={s.bars} onChange={(e) => setSec(i, { bars: Number(e.target.value) })} title="bars" style={{ width: 60 }} />
                 <button className="sm ghost" title="up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
                 <button className="sm ghost" title="down" disabled={i === d.sections.length - 1} onClick={() => move(i, 1)}>↓</button>

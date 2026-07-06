@@ -11,9 +11,17 @@ chords `{sections:[{label,feel,chords:[{name,beats}]}]}`, structure `{sections:[
 
 ---
 
-## Feature A — Per-section Freeze (regeneration-safe) — PRIORITY
+## Feature A — Per-section Freeze (regeneration-safe) — ✅ DONE (2026-06-29)
 **Decision:** per-section lock on **all section-based stages** (Structure, Chords, Lyric Spec, Lyrics).
 A locked section is a **hard guarantee**: regeneration never changes it.
+
+**Built:** `core/src/agent.rs` — `merge_frozen_sections(stage_type, prior, new)` + `frozen_prompt_block`;
+both `run_stage` paths (initial gen + self-test/revise) inject frozen sections into the prompt then
+deterministically splice the prior frozen sections back (match by label, re-insert if dropped, rebuild
+`text` from merged `data`). 5 tests incl. "frozen section byte-identical after regen" + "no-frozen path
+unchanged". 🔒 lock toggle per section in StructureEditor, Composer (chords), LyricSpecEditor,
+LyricsEditor (writes `frozen` to the section, saved as a revision). When nothing is frozen, behavior is
+identical to before.
 
 ### Model
 - Add optional `frozen?: boolean` to each entry in a stage artifact's `data.sections[]`. (Persisted in

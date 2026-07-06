@@ -47,6 +47,8 @@ The output feeds a real pipeline:
   See `docs/COMPOSER-SPEC.md`.
 - **Suno-accurate prompts** — the Generation Prompt stage follows current best practice: key +
   tempo in the **style** line, chords as `[Am]` tags **inline in the lyrics** (not sung).
+- **Freeze sections** — 🔒 lock any section in Structure / Chords / Lyric Spec / Lyrics and
+  regenerating that stage keeps it byte-for-byte; only unlocked sections are rewritten.
 - **Final renders** — reference your generated audio versions on disk (multiple takes), play
   them, reveal in Finder, ★ pick the winner. Audio stays in your DAW-friendly folder.
 - **Extensible skills** — every stage's songwriting method is an editable skill; add custom

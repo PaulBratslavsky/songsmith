@@ -148,6 +148,18 @@ section end-to-end on one long, horizontally-scrollable timeline. Design:
 - This is Phase 4 (import direction) + the full-song extension; export-back-to-song + save (Phase 3)
   follow.
 
+## Lyric display refinement (user, 2026-06-29) — REQUIRED, next Composer build
+The current full-song lyric row (lines pinned at each chord's tick) cascades right and reads badly.
+Replace it with a clean **ChordPro lyric sheet below the timeline** — grouped by section, chord-name
+above the word it lands on, left-aligned — **reusing the existing Sheet / Lyric-Spec ChordPro
+renderer** (don't re-implement). Keep the timeline (section band + chord/melody/bass lanes) above as the
+editing surface; the sheet below is the readable view.
+- **Two-way highlight sync:** selecting a chord block (or the playhead passing it) highlights its
+  **section** in the sheet AND the **exact active chord/word** (section tint + brighter mark on the
+  current chord); hovering/clicking a chord in the sheet highlights the matching timeline block. During
+  playback the highlight follows the playhead through the lyrics.
+- Build this AFTER the in-flight Freeze feature lands (avoid file conflicts in compose/ components).
+
 ## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and
 the grid live-reloads) — after the visual builder + import/export work.

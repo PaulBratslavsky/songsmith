@@ -30,7 +30,7 @@ function keyCheck(names: string[], root: string, mode: string): { out: string[];
 }
 
 type Chord = { id: string; name: string; beats: number };
-type Section = { id: string; label: string; chords: Chord[]; feel?: string };
+type Section = { id: string; label: string; chords: Chord[]; feel?: string; frozen?: boolean };
 
 /** A pointer/keyboard-draggable wrapper (dnd-kit) — works in the Tauri WebView,
  *  unlike HTML5 drag. Hands the drag handle props to its render child. */
@@ -49,6 +49,7 @@ function fromData(data: any): Section[] {
     id: uid(),
     label: s.label || s.type || "Section",
     feel: s.feel,
+    frozen: s.frozen === true,
     chords: (Array.isArray(s.chords) ? s.chords : []).map((c: any) => ({
       id: uid(),
       name: typeof c === "string" ? c : c?.name ?? "",
@@ -57,7 +58,8 @@ function fromData(data: any): Section[] {
   }));
 }
 function toData(sections: Section[]) {
-  return { sections: sections.map((s) => ({ label: s.label, feel: s.feel, chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })) })) };
+  // persist `frozen` only when set, so unfrozen sections stay byte-identical to before
+  return { sections: sections.map((s) => ({ label: s.label, feel: s.feel, ...(s.frozen ? { frozen: true } : {}), chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })) })) };
 }
 
 export function Composer({
@@ -92,6 +94,7 @@ export function Composer({
   const importToSection = (si: number, names: string[]) => mutate((s) => { s[si].chords = names.map((n) => ({ id: uid(), name: n, beats: 4 })); return s; });
   const removeChord = (si: number, ci: number) => mutate((s) => { s[si].chords.splice(ci, 1); return s; });
   const setLabel = (si: number, label: string) => mutate((s) => { s[si].label = label; return s; });
+  const toggleFrozen = (si: number) => mutate((s) => { s[si].frozen = !s[si].frozen; return s; });
   const addSection = (label = "Section") => mutate((s) => { s.push({ id: uid(), label, chords: [] }); return s; });
   const removeSection = (si: number) => mutate((s) => { s.splice(si, 1); return s; });
   const moveSection = (si: number, dir: -1 | 1) => mutate((s) => {
@@ -161,6 +164,8 @@ export function Composer({
 
       <ImportProgression sectionLabels={sections.map((s) => s.label)} onImport={importToSection} />
 
+      <p className="faint" style={{ fontSize: 11, margin: "0 0 8px" }}>🔒 Locked sections are kept as-is when you regenerate this stage.</p>
+
       <div className="card" style={{ marginBottom: 10 }}>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <label style={{ margin: 0 }}>Palette — chords in scale <span className="faint">(click to add to selected section)</span></label>
@@ -190,13 +195,15 @@ export function Composer({
           {sections.map((sec, si) => (
             <Sortable key={sec.id} id={sec.id}>
               {(handle, dragging) => (
-                <div className={"card section-card" + (dragging ? " dragging" : "")} style={{ marginBottom: 8 }}>
+                <div className={"card section-card" + (dragging ? " dragging" : "") + (sec.frozen ? " frozen" : "")} style={{ marginBottom: 8 }}>
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <div className="row" style={{ gap: 6, alignItems: "center" }}>
                       <span className="drag-handle" title="drag to reorder" {...handle}>⠿</span>
                       <input value={sec.label} onChange={(e) => setLabel(si, e.target.value)} title="section name (Intro, Solo, Drop…)" style={{ width: 180, fontWeight: 600 }} />
+                      {sec.frozen && <span className="badge done" title="locked — kept as-is when you regenerate">🔒 locked</span>}
                     </div>
                     <div className="row" style={{ gap: 6 }}>
+                      <button className={"sm ghost" + (sec.frozen ? " primary" : "")} title={sec.frozen ? "unlock — let regeneration rewrite this section" : "lock — keep this section as-is when you regenerate"} onClick={() => toggleFrozen(si)}>{sec.frozen ? "🔒" : "🔓"}</button>
                       <button className="sm ghost" title="move up" disabled={si === 0} onClick={() => moveSection(si, -1)}>↑</button>
                       <button className="sm ghost" title="move down" disabled={si === sections.length - 1} onClick={() => moveSection(si, 1)}>↓</button>
                       <button className="sm" onClick={() => playSection(si)}>▶ play</button>

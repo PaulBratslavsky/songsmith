@@ -3,7 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { FieldChat } from "./FieldChat";
 
-type Beat = { section: string; beat: string };
+type Beat = { section: string; beat: string; frozen?: boolean };
 export type Diction = "plain-spoken" | "balanced" | "literary";
 export type SpecData = { hook: string; premise: string; pov: string; setting: string; arc: string; diction: Diction; referenceVibe: string; beats: Beat[]; imageBank: string[]; avoid: string[] };
 

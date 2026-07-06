@@ -30,6 +30,276 @@ pub struct RunOutcome {
     pub raw_output: String,
 }
 
+// ---- Per-section Freeze (regeneration-safe) -------------------------------
+//
+// A section can carry an optional `"frozen": true` flag in a stage artifact's
+// `data.sections[]` (or `data.beats[]` for lyric_spec). A frozen section is a
+// HARD guarantee: when the stage regenerates, the prior frozen section is
+// spliced back verbatim over whatever Claude produced — the lock is enforced
+// deterministically, not just via the prompt. When nothing is frozen the merge
+// is a no-op and behavior is identical to before.
+
+/// The only stages with section-based artifacts that support freezing.
+fn is_section_stage(stage_type: &str) -> bool {
+    matches!(stage_type, "structure" | "chords" | "lyric_spec" | "lyrics")
+}
+
+/// `(array key, label key)` for a section-based stage. lyric_spec's per-section
+/// unit is the beat sheet (`beats[]`, keyed by `section`); the rest use
+/// `sections[]` keyed by `label`.
+fn section_keys(stage_type: &str) -> (&'static str, &'static str) {
+    match stage_type {
+        "lyric_spec" => ("beats", "section"),
+        _ => ("sections", "label"),
+    }
+}
+
+/// Read a section's label (the chords/structure/lyrics editors fall back from
+/// `label` to `type`; matching is case/space-insensitive on the normalized form).
+fn section_label(stage_type: &str, sec: &Value) -> String {
+    let (_, lbl_key) = section_keys(stage_type);
+    sec.get(lbl_key)
+        .and_then(|v| v.as_str())
+        .or_else(|| sec.get("type").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn norm_label(s: &str) -> String {
+    s.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Deterministically splice prior **frozen** sections into the regenerated
+/// artifact's `data`. Match by label (case/space-insensitive); if Claude dropped
+/// a frozen section, re-insert it at its original index; always carry `frozen:true`.
+/// Returns the merged `data` Value. Non-section stages return `new_data` unchanged.
+pub fn merge_frozen_sections(stage_type: &str, prior_data: &Value, new_data: &Value) -> Value {
+    if !is_section_stage(stage_type) {
+        return new_data.clone();
+    }
+    let (arr_key, _) = section_keys(stage_type);
+    let prior_secs = prior_data.get(arr_key).and_then(|v| v.as_array());
+    let Some(prior_secs) = prior_secs else { return new_data.clone() };
+
+    // collect (original_index, label, section) for each prior-frozen section
+    let frozen: Vec<(usize, String, Value)> = prior_secs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false))
+        .map(|(i, s)| {
+            let mut s = s.clone();
+            // ensure the flag is carried forward verbatim
+            if let Some(obj) = s.as_object_mut() {
+                obj.insert("frozen".into(), Value::Bool(true));
+            }
+            (i, norm_label(&section_label(stage_type, &s)), s)
+        })
+        .collect();
+
+    if frozen.is_empty() {
+        return new_data.clone();
+    }
+
+    let mut merged = new_data.clone();
+    if !merged.is_object() {
+        merged = json!({});
+    }
+    let new_secs = merged
+        .get(arr_key)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = new_secs.clone();
+
+    for (orig_idx, flabel, fsec) in &frozen {
+        // overwrite the matching new section verbatim …
+        if let Some(pos) = out
+            .iter()
+            .position(|s| norm_label(&section_label(stage_type, s)) == *flabel)
+        {
+            out[pos] = fsec.clone();
+        } else {
+            // … or re-insert it at (close to) its original position if dropped.
+            let at = (*orig_idx).min(out.len());
+            out.insert(at, fsec.clone());
+        }
+    }
+
+    merged[arr_key] = Value::Array(out);
+    merged
+}
+
+/// Render the human-readable `text` for a section-based stage from its merged
+/// `data`, mirroring exactly how each stage's editor serializes text → so the
+/// artifact `text` (which `gather_prior_context` reads) stays consistent after a
+/// splice. Returns `None` for non-section stages (keep Claude's text).
+fn render_stage_text(stage_type: &str, data: &Value) -> Option<String> {
+    match stage_type {
+        "structure" => Some(structure_editor_text(data)),
+        "chords" => Some(chords_editor_text(data)),
+        "lyrics" => Some(lyrics_text(data)),
+        "lyric_spec" => Some(lyric_spec_text(data)),
+        _ => None,
+    }
+}
+
+/// Mirror of `Composer`'s save: `label: name name …` per section. Unlike the
+/// `chords_text` used by reference-import (string chords), the Composer stores
+/// each chord as `{name,beats}`, so read `name` (falling back to a bare string).
+fn chords_editor_text(c: &Value) -> String {
+    let mut out = Vec::new();
+    if let Some(arr) = c.get("sections").and_then(|v| v.as_array()) {
+        for sec in arr {
+            let label = sec.get("label").and_then(|v| v.as_str())
+                .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("Section");
+            let names: Vec<String> = sec.get("chords").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| {
+                    x.as_str().map(String::from).or_else(|| x.get("name").and_then(|n| n.as_str()).map(String::from))
+                }).collect())
+                .unwrap_or_default();
+            out.push(format!("{label}: {}", names.join(" ")));
+        }
+    }
+    out.join("\n")
+}
+
+/// Mirror of `StructureEditor.structureToMarkdown`.
+fn structure_editor_text(d: &Value) -> String {
+    let root = d.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("");
+    let mode = d.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("");
+    let bpm = d.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
+    let key_note = d.get("keyNote").and_then(|v| v.as_str()).unwrap_or("");
+    let tempo_note = d.get("tempoNote").and_then(|v| v.as_str()).unwrap_or("");
+    let mut lines = vec![
+        format!("**KEY:** {root} {mode}{}", if key_note.is_empty() { String::new() } else { format!(" — {key_note}") }),
+        format!("**TEMPO:** {bpm} BPM{}", if tempo_note.is_empty() { String::new() } else { format!(" — {tempo_note}") }),
+        String::new(),
+        "**SECTION MAP**".into(),
+        String::new(),
+    ];
+    if let Some(arr) = d.get("sections").and_then(|v| v.as_array()) {
+        for (i, sec) in arr.iter().enumerate() {
+            let label = sec.get("label").and_then(|v| v.as_str())
+                .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("");
+            let bars = sec.get("bars").and_then(|v| v.as_i64()).unwrap_or(8);
+            let role = sec.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            lines.push(format!("{}. **{label}** ({bars} bars){}", i + 1, if role.is_empty() { String::new() } else { format!(" — {role}") }));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Mirror of `LyricsEditor`'s save: `[label]\n<lines>` blocks, each line a
+/// ChordPro string (the lyrics `data.sections[].lines` are already strings).
+fn lyrics_text(d: &Value) -> String {
+    let mut blocks = Vec::new();
+    if let Some(arr) = d.get("sections").and_then(|v| v.as_array()) {
+        for sec in arr {
+            let label = sec.get("label").and_then(|v| v.as_str())
+                .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("Section");
+            let lines: Vec<String> = sec.get("lines").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            blocks.push(format!("[{label}]\n{}", lines.join("\n")));
+        }
+    }
+    blocks.join("\n\n")
+}
+
+/// Mirror of `LyricSpecEditor.specToMarkdown` (scalar fields + the beat sheet).
+fn lyric_spec_text(d: &Value) -> String {
+    let g = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let diction = {
+        let dc = g("diction");
+        if dc.is_empty() { "balanced" } else { dc }
+    };
+    let diction_gloss = match diction {
+        "plain-spoken" => "conversational, almost no metaphor",
+        "literary" => "dense, poetic, image-rich",
+        _ => "mostly plain with a few sharp images",
+    };
+    let mut lines = vec![
+        format!("**HOOK:** {}", g("hook")),
+        format!("**PREMISE:** {}", g("premise")),
+        format!("**POV / TENSE:** {}", g("pov")),
+        format!("**SETTING:** {}", g("setting")),
+        format!("**ARC:** {}", g("arc")),
+        format!("**DICTION:** {diction} ({diction_gloss})"),
+    ];
+    let rv = g("referenceVibe");
+    lines.push(if rv.is_empty() { String::new() } else { format!("**REFERENCE VIBE:** {rv}") });
+    lines.push(String::new());
+    lines.push("**SONG MAP (beat sheet)**".into());
+    if let Some(arr) = d.get("beats").and_then(|v| v.as_array()) {
+        for b in arr {
+            let section = b.get("section").and_then(|v| v.as_str())
+                .or_else(|| b.get("label").and_then(|v| v.as_str())).unwrap_or("");
+            let beat = b.get("beat").and_then(|v| v.as_str())
+                .or_else(|| b.get("text").and_then(|v| v.as_str())).unwrap_or("");
+            lines.push(format!("- {section}: {beat}"));
+        }
+    }
+    lines.push(String::new());
+    let join_list = |k: &str| d.get(k).and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" · "))
+        .unwrap_or_default();
+    lines.push(format!("**IMAGE BANK:** {}", join_list("imageBank")));
+    lines.push(format!("**AVOID:** {}", join_list("avoid")));
+    lines.join("\n")
+}
+
+/// Render the prior frozen sections as text to inject into the generation prompt,
+/// so the regenerated unlocked sections stay coherent with the locked ones.
+fn frozen_prompt_block(stage_type: &str, prior_data: &Value) -> Option<String> {
+    if !is_section_stage(stage_type) {
+        return None;
+    }
+    let (arr_key, _) = section_keys(stage_type);
+    let secs = prior_data.get(arr_key).and_then(|v| v.as_array())?;
+    let frozen: Vec<&Value> = secs
+        .iter()
+        .filter(|s| s.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false))
+        .collect();
+    if frozen.is_empty() {
+        return None;
+    }
+    // render only the frozen subset through the same per-stage renderer
+    let subset = json!({ arr_key: frozen });
+    let rendered = render_stage_text(stage_type, &subset).unwrap_or_default();
+    let labels: Vec<String> = frozen.iter().map(|s| section_label(stage_type, s)).filter(|l| !l.is_empty()).collect();
+    Some(format!(
+        "LOCKED SECTIONS — these are FINAL. Reproduce them EXACTLY (verbatim, same labels: {}) and only (re)write the other sections so they stay coherent with these:\n\n{}",
+        labels.join(", "),
+        rendered.trim()
+    ))
+}
+
+/// Build the merged, frozen-spliced artifact `content` JSON string from Claude's
+/// raw `text` + the stage's prior current artifact. When nothing was frozen this
+/// produces exactly the same `{kind,text,data}` as before (no-op).
+fn build_merged_content(stage_type: &str, raw_text: &str, prior_content: Option<&str>) -> String {
+    let kind = kind_for_stage(stage_type);
+    let new_data = extract_json(raw_text);
+
+    // Only section stages with prior frozen sections trigger a splice.
+    if is_section_stage(stage_type) {
+        if let (Some(pc), Some(nd)) = (prior_content, new_data.clone()) {
+            let prior_data = serde_json::from_str::<Value>(pc)
+                .ok()
+                .and_then(|v| v.get("data").cloned());
+            if let Some(prior_data) = prior_data {
+                let has_frozen = frozen_prompt_block(stage_type, &prior_data).is_some();
+                if has_frozen {
+                    let merged = merge_frozen_sections(stage_type, &prior_data, &nd);
+                    let text = render_stage_text(stage_type, &merged).unwrap_or_else(|| raw_text.to_string());
+                    return json!({ "kind": kind, "text": text, "data": merged }).to_string();
+                }
+            }
+        }
+    }
+    json!({ "kind": kind, "text": raw_text, "data": new_data }).to_string()
+}
+
 /// Run a stage. `user_input` carries an optional seed (the producer's own
 /// chords/lyrics/title). `on_token` receives streamed text chunks.
 pub async fn run_stage<F>(
@@ -55,13 +325,24 @@ where
         db::set_stage_skill(conn, stage_id, &skill.id).await?;
     }
 
+    // the stage's prior current artifact — its frozen sections are protected
+    let prior_artifact = db::current_artifact(conn, stage_id).await?;
+    let prior_data = prior_artifact.as_ref().and_then(|a| {
+        serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned())
+    });
+
     let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
     let system = build_system_prompt(&skill, &preset, &song);
-    let user = build_user_prompt(&stage.r#type, &prior, user_input.as_deref());
+    let mut user = build_user_prompt(&stage.r#type, &prior, user_input.as_deref());
+    if let Some(pd) = &prior_data {
+        if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
+            user.push_str("\n\n");
+            user.push_str(&block);
+        }
+    }
 
     let text = call_claude(settings, &system, &user, &on_token).await?;
-    let data = extract_json(&text);
-    let content = json!({ "kind": kind_for_stage(&stage.r#type), "text": text, "data": data }).to_string();
+    let content = build_merged_content(&stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str()));
 
     let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
     Ok(RunOutcome { artifact, raw_output: text })
@@ -90,14 +371,21 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
 3. CRAFT: cut clichés, weak \"to be\" verbs, abstract emotion-words, forced rhymes, and over-written \"poetic\" lines that no one would actually sing; keep it human and singable.\n\
 4. Preserve the inline [chord] tags and the section labels exactly.\n\
 Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
-    let user = format!(
+    let mut user = format!(
         "Prior stages (context):\n\n{prior}\n\n---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
         stage_label(&stage.r#type)
     );
+    // frozen sections are FINAL even through a self-test/revise pass
+    let prior_data = serde_json::from_str::<Value>(&current.content).ok().and_then(|v| v.get("data").cloned());
+    if let Some(pd) = &prior_data {
+        if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
+            user.push_str("\n\n");
+            user.push_str(&block);
+        }
+    }
 
     let text = call_claude(settings, &system, &user, &|_| {}).await?;
-    let data = extract_json(&text);
-    let content = json!({ "kind": kind_for_stage(&stage.r#type), "text": text, "data": data }).to_string();
+    let content = build_merged_content(&stage.r#type, &text, Some(&current.content));
     let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
     Ok(artifact)
 }
@@ -307,6 +595,14 @@ async fn call_claude<F>(settings: &Settings, system: &str, user: &str, on_token:
 where
     F: Fn(String) + Send,
 {
+    // Test hook: when SONGSMITH_MOCK_CLAUDE is set, return its value verbatim as
+    // Claude's output instead of shelling out to the CLI. Lets the freeze/merge
+    // logic be exercised end-to-end in `cargo test` with no Claude subscription.
+    if let Ok(canned) = std::env::var("SONGSMITH_MOCK_CLAUDE") {
+        on_token(canned.clone());
+        return Ok(canned);
+    }
+
     let bin = if settings.claude_bin.is_empty() { "claude".to_string() } else { settings.claude_bin.clone() };
     let mut cmd = tokio::process::Command::new(&bin);
     // This app drives Claude via your Claude Code / claude.ai subscription login.
@@ -419,4 +715,170 @@ pub fn extract_json(text: &str) -> Option<Value> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use libsql::Builder;
+    use std::sync::Mutex;
+
+    // `call_claude` reads SONGSMITH_MOCK_CLAUDE from the process env, which is
+    // global — serialize the tests that set it so they don't race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn merge_frozen_sections_protects_locked_only() {
+        // prior: section A frozen, section B unlocked
+        let prior = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Am","beats":4}], "frozen": true },
+            { "label": "Chorus", "chords": [{"name":"C","beats":4}] }
+        ]});
+        // new: Claude rewrote BOTH and dropped the frozen one's original content
+        let new = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Dm","beats":2}] },
+            { "label": "Chorus", "chords": [{"name":"G","beats":4}] }
+        ]});
+
+        let merged = merge_frozen_sections("chords", &prior, &new);
+        let secs = merged["sections"].as_array().unwrap();
+
+        // frozen Verse 1 is byte-identical to the prior (+ frozen flag carried)
+        let v = secs.iter().find(|s| s["label"] == "Verse 1").unwrap();
+        assert_eq!(v["chords"][0]["name"], "Am");
+        assert_eq!(v["frozen"], json!(true));
+        // unlocked Chorus took Claude's new value
+        let c = secs.iter().find(|s| s["label"] == "Chorus").unwrap();
+        assert_eq!(c["chords"][0]["name"], "G");
+    }
+
+    #[test]
+    fn merge_reinserts_dropped_frozen_section_at_original_index() {
+        let prior = json!({ "sections": [
+            { "label": "Intro", "chords": [{"name":"Am","beats":4}], "frozen": true },
+            { "label": "Verse 1", "chords": [{"name":"Dm","beats":4}] }
+        ]});
+        // Claude dropped the frozen Intro entirely
+        let new = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"F","beats":4}] }
+        ]});
+
+        let merged = merge_frozen_sections("chords", &prior, &new);
+        let secs = merged["sections"].as_array().unwrap();
+        assert_eq!(secs.len(), 2);
+        // re-inserted at its original index 0, verbatim, flag carried
+        assert_eq!(secs[0]["label"], "Intro");
+        assert_eq!(secs[0]["chords"][0]["name"], "Am");
+        assert_eq!(secs[0]["frozen"], json!(true));
+    }
+
+    #[test]
+    fn merge_is_noop_when_nothing_frozen() {
+        let prior = json!({ "sections": [ { "label": "A", "chords": [] } ] });
+        let new = json!({ "sections": [ { "label": "A", "chords": [{"name":"C","beats":4}] } ] });
+        let merged = merge_frozen_sections("chords", &prior, &new);
+        assert_eq!(merged, new); // identical to today
+    }
+
+    #[test]
+    fn merge_matches_label_case_and_space_insensitively() {
+        let prior = json!({ "sections": [ { "label": "Pre-Chorus / Build 1", "chords": [{"name":"Am"}], "frozen": true } ] });
+        let new = json!({ "sections": [ { "label": "pre-chorus / build  1", "chords": [{"name":"G"}] } ] });
+        let merged = merge_frozen_sections("chords", &prior, &new);
+        let secs = merged["sections"].as_array().unwrap();
+        assert_eq!(secs.len(), 1); // matched, not duplicated
+        assert_eq!(secs[0]["chords"][0]["name"], "Am");
+    }
+
+    // libSQL `:memory:` gives each connection its OWN database, so return the
+    // single connection migrated/seeded here and reuse it for the whole test.
+    async fn mem_conn() -> (libsql::Database, libsql::Connection) {
+        let db = Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        db::migrate(&conn).await.unwrap();
+        db::seed_skills(&conn).await.unwrap();
+        (db, conn)
+    }
+
+    /// run_stage-level proof: a FROZEN chords section is byte-identical before and
+    /// after a regeneration, while an UNLOCKED section changes.
+    #[tokio::test]
+    async fn run_stage_keeps_frozen_section_byte_identical() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+
+        // prior current artifact: Verse 1 frozen, Chorus unlocked
+        let prior_data = json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Am","beats":4},{"name":"F","beats":4}], "frozen": true },
+            { "label": "Chorus", "chords": [{"name":"C","beats":4}] }
+        ]});
+        let prior_content = json!({ "kind": "chords", "text": chords_editor_text(&prior_data), "data": prior_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&chords_stage.id), "chords", &prior_content).await.unwrap();
+
+        // capture the frozen section's exact prior JSON
+        let prior_frozen = serde_json::from_str::<Value>(&prior_content).unwrap()
+            ["data"]["sections"][0].clone();
+
+        // Claude "regenerates" everything (ignores the lock entirely)
+        let claude_out = "```json\n".to_string() + &json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Dm","beats":2},{"name":"Bb","beats":2}] },
+            { "label": "Chorus", "chords": [{"name":"G","beats":4},{"name":"Em","beats":4}] }
+        ]}).to_string() + "\n```";
+
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", &claude_out);
+        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}).await.unwrap();
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
+
+        let new = serde_json::from_str::<Value>(&outcome.artifact.content).unwrap();
+        let new_secs = new["data"]["sections"].as_array().unwrap();
+        let new_verse = new_secs.iter().find(|s| s["label"] == "Verse 1").unwrap();
+        let new_chorus = new_secs.iter().find(|s| s["label"] == "Chorus").unwrap();
+
+        // HARD GUARANTEE: frozen section is byte-identical to before
+        assert_eq!(*new_verse, prior_frozen, "frozen section must be untouched");
+        assert_eq!(new_verse["frozen"], json!(true));
+        // unlocked section changed to Claude's new output
+        assert_eq!(new_chorus["chords"][0]["name"], "G");
+        // text was rebuilt from merged data and reflects the frozen content
+        let text = new["text"].as_str().unwrap();
+        assert!(text.contains("Verse 1: Am F"), "rebuilt text keeps frozen chords, got: {text}");
+        assert!(text.contains("Chorus: G Em"), "rebuilt text has new chorus, got: {text}");
+    }
+
+    /// When nothing is frozen, run_stage produces exactly the legacy
+    /// `{kind,text:<raw>,data:<extracted>}` shape (behavior identical to today).
+    #[tokio::test]
+    async fn run_stage_no_frozen_is_unchanged() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+
+        let claude_out = "```json\n".to_string() + &json!({ "sections": [
+            { "label": "Verse 1", "chords": [{"name":"Dm","beats":4}] }
+        ]}).to_string() + "\n```";
+
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", &claude_out);
+        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}).await.unwrap();
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
+
+        let expected = json!({ "kind": "chords", "text": claude_out, "data": extract_json(&claude_out) }).to_string();
+        assert_eq!(outcome.artifact.content, expected, "no-frozen path must match the legacy content exactly");
+    }
 }
