@@ -1262,4 +1262,35 @@ mod tests {
             .await
             .expect("a pre-cancelled token must resolve immediately");
     }
+
+    // Audit Tier-2 #6: user skills must outrank builtins, and reseeding must not
+    // bump an unchanged builtin's updated_at (which used to re-win the recency sort).
+    #[tokio::test]
+    async fn user_skill_outranks_builtin_and_reseed_is_noop() {
+        let (_db, conn) = mem_conn().await;
+
+        // the builtin is active before any user skill exists
+        let before = db::get_active_skill_for_stage(&conn, "chords").await.unwrap().unwrap();
+        assert_eq!(before.source, "builtin");
+        let builtin_ts = before.updated_at.clone();
+
+        // reseeding with unchanged embedded content must not touch updated_at
+        db::seed_skills(&conn).await.unwrap();
+        let reseeded = db::get_active_skill_for_stage(&conn, "chords").await.unwrap().unwrap();
+        assert_eq!(reseeded.updated_at, builtin_ts, "no-op reseed must not bump updated_at");
+
+        // a user-created skill for the same stage wins…
+        let user = db::create_skill(&conn, crate::models::SkillInput {
+            key: "my-chords".into(),
+            name: "My Chords".into(),
+            stage_type: "chords".into(),
+            instructions: "Always write jazz voicings.".into(),
+        }).await.unwrap();
+        assert_eq!(user.source, "user");
+
+        // …including after another reseed (the old bug: builtins re-timestamped each launch)
+        db::seed_skills(&conn).await.unwrap();
+        let active = db::get_active_skill_for_stage(&conn, "chords").await.unwrap().unwrap();
+        assert_eq!(active.id, user.id, "user skill must outrank the builtin after reseed");
+    }
 }

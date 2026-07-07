@@ -143,13 +143,20 @@ fn strip_frontmatter(raw: &str) -> String {
 pub async fn seed_skills(conn: &Connection) -> Result<()> {
     for (key, name, stage_type, body) in SEED_SKILLS {
         let ts = now();
-        let mut rows = conn.query("SELECT source FROM skill WHERE key = ?1", params![*key]).await?;
+        let mut rows = conn
+            .query("SELECT source, name, stage_type, instructions FROM skill WHERE key = ?1", params![*key])
+            .await?;
         if let Some(r) = rows.next().await? {
-            // refresh untouched builtins to the latest embedded version; leave user-edited ones
-            if s(&r, 0) == "builtin" {
+            // Refresh untouched builtins to the latest embedded version; leave user-edited ones.
+            // Only write when the embedded content actually DIFFERS — an unconditional UPDATE
+            // bumped every builtin's updated_at on each launch, silently outranking
+            // user-created skills in get_active_skill_for_stage's recency ordering.
+            let embedded = strip_frontmatter(body);
+            let unchanged = s(&r, 1) == *name && s(&r, 2) == *stage_type && s(&r, 3) == embedded;
+            if s(&r, 0) == "builtin" && !unchanged {
                 conn.execute(
                     "UPDATE skill SET name=?2, stage_type=?3, instructions=?4, updated_at=?5 WHERE key=?1 AND source='builtin'",
-                    params![*key, *name, *stage_type, strip_frontmatter(body), ts],
+                    params![*key, *name, *stage_type, embedded, ts],
                 ).await?;
             }
         } else {
@@ -449,8 +456,13 @@ pub async fn get_skill(conn: &Connection, id: &str) -> Result<Option<Skill>> {
     Ok(rows.next().await?.as_ref().map(map_skill))
 }
 pub async fn get_active_skill_for_stage(conn: &Connection, stage_type: &str) -> Result<Option<Skill>> {
+    // User skills (created or edited) outrank builtins; recency breaks ties within a tier.
+    // Without the tier, a launch-time builtin reseed could outrank a user's own skill.
     let mut rows = conn.query(
-        &format!("SELECT {SKILL_COLS} FROM skill WHERE stage_type = ?1 AND enabled = 1 ORDER BY updated_at DESC LIMIT 1"),
+        &format!(
+            "SELECT {SKILL_COLS} FROM skill WHERE stage_type = ?1 AND enabled = 1 \
+             ORDER BY CASE source WHEN 'user' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1"
+        ),
         params![stage_type],
     ).await?;
     Ok(rows.next().await?.as_ref().map(map_skill))
