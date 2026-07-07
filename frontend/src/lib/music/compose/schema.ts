@@ -41,9 +41,15 @@ const SectionSchema = z.object({
   startTick: z.number().int().min(0).max(MAX_TOTAL_TICKS),
   lengthTicks: z.number().int().min(1).max(MAX_TOTAL_TICKS),
 });
+const LyricWordSchema = z.object({
+  text: z.string().max(80),
+  chord: z.string().min(1).max(32).optional(),
+});
 const LyricLineSchema = z.object({
   tick: z.number().int().min(0).max(MAX_TOTAL_TICKS),
   text: z.string().max(400),
+  /** Word-level ChordPro breakdown (chord names above words); optional. */
+  words: z.array(LyricWordSchema).max(120).optional(),
 });
 
 // Lenient chord schema for stored rows: v1 rows have no `seventh`, so

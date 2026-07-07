@@ -1,20 +1,28 @@
-// The chord lane — variable-length chord blocks over the 128-tick
-// timeline. Blocks can be:
+// The chord lane — variable-length chord blocks over the composition's
+// tick timeline. Blocks can be:
 //   - clicked to select (palette then changes the selected block's degree)
 //   - dragged by the body to reposition (move)
 //   - dragged by the right edge to resize (extend / shrink)
 //   - cleared via the × button
-// Empty ticks are click targets that set the insertion cursor, where the
-// next palette chip drops a chord. All overlap/clamp rules live in
-// spans.ts; this component just converts pointer geometry into ticks and
-// calls the handlers live so a block follows the cursor as you drag.
+// Clicking empty track sets the insertion cursor, where the next palette
+// chip drops a chord. All overlap/clamp rules live in spans.ts; this
+// component just converts pointer geometry into ticks and calls the
+// handlers live so a block follows the cursor as you drag.
+//
+// Performance (audit Tier-2 #12): the background is NOT a per-tick button
+// grid — gridlines are CSS repeating-linear-gradients, the insertion
+// cursor is one positioned div, and clicks resolve to a tick through ONE
+// hit surface (useLanePointer). Only the chord blocks are real elements.
 
 import { memo, useRef } from 'react';
 import type { ChordSpan } from '../../lib/music/compose/types';
 import type { DegreeLabel } from '../../lib/music/compose/labels';
 import { degreeColor } from '../../lib/music/compose/colors';
-import { LABEL_W, trackCols, isBarStart, isBeatStart } from './laneLayout';
+import { trackCols, laneGridBackground } from './laneLayout';
 import { useSpanDrag } from './useSpanDrag';
+import { useLanePointer } from './useLanePointer';
+
+const LANE_H = 56; // px
 
 function ChordLaneImpl({
   chords,
@@ -32,7 +40,11 @@ function ChordLaneImpl({
   /** Triad + seventh labels per diatonic degree for the current key. */
   labels: Record<number, DegreeLabel>;
   totalTicks: number;
+  /** Id of the selected CHORD (null when the selection is a note) —
+   *  scoped per lane so note selections don't re-render this lane. */
   selectedId: string | null;
+  /** Insertion-cursor tick; the parent passes -1 while ANY selection
+   *  exists (in any lane), which hides the cursor cell. */
   cursor: number;
   onSelect: (id: string | null) => void;
   onSetCursor: (tick: number) => void;
@@ -41,65 +53,60 @@ function ChordLaneImpl({
   onRemove: (id: string) => void;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
+  const hoverRef = useRef<HTMLDivElement>(null);
   const { begin, onPointerMove, onPointerUp } = useSpanDrag({
     trackRef,
     totalTicks,
     onMove: (id, start) => onMove(id, start),
     onResize,
   });
+  const pointer = useLanePointer({
+    surfaceRef: trackRef,
+    hoverRef,
+    totalTicks,
+    onPick: (tick) => {
+      onSelect(null);
+      onSetCursor(tick);
+    },
+  });
   const TRACK_COLS = trackCols(totalTicks);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'stretch', height: 56 }}>
-      <div
-        style={{
-          width: LABEL_W,
-          flexShrink: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'flex-end',
-          paddingRight: 6,
-          fontSize: 9,
-          fontWeight: 600,
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-          color: 'var(--ink-faint)',
-        }}
-      >
-        Chords
-      </div>
+    <div style={{ display: 'flex', alignItems: 'stretch', height: LANE_H }}>
+      <div className="cmp-lane-label caps">Chords</div>
       <div style={{ position: 'relative', flex: 1 }}>
-        {/* Background: clickable tick cells + bar gridlines + cursor */}
+        {/* ONE hit surface: CSS gridlines + pointer-derived tick for the
+            insertion cursor. Also the measuring track for span drags. */}
         <div
           ref={trackRef}
-          style={{ display: 'grid', height: '100%', gridTemplateColumns: TRACK_COLS }}
-        >
-          {Array.from({ length: totalTicks }, (_, step) => {
-            const isCursor = step === cursor && selectedId == null;
-            return (
-              <button
-                key={step}
-                type="button"
-                className="cmp-cell"
-                onClick={() => {
-                  onSelect(null);
-                  onSetCursor(step);
-                }}
-                style={{
-                  borderBottom: '1px solid var(--line)',
-                  borderLeft: isBarStart(step)
-                    ? '2px solid var(--ink-faint)'
-                    : isBeatStart(step)
-                      ? '1px solid var(--line)'
-                      : 'none',
-                  background: isCursor ? 'var(--paper-3)' : undefined,
-                  boxShadow: isCursor ? 'inset 0 0 0 1px var(--accent)' : undefined,
-                }}
-                aria-label={`Tick ${step + 1}`}
-              />
-            );
-          })}
-        </div>
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundImage: laneGridBackground(totalTicks, LANE_H),
+          }}
+          onClick={pointer.onClick}
+          onPointerMove={pointer.onPointerMove}
+          onPointerLeave={pointer.onPointerLeave}
+          aria-label="Chord lane — click to place the insertion cursor"
+        />
+        {/* Hover cell marker (moved via direct style writes; no re-render) */}
+        <div ref={hoverRef} className="cmp-hover-cell" />
+
+        {/* Insertion cursor — one positioned div at the cursor tick */}
+        {selectedId == null && cursor >= 0 && cursor < totalTicks && (
+          <div
+            style={{
+              position: 'absolute',
+              pointerEvents: 'none',
+              top: 0,
+              bottom: 0,
+              left: `${(cursor / totalTicks) * 100}%`,
+              width: `${100 / totalTicks}%`,
+              background: 'var(--paper-3)',
+              boxShadow: 'inset 0 0 0 1px var(--accent)',
+            }}
+          />
+        )}
 
         {/* Foreground: chord blocks, positioned on the same column grid */}
         <div
@@ -188,6 +195,7 @@ function ChordLaneImpl({
   );
 }
 
-// Memoized: with stable handler props + key-derived `labels`, editing a
-// note lane or the playhead advancing won't re-render the chord lane.
+// Memoized: with stable handler props + key-derived `labels` + lane-scoped
+// selection, editing a note lane or the playhead advancing won't re-render
+// the chord lane.
 export const ChordLane = memo(ChordLaneImpl);

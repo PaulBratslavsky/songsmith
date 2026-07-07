@@ -13,10 +13,10 @@
 // Chords and melody/bass notes are all variable-length time spans on
 // this grid, so a note can be a sixteenth, a quarter, a whole bar, etc.
 //
-// LENGTH IS PER-COMPOSITION. The old module-level `TOTAL_TICKS`/`BARS`
-// constants are now *defaults* (DEFAULT_BARS / DEFAULT_TOTAL_TICKS); a
-// composition's real length is `comp.totalTicks`. Helpers that need the
-// length take it as an argument (see spans.ts, playback.ts, laneLayout.ts).
+// LENGTH IS PER-COMPOSITION. DEFAULT_BARS / DEFAULT_TOTAL_TICKS only seed
+// a fresh blank sketch; a composition's real length is `comp.totalTicks`.
+// Helpers that need the length take it as an argument (see spans.ts,
+// playback.ts, laneLayout.ts).
 
 import type { PitchClass } from '../types';
 
@@ -27,12 +27,6 @@ export const TICKS_PER_BAR = TICKS_PER_BEAT * BEATS_PER_BAR; // 16
 /** Default length for a fresh blank sketch (unchanged behavior). */
 export const DEFAULT_BARS = 8;
 export const DEFAULT_TOTAL_TICKS = DEFAULT_BARS * TICKS_PER_BAR; // 128
-
-// Back-compat aliases. Prefer `comp.totalTicks` / `comp.bars`. These are
-// kept so any not-yet-migrated reference still compiles, and they equal
-// the blank-sketch default.
-export const BARS = DEFAULT_BARS;
-export const TOTAL_TICKS = DEFAULT_TOTAL_TICKS;
 
 /** Largest length any composition may declare (clamp for stored rows). */
 export const MAX_TOTAL_TICKS = 16_000; // ~1000 bars, plenty for a full song
@@ -83,10 +77,21 @@ export type Section = {
   lengthTicks: number;
 };
 
-/** A lyric line anchored to a tick (the chord start it sits under). */
+/** One word of a lyric line, ChordPro-style: the optional `chord` is the
+ *  absolute chord name that lands on this word (from the Lyrics stage's
+ *  inline `[chord]` tags). Drives the Composer's lyric sheet. */
+export type LyricWord = {
+  text: string;
+  chord?: string;
+};
+
+/** A lyric line anchored to a tick (the chord start it sits under).
+ *  `words` carries the word-level ChordPro breakdown when the source
+ *  lyrics had inline chord tags; `text` is always the plain line. */
 export type LyricLine = {
   tick: number;
   text: string;
+  words?: LyricWord[];
 };
 
 /**
@@ -101,6 +106,8 @@ export type LyricLine = {
  * v3 makes length variable (`bars`/`totalTicks`) and adds `sections`,
  * `lyrics`, and an optional chord `name`; older rows default to 8 bars /
  * no sections / no lyrics in compose/schema.ts → parseStoredComposition.
+ * (Still v3: lyric lines may additionally carry an optional word-level
+ * `words` breakdown — additive/optional, so no migration is needed.)
  */
 export const SCHEMA_VERSION = 3;
 

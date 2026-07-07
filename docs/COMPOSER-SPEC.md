@@ -148,7 +148,7 @@ section end-to-end on one long, horizontally-scrollable timeline. Design:
 - This is Phase 4 (import direction) + the full-song extension; export-back-to-song + save (Phase 3)
   follow.
 
-## Lyric display refinement (user, 2026-06-29) — REQUIRED, next Composer build
+## Lyric display refinement (user, 2026-06-29) — DONE (2026-07-07)
 The current full-song lyric row (lines pinned at each chord's tick) cascades right and reads badly.
 Replace it with a clean **ChordPro lyric sheet below the timeline** — grouped by section, chord-name
 above the word it lands on, left-aligned — **reusing the existing Sheet / Lyric-Spec ChordPro
@@ -159,6 +159,14 @@ editing surface; the sheet below is the readable view.
   current chord); hovering/clicking a chord in the sheet highlights the matching timeline block. During
   playback the highlight follows the playhead through the lyrics.
 - Build this AFTER the in-flight Freeze feature lands (avoid file conflicts in compose/ components).
+- **Shipped 2026-07-07:** `compose/LyricSheet.tsx` (reuses the `.cp-*` ChordPro styles; word-level
+  chord anchors threaded through `LyricLine.words` in compositionFromSong from the Lyrics stage's
+  `[chord]` tags, parsed by the LyricsEditor's own `parseChordProLine`). LyricRow removed from the
+  lane stack. Two-way sync: chord select / sheet-chord click share the ChordLane selection state;
+  playback exposes `activeChordId` (set only when the chord under the playhead CHANGES, never per
+  tick) so the memo'd sheet re-renders per chord; gentle `scrollIntoView(nearest)` auto-scroll.
+  Same build replaced the per-tick lane button grids with CSS-gradient gridlines + one pointer hit
+  surface per lane (audit Tier-2 #12).
 
 ## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and

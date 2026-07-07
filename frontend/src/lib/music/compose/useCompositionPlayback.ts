@@ -12,11 +12,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { synth } from '../../../music/synth';
 import type { Composition } from './types';
 import { buildSchedule, msPerTick } from './playback';
+import { spanAt } from './spans';
 
 export type CompositionPlayback = {
   isPlaying: boolean;
   /** Current tick cursor 0..totalTicks-1, or null when stopped. */
   currentStep: number | null;
+  /** Id of the chord span under the playhead, or null (stopped / gap).
+   *  Derived from the tick but only SET when it changes, so consumers
+   *  (the lyric sheet) re-render per chord, never per tick. */
+  activeChordId: string | null;
   play: () => void;
   stop: () => void;
   toggle: () => void;
@@ -29,6 +34,7 @@ export function useCompositionPlayback(
   const loop = opts.loop ?? true;
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentStep, setCurrentStep] = useState<number | null>(null);
+  const [activeChordId, setActiveChordId] = useState<string | null>(null);
 
   const eventsByStep = useMemo(() => {
     const map = new Map<number, ReturnType<typeof buildSchedule>[number]>();
@@ -45,14 +51,30 @@ export function useCompositionPlayback(
   // Read live so a key/length change while playing wraps at the right tick.
   const totalTicksRef = useRef(comp.totalTicks);
   totalTicksRef.current = comp.totalTicks;
+  // Chord spans, read live for the active-chord derivation.
+  const chordsRef = useRef(comp.chords);
+  chordsRef.current = comp.chords;
 
   const stepRef = useRef(0);
+  // Last derived chord id — state is only set when this changes, so the
+  // per-tick clock never causes a per-tick re-render downstream.
+  const lastChordIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isPlaying) {
       setCurrentStep(null);
+      lastChordIdRef.current = null;
+      setActiveChordId(null);
       return;
     }
+
+    const noteActiveChord = (step: number) => {
+      const id = spanAt(chordsRef.current, step)?.id ?? null;
+      if (id !== lastChordIdRef.current) {
+        lastChordIdRef.current = id;
+        setActiveChordId(id);
+      }
+    };
 
     const fire = (step: number) => {
       const e = eventsRef.current.get(step);
@@ -66,6 +88,7 @@ export function useCompositionPlayback(
 
     stepRef.current = 0;
     setCurrentStep(0);
+    noteActiveChord(0);
     fire(0);
 
     // Self-scheduling timeout (re-read tickMs each tick) so a live tempo
@@ -84,6 +107,7 @@ export function useCompositionPlayback(
         stepRef.current = next;
       }
       setCurrentStep(stepRef.current);
+      noteActiveChord(stepRef.current);
       fire(stepRef.current);
       timer = setTimeout(advance, tickMsRef.current);
     };
@@ -95,6 +119,7 @@ export function useCompositionPlayback(
   return {
     isPlaying,
     currentStep,
+    activeChordId,
     play: () => setIsPlaying(true),
     stop: () => setIsPlaying(false),
     toggle: () => setIsPlaying((p) => !p),

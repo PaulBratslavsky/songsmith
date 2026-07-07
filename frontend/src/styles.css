@@ -256,9 +256,9 @@ button.sm { padding: 3px 7px; font-size: 11px; }
 .chord-cell input[type="number"] { font-size: 11px; }
 
 /* ---- visual Composer (components/compose/*) ---- */
-/* Hookpad-style melody/chords/bass sketchpad. Lane cells reset the global
-   button styling so the 128-col grid stays tight; blocks are inline-styled
-   per-degree. */
+/* Hookpad-style melody/chords/bass sketchpad over a variable-length tick
+   grid. Gridlines are CSS repeating gradients on ONE hit surface per lane
+   (no per-tick cells); blocks are inline-styled per-degree. */
 .cmp-transport {
   display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
 }
@@ -266,12 +266,21 @@ button.sm { padding: 3px 7px; font-size: 11px; }
   font-size: 10px; font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--ink-faint);
 }
-/* a grid cell in a lane (chord/melody/bass) — flat, no chrome */
-.cmp-cell {
-  padding: 0; min-width: 0; border: none; border-radius: 0;
-  background: transparent;
+/* Shared lane label gutter. Width must match LABEL_W in laneLayout.ts. */
+.cmp-lane-label {
+  width: 2.75rem; flex-shrink: 0; display: flex; align-items: center;
+  justify-content: flex-end; padding-right: 6px; font-size: 9px;
+  color: var(--ink-faint);
 }
-.cmp-cell:hover { background: var(--paper-3); border-color: transparent; }
+.cmp-lane-label.caps {
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+}
+/* Pointer-following hover cell on a lane's hit surface (positioned via
+   direct style writes in useLanePointer — never re-renders the lane). */
+.cmp-hover-cell {
+  position: absolute; display: none; pointer-events: none;
+  background: var(--paper-3);
+}
 /* diatonic palette chip */
 .cmp-chip {
   display: flex; flex-direction: column; align-items: center;
@@ -293,6 +302,26 @@ button.sm { padding: 3px 7px; font-size: 11px; }
   background: rgba(0, 0, 0, 0.12);
 }
 .cmp-resize:hover { background: rgba(0, 0, 0, 0.28); }
+
+/* Composer lyric sheet (full-song mode) — read-only ChordPro view below
+   the timeline, reusing the .cp-* word/chord styles. The active section
+   tints; the exact active chord gets the inverted accent mark. */
+.cmp-sheet { display: flex; flex-direction: column; gap: 8px; }
+.cmp-sheet .cp-line { min-height: 30px; }
+.cmp-sheet .cp-text { cursor: default; }
+.cmp-sheet .cp-text:hover { border-bottom-color: transparent; }
+.cmp-sheet-section {
+  padding: 4px 8px 6px; border: 1px solid transparent; border-radius: var(--r);
+}
+.cmp-sheet-section.active {
+  background: rgba(200, 255, 61, 0.05); border-color: var(--accent-dim);
+}
+.cmp-sheet-head {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--ink-dim); margin-bottom: 2px;
+}
+.cmp-sheet-section.active .cmp-sheet-head { color: var(--accent); }
+.cmp-sheet .cp-chord.current { color: #11140a; background: var(--accent); border-radius: 2px; }
 
 /* Global chat terminal — docked bottom-right, reachable from every page */
 .global-terminal {

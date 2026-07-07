@@ -46,7 +46,7 @@ import { ChordPalette } from './ChordPalette';
 import { ChordLane } from './ChordLane';
 import { NoteLane } from './NoteLane';
 import { SectionBand } from './SectionBand';
-import { LyricRow } from './LyricRow';
+import { LyricSheet, buildSheetModel } from './LyricSheet';
 
 const MELODY_COLOR = '#2563eb';
 const BASS_COLOR = '#9333ea';
@@ -93,7 +93,11 @@ export function Composer({
     initialRoot,
     initial ? () => initial : demoComposition,
   );
-  const selectedId = selected?.id ?? null; // for lane render (selection ring)
+  // Selection scoped PER LANE, so selecting in one lane only re-renders
+  // that lane (the other memo'd lanes see an unchanged `null`).
+  const melodySelId = selected?.kind === 'melody' ? selected.id : null;
+  const chordSelId = selected?.kind === 'chord' ? selected.id : null;
+  const bassSelId = selected?.kind === 'bass' ? selected.id : null;
 
   // If the imported composition changes (navigating to a different song,
   // or the song's chords/lyrics load in), load it into the editor.
@@ -111,9 +115,10 @@ export function Composer({
   // Sticky placement mode: newly-dropped chords are sevenths while on.
   const [seventhMode, setSeventhMode] = useState(false);
 
-  const { isPlaying, currentStep, toggle, stop } = useCompositionPlayback(comp, {
-    loop,
-  });
+  const { isPlaying, currentStep, activeChordId, toggle, stop } = useCompositionPlayback(
+    comp,
+    { loop },
+  );
 
   useEffect(() => {
     synth.setMuted(muted);
@@ -211,10 +216,9 @@ export function Composer({
   }, [selected, actions]);
 
   // ---- selected-chord tone highlight in the melody grid ----
-  const selectedChord =
-    selected?.kind === 'chord'
-      ? comp.chords.find((s) => s.id === selected.id)
-      : undefined;
+  const selectedChord = chordSelId
+    ? comp.chords.find((s) => s.id === chordSelId)
+    : undefined;
   const melodyHighlight = useMemo<ChordToneHighlight | null>(
     () =>
       selectedChord
@@ -228,6 +232,13 @@ export function Composer({
           }
         : null,
     [selectedChord],
+  );
+
+  // ---- lyric sheet model (full-song mode only; empty for blank sketches).
+  // Rebuilt when sections/lyrics/chords change — NOT on playhead ticks.
+  const sheetSections = useMemo(
+    () => buildSheetModel(comp.sections, comp.lyrics, comp.chords),
+    [comp.sections, comp.lyrics, comp.chords],
   );
 
   const clearAll = () => {
@@ -417,7 +428,7 @@ export function Composer({
               color={MELODY_COLOR}
               totalTicks={comp.totalTicks}
               highlight={melodyHighlight}
-              selectedId={selectedId}
+              selectedId={melodySelId}
               {...melodyHandlers}
             />
           </div>
@@ -426,19 +437,18 @@ export function Composer({
               chords={comp.chords}
               labels={labels}
               totalTicks={comp.totalTicks}
-              selectedId={selectedId}
-              cursor={cursor}
+              selectedId={chordSelId}
+              cursor={selected ? -1 : cursor}
               {...chordHandlers}
             />
           </div>
-          <LyricRow lyrics={comp.lyrics} totalTicks={comp.totalTicks} />
           <NoteLane
             lane="bass"
             notes={comp.bass}
             pcs={pcs}
             color={BASS_COLOR}
             totalTicks={comp.totalTicks}
-            selectedId={selectedId}
+            selectedId={bassSelId}
             {...bassHandlers}
           />
           <div className="row" style={{ marginTop: 8, gap: 16, fontSize: 10, color: 'var(--ink-faint)' }}>
@@ -453,6 +463,16 @@ export function Composer({
           </div>
         </div>
       </div>
+
+      {/* ChordPro lyric sheet — the readable view below the timeline
+          (full-song mode only; blank sketches have no sections → no sheet).
+          Highlight follows the selected chord / the playhead's chord. */}
+      <LyricSheet
+        sections={sheetSections}
+        selectedChordId={chordSelId}
+        activeChordId={activeChordId}
+        onSelectChord={chordHandlers.onSelect}
+      />
     </div>
   );
 }

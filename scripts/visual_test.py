@@ -11,6 +11,9 @@ touches Claude or a real DB.
 Captures the key surfaces as regression screenshots:
   library, builder, builder-manage, sheet-guitar/piano,
   workspace (sidebar SONG nav + full-width editor),
+  composer (blank sketch) + composer-fullsong (timeline + ChordPro lyric
+  sheet below it) + composer-fullsong-chord-selected (two-way highlight:
+  section tint + exact chord mark in the sheet),
   lyrics-chordpro (click-to-place editor) + lyrics-autoplace (⚡ Auto-place),
   sheet-chordpro (exact chord-over-word alignment),
   style-flyout (right inspector overlay), renders-tab, terminal.
@@ -80,10 +83,19 @@ def main():
 
             # Full-song export → Composer: "Open in Composer" loads the WHOLE
             # song as one long, scrollable, multi-section timeline — labeled
-            # section band, the real named chords on the chord lane, the lyric
-            # line under each chord, melody + bass lanes spanning the song.
+            # section band, the real named chords on the chord lane, melody +
+            # bass lanes spanning the song — and the ChordPro lyric SHEET
+            # below the timeline (section headers, chord names in accent
+            # above the words they land on).
             pg.click("button:has-text('Open in Composer')"); pg.wait_for_timeout(900)
             pg.screenshot(path=f"{OUT}/composer-fullsong.png", full_page=True)
+            # two-way highlight sync: select a chord block in the timeline →
+            # its section tints in the sheet + the exact chord/word is marked
+            blk = pg.locator("[aria-label='Remove chord']")
+            if blk.count() > 0:
+                blk.first.locator("xpath=..").click(); pg.wait_for_timeout(300)
+                pg.screenshot(path=f"{OUT}/composer-fullsong-chord-selected.png", full_page=True)
+                pg.keyboard.press("Escape"); pg.wait_for_timeout(200)
             # back to the song to continue the rest of the captures
             pg.go_back(); pg.wait_for_timeout(500)
 

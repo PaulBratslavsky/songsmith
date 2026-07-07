@@ -12,7 +12,7 @@ import { getScalePitchClasses } from '../theory/scales';
 import { getDiatonicChords } from '../theory/diatonic';
 import { parseChordSymbol } from '../theory/parse-chord';
 import type { ChordSpan, Composition, Degree, KeyMode } from './types';
-import { TICKS_PER_BEAT, TOTAL_TICKS } from './types';
+import { TICKS_PER_BEAT } from './types';
 
 // Octave bands per track. Chords in the middle, melody on top, bass
 // underneath, so the three layers don't collide.
@@ -173,5 +173,3 @@ export function msPerBeat(bpm: number): number {
 export function msPerTick(bpm: number): number {
   return msPerBeat(bpm) / TICKS_PER_BEAT;
 }
-
-export { TOTAL_TICKS };

@@ -4,7 +4,7 @@
 
 import { memo } from 'react';
 import type { Section } from '../../lib/music/compose/types';
-import { LABEL_W, trackCols } from './laneLayout';
+import { trackCols } from './laneLayout';
 
 const BAND_COLORS = ['#3b4d63', '#4a5b3b', '#5b3b52', '#3b5b58', '#5b4a3b', '#473b5b'];
 
@@ -18,23 +18,7 @@ function SectionBandImpl({
   if (!sections.length) return null;
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: 22, marginBottom: 2 }}>
-      <div
-        style={{
-          width: LABEL_W,
-          flexShrink: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'flex-end',
-          paddingRight: 6,
-          fontSize: 9,
-          fontWeight: 600,
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-          color: 'var(--ink-faint)',
-        }}
-      >
-        Song
-      </div>
+      <div className="cmp-lane-label caps">Song</div>
       <div style={{ display: 'grid', flex: 1, gridTemplateColumns: trackCols(totalTicks) }}>
         {sections.map((sec, i) => (
           <div

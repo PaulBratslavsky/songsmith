@@ -10,6 +10,7 @@
 // exactly the tick columns).
 
 import { useRef } from 'react';
+import { tickWidth } from './laneLayout';
 
 export type DragMode = 'move' | 'resize';
 
@@ -63,7 +64,7 @@ export function useSpanDrag(opts: {
       mode,
       startX: e.clientX,
       startY: e.clientY,
-      tickW: rect.width / opts.totalTicks,
+      tickW: tickWidth(rect.width, opts.totalTicks),
       origStart: span.start,
       origLength: span.length,
       origDegree: span.degree ?? 0,

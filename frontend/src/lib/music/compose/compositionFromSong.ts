@@ -16,7 +16,15 @@
 //     diatonic degree is computed against the song's scale so changing the
 //     key still transposes the degree-based playback.
 
-import type { Composition, ChordSpan, Degree, KeyMode, LyricLine, Section } from './types';
+import type {
+  Composition,
+  ChordSpan,
+  Degree,
+  KeyMode,
+  LyricLine,
+  LyricWord,
+  Section,
+} from './types';
 import {
   SCHEMA_VERSION,
   DEFAULT_BPM,
@@ -30,6 +38,7 @@ import { normalizePitchClass } from '../theory/notes';
 import type { PitchClass, ScaleType } from '../types';
 import { PITCH_CLASSES } from '../types';
 import { deriveSections } from '../../../components/ArrangementBuilder';
+import { parseChordProLine } from '../../../components/LyricsEditor';
 
 const uid = (() => {
   let n = 0;
@@ -111,15 +120,16 @@ export function compositionFromSong(
   const cSecs: any[] = Array.isArray(chordsData?.sections) ? chordsData.sections : [];
 
   // Section label → lyric lines, from the Sheet-preview's own alignment
-  // (deriveSections), so the Composer lyric row matches the sheet. We take
-  // the *plain* lyric lines (chord tags stripped) for the overlay text.
+  // (deriveSections), so the Composer lyric sheet matches the Sheet. Each
+  // line keeps its word-level ChordPro breakdown (the [chord]-tag anchors),
+  // which the lyric sheet uses to print chord names above the exact words.
   const derived = deriveSections(chordsData, lyricsData);
-  const lyricLinesByLabel = new Map<string, string[]>();
+  const lyricLinesByLabel = new Map<string, LyricWord[][]>();
   for (const d of derived) {
-    const plain = d.lyrics
-      .map((l) => l.replace(/\[[^\]]+\]/g, '').trim())
-      .filter((l) => l.length > 0);
-    lyricLinesByLabel.set(d.label, plain);
+    const lines = d.lyrics
+      .map((l) => parseChordProLine(l).filter((w) => w.text || w.chord))
+      .filter((words) => words.some((w) => w.text.trim().length > 0));
+    lyricLinesByLabel.set(d.label, lines);
   }
 
   const chords: ChordSpan[] = [];
@@ -160,11 +170,13 @@ export function compositionFromSong(
     });
 
     // Pair this section's lyric lines with its chord starts, in order:
-    // the song lands one chord at the start of each lyric line.
+    // the song lands one chord at the start of each lyric line. `words`
+    // carries the word-level chord anchors for the lyric sheet.
     const lines = lyricLinesByLabel.get(label) ?? [];
-    lines.forEach((text, i) => {
+    lines.forEach((words, i) => {
       const anchor = chordStarts[Math.min(i, chordStarts.length - 1)] ?? sectionStart;
-      lyrics.push({ tick: anchor, text });
+      const text = words.map((w) => w.text).filter(Boolean).join(' ');
+      lyrics.push({ tick: anchor, text, words });
     });
   }
 

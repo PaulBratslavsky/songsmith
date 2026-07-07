@@ -14,8 +14,10 @@ type Section = { label: string; lines: Word[][]; frozen?: boolean };
 // AI's qualities (Am(add9), "Bb (ghost)") carry intent. Mangling them also caused
 // false "doesn't match Lyrics" warnings in the Generation Prompt.
 const TOKEN_RE = /\[([^\]]+)\]|(\S+)/g;
-/** Parse a ChordPro line ("[Dm]The dashboard [Bb]glows") into words+chords. */
-function parseLine(s: string): Word[] {
+/** Parse a ChordPro line ("[Dm]The dashboard [Bb]glows") into words+chords.
+ *  Exported: compositionFromSong reuses it to thread word-level chord
+ *  anchors into the Composer's lyric sheet (same parse, no duplication). */
+export function parseChordProLine(s: string): Word[] {
   const words: Word[] = [];
   let pending: string | undefined;
   let m: RegExpExecArray | null;
@@ -74,10 +76,10 @@ function wordsByLabel(content: string): Record<string, Word[][]> {
     for (const s of secs) {
       const label = s.label || s.type || "Section";
       const raw: string[] = Array.isArray(s.lines) ? s.lines : typeof s.text === "string" ? s.text.split("\n") : [];
-      out[label] = raw.map(parseLine);
+      out[label] = raw.map(parseChordProLine);
     }
   } else if (text) {
-    out["Lyrics"] = text.split("\n").map(parseLine);
+    out["Lyrics"] = text.split("\n").map(parseChordProLine);
   }
   return out;
 }
@@ -175,7 +177,7 @@ export function LyricsEditor({
     const own = sec.lines.flat().map((w) => w.chord).filter(Boolean) as string[];
     return own.length ? own : paletteFor(sec.label);
   };
-  const setSectionText = (i: number, text: string) => mutate((s) => { s[i].lines = text.split("\n").map(parseLine); return s; });
+  const setSectionText = (i: number, text: string) => mutate((s) => { s[i].lines = text.split("\n").map(parseChordProLine); return s; });
 
   // place/clear the armed chord on a word (click word → set; click its chord → clear)
   const toggleAt = (si: number, li: number, wi: number) => mutate((s) => {
@@ -192,7 +194,7 @@ export function LyricsEditor({
   const sectionPlain = (sec: Section) => sec.lines.map((line) => line.map((w) => w.text).join(" ").replace(/\s+/g, " ").trim()).join("\n");
   // apply a refined/edited block of words back to the section, then re-place chords
   const applyRefine = (si: number, text: string) => mutate((s) => {
-    s[si].lines = text.split("\n").map(parseLine);
+    s[si].lines = text.split("\n").map(parseChordProLine);
     autoPlaceSection(s[si].lines, paletteFor(s[si].label));
     return s;
   });
