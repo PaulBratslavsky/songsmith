@@ -10,11 +10,14 @@
 // resizable afterwards.
 //
 // NOTE: this is distinct from the chord-section editor in
-// components/Composer.tsx and the /builder Chord Builder. Composition
-// state is in-memory only — persistence (libSQL) is Phase 3; the
-// useCompositionState `load`/`reset` actions + schema.ts are the seams.
+// components/Composer.tsx and the /builder Chord Builder. Compositions
+// persist in the libSQL `composition` table (Phase 3): Save serializes the
+// reducer state through CompositionSchema; the library panel reopens rows
+// via parseStoredComposition + the load action (which reidentifies spans).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../../ipc/api';
+import type { CompositionMeta } from '../../ipc/generated';
 import { PITCH_CLASSES, type PitchClass } from '../../lib/music/types';
 import {
   DURATIONS,
@@ -24,6 +27,7 @@ import {
   type KeyMode,
 } from '../../lib/music/compose/types';
 import { LABEL_W, BAR_MIN_PX } from './laneLayout';
+import { CompositionSchema, parseStoredComposition } from '../../lib/music/compose/schema';
 import { useCompositionState } from '../../lib/music/compose/useCompositionState';
 import { useCompositionPlayback } from '../../lib/music/compose/useCompositionPlayback';
 import { synth } from '../../music/synth';
@@ -80,11 +84,15 @@ function demoComposition(id: string): Composition {
 export function Composer({
   initialRoot = 'C',
   initial,
+  songId = null,
 }: {
   initialRoot?: PitchClass;
   /** A full-song (or any) Composition to seed/load — full-song import.
    *  When absent, the blank-sketch demo is used (unchanged behavior). */
   initial?: Composition | null;
+  /** Source song id when `initial` is a full-song import — saved rows
+   *  remember it (`song_id`), so the library can badge them. */
+  songId?: string | null;
 }) {
   // Composition + edit state (comp, cursor, selected) live in the reducer;
   // only ephemeral UI stays local here. Seeded with the supplied initial
@@ -99,6 +107,30 @@ export function Composer({
   const chordSelId = selected?.kind === 'chord' ? selected.id : null;
   const bassSelId = selected?.kind === 'bass' ? selected.id : null;
 
+  // ---- persistence (Phase 3): saved-row identity + dirty tracking ----
+  // `savedRowId` is the libSQL row this editor is bound to (null = never
+  // saved → the next Save inserts and ADOPTS the minted row id).
+  // `baseline` is the serialized comp as of the last save/load/new-blank;
+  // dirty = current serialization differs. `baselinePending` re-snapshots
+  // on the render AFTER a load/reset lands (the load action mints fresh
+  // span ids, so the snapshot can only be taken from the reducer output).
+  const [savedRowId, setSavedRowId] = useState<string | null>(null);
+  const [linkedSongId, setLinkedSongId] = useState<string | null>(songId ?? null);
+  const [baseline, setBaseline] = useState<string | null>(null);
+  const baselinePending = useRef(true); // snapshot the very first comp too
+  const serialized = useMemo(() => JSON.stringify(comp), [comp]);
+  useEffect(() => {
+    if (baselinePending.current) {
+      baselinePending.current = false;
+      setBaseline(serialized);
+    }
+  }, [serialized]);
+  const dirty = baseline != null && serialized !== baseline;
+
+  const [libOpen, setLibOpen] = useState(false);
+  const [library, setLibrary] = useState<CompositionMeta[]>([]);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
   // If the imported composition changes (navigating to a different song,
   // or the song's chords/lyrics load in), load it into the editor.
   const loadedId = useRef<string | null>(initial?.id ?? null);
@@ -106,8 +138,13 @@ export function Composer({
     if (initial && initial.id !== loadedId.current) {
       loadedId.current = initial.id;
       actions.load(initial);
+      // a fresh import is a new, unsaved composition bound to its song
+      setSavedRowId(null);
+      setLinkedSongId(songId ?? null);
+      baselinePending.current = true;
+      setSaveMsg(null);
     }
-  }, [initial, actions]);
+  }, [initial, songId, actions]);
 
   const [muted, setMuted] = useState(false);
   const [durTicks, setDurTicks] = useState(4); // default 1/4 note
@@ -246,6 +283,97 @@ export function Composer({
     actions.clearAll();
   };
 
+  // ---- persistence handlers (save / library / open / delete / new) ----
+  const refreshLibrary = async () => {
+    try {
+      setLibrary(await api.listCompositions());
+    } catch (e) {
+      setSaveMsg(String(e));
+    }
+  };
+
+  const doSave = async () => {
+    // one serializer/validator: the same CompositionSchema the load seam
+    // trusts. An empty name would fail zod's min(1), so default it.
+    const name = comp.name.trim() || 'Untitled';
+    const candidate = { ...comp, name };
+    const parsed = CompositionSchema.safeParse(candidate);
+    if (!parsed.success) {
+      setSaveMsg(`can't save — ${parsed.error.issues[0]?.message ?? 'invalid composition'}`);
+      return;
+    }
+    try {
+      const row = await api.saveComposition(savedRowId, name, linkedSongId, JSON.stringify(parsed.data));
+      setSavedRowId(row.id); // adopt the row id — later saves update in place
+      if (name !== comp.name) actions.setName(name);
+      setBaseline(JSON.stringify(candidate));
+      setSaveMsg(null);
+      if (libOpen) void refreshLibrary();
+    } catch (e) {
+      setSaveMsg(String(e));
+    }
+  };
+
+  const openComposition = async (id: string) => {
+    if (dirty && !window.confirm('Discard unsaved changes and open this composition?')) return;
+    try {
+      const row = await api.getComposition(id);
+      if (!row) {
+        setSaveMsg('composition not found — it may have been deleted');
+        void refreshLibrary();
+        return;
+      }
+      let blob: unknown = null;
+      try {
+        blob = JSON.parse(row.data);
+      } catch {}
+      // the designed load seam: validate/migrate the stored blob, then the
+      // load action reidentifies span/section ids so they can't collide
+      const stored = blob == null ? null : parseStoredComposition(blob);
+      if (!stored) {
+        setSaveMsg(`"${row.name}" couldn't be read — leaving the editor as is`);
+        return;
+      }
+      stop();
+      actions.load(stored);
+      setSavedRowId(row.id);
+      setLinkedSongId(row.song_id);
+      baselinePending.current = true; // snapshot the loaded comp next render
+      setLibOpen(false);
+      setSaveMsg(null);
+    } catch (e) {
+      setSaveMsg(String(e));
+    }
+  };
+
+  const removeComposition = async (id: string, name: string) => {
+    if (!window.confirm(`Delete "${name}" from the library? This can't be undone.`)) return;
+    try {
+      await api.deleteComposition(id);
+      if (id === savedRowId) setSavedRowId(null); // editor keeps the comp, now unsaved
+      void refreshLibrary();
+    } catch (e) {
+      setSaveMsg(String(e));
+    }
+  };
+
+  const newBlank = () => {
+    if (dirty && !window.confirm('Discard unsaved changes and start a new blank sketch?')) return;
+    stop();
+    actions.reset(comp.key.root, comp.key.mode);
+    setSavedRowId(null);
+    setLinkedSongId(null);
+    baselinePending.current = true;
+    setSaveMsg(null);
+  };
+
+  const toggleLibrary = () => {
+    setLibOpen((o) => {
+      if (!o) void refreshLibrary();
+      return !o;
+    });
+  };
+
   return (
     <div className="col" style={{ gap: 14 }}>
       {/* Transport */}
@@ -338,7 +466,7 @@ export function Composer({
         </button>
       </div>
 
-      {/* Name field (in-memory; persistence is Phase 3) */}
+      {/* Name + persistence: Save (insert-or-update), library, New blank */}
       <div className="row" style={{ flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
         <input
           type="text"
@@ -349,18 +477,85 @@ export function Composer({
         />
         <button
           type="button"
-          className="sm ghost"
-          onClick={() => {
-            stop();
-            actions.reset(comp.key.root, comp.key.mode);
-          }}
+          className={'sm' + (dirty || !savedRowId ? ' primary' : '')}
+          onClick={() => void doSave()}
+          title={savedRowId ? 'Update the saved composition' : 'Save this composition to the library'}
         >
+          💾 Save
+        </button>
+        <button
+          type="button"
+          className={'sm' + (libOpen ? ' primary' : '')}
+          onClick={toggleLibrary}
+          title="Open a saved composition"
+        >
+          📂 Open
+        </button>
+        <button type="button" className="sm ghost" onClick={newBlank}>
           New blank
         </button>
         <span className="faint" style={{ fontSize: 11 }}>
-          in-memory sketch · saving comes in Phase 3
+          {saveMsg ?? (savedRowId ? (dirty ? 'unsaved changes' : 'saved') : 'not saved yet')}
         </span>
       </div>
+
+      {/* Saved-compositions library: open a row (confirm if dirty) or delete */}
+      {libOpen && (
+        <div className="card cmp-library">
+          <div className="row" style={{ alignItems: 'baseline', gap: 8 }}>
+            <b style={{ fontSize: 12 }}>Saved compositions</b>
+            <span className="faint" style={{ fontSize: 11 }}>
+              stored locally — newest first
+            </span>
+          </div>
+          {library.length === 0 ? (
+            <p className="faint" style={{ margin: '8px 0 2px', fontSize: 12 }}>
+              Nothing saved yet — hit 💾 Save to keep the current sketch.
+            </p>
+          ) : (
+            library.map((c) => (
+              <div
+                key={c.id}
+                className="row"
+                style={{
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '5px 0',
+                  borderTop: '1px solid var(--line)',
+                  marginTop: 5,
+                }}
+              >
+                <button
+                  type="button"
+                  className="sm ghost"
+                  onClick={() => void openComposition(c.id)}
+                  title="Open this composition"
+                  style={{ flex: 1, textAlign: 'left', fontWeight: c.id === savedRowId ? 700 : 400 }}
+                >
+                  {c.name}
+                </button>
+                {c.song_id && (
+                  <span className="badge published" title={`Imported from song ${c.song_id}`}>
+                    ♪ song
+                  </span>
+                )}
+                <span className="faint" style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>
+                  {new Date(c.updated_at).toLocaleString()}
+                </span>
+                <button
+                  type="button"
+                  className="sm ghost"
+                  aria-label="Delete composition"
+                  title="Delete this composition"
+                  onClick={() => void removeComposition(c.id, c.name)}
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* Palette */}
       <div className="row" style={{ flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>

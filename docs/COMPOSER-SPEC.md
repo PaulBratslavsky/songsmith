@@ -26,8 +26,22 @@ across sessions / context resets. If a future session is unsure what the Compose
   unchanged — defaults to the 8-bar sketch. Builder: `lib/music/compose/compositionFromSong.ts` (pure;
   reuses the theory engine for degree resolution + named-chord MIDI, and `ArrangementBuilder.deriveSections`
   for lyric/chord alignment). Export-back-to-song is still NOT STARTED.
-- **Phase 3 (persistence) — NOT STARTED.** libSQL `composition` table + mcp-shim tools. (Schema v3 +
-  `parseStoredComposition`/`reidentify` carry the new fields, so the load seam is ready.)
+- **Phase 3 (persistence) — ✅ DONE (2026-07-07).** Compositions survive app restarts. libSQL
+  `composition` table (`CompositionRow { id, name, song_id: Option, data: the Composition JSON blob,
+  created_at, updated_at }`, ts-rs exported, + a light `CompositionMeta` for listings) with CRUD in
+  `core/src/db.rs`: `list_compositions` (newest first, no blobs), `get_composition`,
+  `save_composition(id: Option, …)` — `None` inserts (the frontend **adopts the minted row id** for
+  later saves), `Some` updates in place and bumps `updated_at`; `data` must parse as JSON or the save
+  is rejected — and `delete_composition`. Registered as four MCP tools in `tools.rs`
+  (delete = destructive) with mock parity, plus four Tauri commands. Composer UI: **💾 Save** next to
+  the name field (serializes the reducer state through `CompositionSchema`; dirty tracking via a
+  serialized-snapshot baseline → "saved / unsaved changes / not saved yet"), **📂 Open** library
+  panel (name, updated, "♪ song" badge when `song_id` is set, per-row × delete with confirm; opening
+  loads via `parseStoredComposition` + the reducer's reidentifying `load`, confirm-if-dirty), and
+  New-blank confirm-if-dirty. Full-song imports (`?song=`) save with `song_id` and round-trip
+  sections/lyrics through the blob (visual-tested: save → reopen → section band + lyric sheet
+  intact). Blank-sketch mode, full-song import, the lyric sheet, freeze, and lane interactions are
+  unchanged.
 
 ## What it is
 A **visual melody + chords + bass sketchpad** — a Hookpad-style 8-bar grid where you lay down a
@@ -118,6 +132,7 @@ The Composer is a flexible song-structuring hub, bidirectional with the song's c
    chords (and structure) into a song's Chords stage / a new song, so a sketch becomes a real song.
 4. **Save & reopen compositions** — persist each Composition (libSQL `composition` table) with a name;
    list/open/delete them later. (music-kb does this via Strapi; Songsmith uses libSQL + mcp-shim tools.)
+   **✅ Shipped with Phase 3 (2026-07-07)** — see the status entry above.
 
 Degree↔absolute mapping is the crux of #1/#3: Composer is degree-based, the song's Chords stage is
 absolute chord names — convert through the song's key (reuse the ported `lib/music` theory engine).

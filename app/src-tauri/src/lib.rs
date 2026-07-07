@@ -265,6 +265,27 @@ async fn delete_progression(state: State<'_, AppState>, id: String) -> R<()> {
     db::delete_progression(&state.conn, &id).await.map_err(e2s)
 }
 
+// ---- Saved compositions (Composer sketches / full-song exports) -------------
+
+#[tauri::command]
+async fn list_compositions(state: State<'_, AppState>) -> R<Vec<CompositionMeta>> {
+    db::list_compositions(&state.conn).await.map_err(e2s)
+}
+#[tauri::command]
+async fn get_composition(state: State<'_, AppState>, id: String) -> R<Option<CompositionRow>> {
+    db::get_composition(&state.conn, &id).await.map_err(e2s)
+}
+/// `id: None` inserts (the frontend adopts the minted row id); `Some` updates
+/// in place. `data` is the zod-validated Composition JSON blob.
+#[tauri::command]
+async fn save_composition(state: State<'_, AppState>, id: Option<String>, name: String, song_id: Option<String>, data: String) -> R<CompositionRow> {
+    db::save_composition(&state.conn, id.as_deref(), &name, song_id.as_deref(), &data).await.map_err(e2s)
+}
+#[tauri::command]
+async fn delete_composition(state: State<'_, AppState>, id: String) -> R<()> {
+    db::delete_composition(&state.conn, &id).await.map_err(e2s)
+}
+
 // ---- Final renders ---------------------------------------------------------
 
 #[tauri::command]
@@ -1374,6 +1395,10 @@ pub fn run() {
             list_progressions,
             save_progression,
             delete_progression,
+            list_compositions,
+            get_composition,
+            save_composition,
+            delete_composition,
             list_renders,
             add_render,
             set_render_pick,

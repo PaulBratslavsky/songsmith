@@ -172,6 +172,34 @@ pub struct Progression {
     pub created_at: String,
 }
 
+/// A saved Composer composition: the whole `Composition` JSON blob (validated
+/// by the frontend's zod schema before it gets here) plus a nullable link to
+/// the song it was imported from (full-song exports remember their source).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/ipc/generated/")]
+pub struct CompositionRow {
+    pub id: String,
+    pub name: String,
+    /// source song for full-song imports; None for blank sketches
+    pub song_id: Option<String>,
+    /// the Composition JSON blob (compose/schema.ts is the shape authority)
+    pub data: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Light listing entry for the Composer's library panel — everything but the
+/// (potentially large) `data` blob.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/ipc/generated/")]
+pub struct CompositionMeta {
+    pub id: String,
+    pub name: String,
+    pub song_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/ipc/generated/")]
 pub struct SkillInput {

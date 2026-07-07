@@ -11,9 +11,11 @@ touches Claude or a real DB.
 Captures the key surfaces as regression screenshots:
   library, builder, builder-manage, sheet-guitar/piano,
   workspace (sidebar SONG nav + full-width editor),
-  composer (blank sketch) + composer-fullsong (timeline + ChordPro lyric
-  sheet below it) + composer-fullsong-chord-selected (two-way highlight:
-  section tint + exact chord mark in the sheet),
+  composer (blank sketch) + composer-library (Phase 3 persistence: Save the
+  sketch, then the open library panel listing saved compositions) +
+  composer-fullsong (timeline + ChordPro lyric sheet below it) +
+  composer-fullsong-chord-selected (two-way highlight: section tint + exact
+  chord mark in the sheet),
   lyrics-chordpro (click-to-place editor) + lyrics-autoplace (⚡ Auto-place),
   paste-modal-with-preview (📋 Paste lyrics → live parsed sections, words
   verbatim) + lyrics-after-import (the stage after Import replaced the lyrics
@@ -74,6 +76,19 @@ def main():
             if block.count() > 0:
                 block.first.locator("xpath=..").click(); pg.wait_for_timeout(300)
                 pg.screenshot(path=f"{OUT}/composer-chord-selected.png", full_page=True)
+                pg.keyboard.press("Escape"); pg.wait_for_timeout(200)
+
+            # Phase 3 persistence: name + 💾 Save the sketch (libSQL-backed;
+            # mock keeps it in memory), then 📂 Open — the library panel lists
+            # the seeded sketch AND the row just saved (name / updated / ×).
+            pg.fill("input[placeholder='Composition name']", "My neon sketch")
+            pg.click("button:has-text('💾 Save')"); pg.wait_for_timeout(400)
+            pg.click("button:has-text('📂 Open')"); pg.wait_for_timeout(400)
+            pg.screenshot(path=f"{OUT}/composer-library.png", full_page=True)
+            # reopen the saved sketch — loads through parseStoredComposition
+            # + reidentify (the panel closes; the status flips to "saved")
+            pg.click(".cmp-library button:has-text('My neon sketch')")
+            pg.wait_for_timeout(500)
 
             pg.click("text=Library"); pg.wait_for_timeout(300)
             pg.click("text=Cyber Dreams"); pg.wait_for_timeout(500)
@@ -99,6 +114,14 @@ def main():
                 blk.first.locator("xpath=..").click(); pg.wait_for_timeout(300)
                 pg.screenshot(path=f"{OUT}/composer-fullsong-chord-selected.png", full_page=True)
                 pg.keyboard.press("Escape"); pg.wait_for_timeout(200)
+            # save the full-song composition (row remembers its song_id →
+            # "♪ song" badge), then reopen it from the library: the stored
+            # blob round-trips sections + lyrics, so the section band and the
+            # ChordPro sheet must still render after the reload.
+            pg.click("button:has-text('💾 Save')"); pg.wait_for_timeout(400)
+            pg.click("button:has-text('📂 Open')"); pg.wait_for_timeout(400)
+            pg.click(".cmp-library button:has-text('Cyber Dreams')"); pg.wait_for_timeout(600)
+            pg.screenshot(path=f"{OUT}/composer-fullsong-reopened.png", full_page=True)
             # back to the song to continue the rest of the captures
             pg.go_back(); pg.wait_for_timeout(500)
 

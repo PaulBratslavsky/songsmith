@@ -53,6 +53,10 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "list_progressions", description: "List saved chord progressions (reusable across songs).", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "save_progression", description: "Save a reusable chord progression by name.", destructive: false, input_schema: obj(json!({"name": s(""),"chords": {"type":"array","items":{"type":"string"}}}), &["name","chords"]) },
         ToolSpec { name: "delete_progression", description: "Delete a saved chord progression.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
+        ToolSpec { name: "list_compositions", description: "List saved Composer compositions (visual melody/chords/bass sketches): name, linked song, timestamps — no data blobs.", destructive: false, input_schema: obj(json!({}), &[]) },
+        ToolSpec { name: "get_composition", description: "Get a saved composition by id, including its full Composition JSON blob (`data`).", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
+        ToolSpec { name: "save_composition", description: "Save a Composer composition. Omit `id` to insert a new one (a fresh id is minted); pass `id` to update that composition in place. `data` must be the Composition JSON blob.", destructive: false, input_schema: obj(json!({"id": s("existing composition id (omit to insert)"),"name": s(""),"song_id": s("source song id for full-song imports (optional)"),"data": s("Composition JSON blob")}), &["name","data"]) },
+        ToolSpec { name: "delete_composition", description: "Delete a saved composition.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "list_renders", description: "List a song's final audio renders (versions referenced on disk).", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
         ToolSpec { name: "add_render", description: "Add a final render: a label + file path on disk (Suno/Udio/Ableton take).", destructive: false, input_schema: obj(json!({"song_id": s(""),"label": s(""),"file_path": s(""),"source": s(""),"notes": s("")}), &["song_id","file_path"]) },
         ToolSpec { name: "set_render_pick", description: "Mark a render as the chosen winner for its song.", destructive: false, input_schema: obj(json!({"id": s(""),"is_pick": {"type":"boolean"}}), &["id","is_pick"]) },
@@ -178,6 +182,10 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             v(db::create_progression(conn, arg(args, "name")?, &chords).await?)
         }
         "delete_progression" => { db::delete_progression(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "list_compositions" => v(db::list_compositions(conn).await?),
+        "get_composition" => v(db::get_composition(conn, arg(args, "id")?).await?),
+        "save_composition" => v(db::save_composition(conn, arg_opt(args, "id"), arg(args, "name")?, arg_opt(args, "song_id"), arg(args, "data")?).await?),
+        "delete_composition" => { db::delete_composition(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
         "list_renders" => v(db::list_renders(conn, arg(args, "song_id")?).await?),
         "add_render" => v(db::create_render(conn, arg(args, "song_id")?, arg_opt(args, "label").unwrap_or("Render"), arg(args, "file_path")?, arg_opt(args, "source").unwrap_or(""), arg_opt(args, "notes").unwrap_or("")).await?),
         "set_render_pick" => { db::set_render_pick(conn, arg(args, "id")?, args.get("is_pick").and_then(|b| b.as_bool()).unwrap_or(true)).await?; Ok(json!({ "ok": true })) }

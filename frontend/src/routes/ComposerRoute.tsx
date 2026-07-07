@@ -100,7 +100,7 @@ export function ComposerRoute() {
           This song has no chords yet — run the <b>Chords</b> stage first, then open it in the Composer.
         </div>
       ) : (
-        <Composer key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} />
+        <Composer key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} />
       )}
     </div>
   );

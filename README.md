@@ -43,8 +43,10 @@ The output feeds a real pipeline:
   key and everything transposes. A blank sketch is 8 bars; from any song, **"Open in Composer"** loads
   the *whole song* onto one long, scrollable, multi-section timeline — sections laid end-to-end, the
   real chords on the chord lane with the lyric line under each, melody + bass editable across the song.
-  Degree-based + key-relative (in-memory for now; save/export-back are upcoming phases).
-  See `docs/COMPOSER-SPEC.md`.
+  Degree-based + key-relative. **Compositions persist**: 💾 Save (insert-or-update) into the libSQL
+  `composition` table, 📂 Open from a saved-compositions library (with per-row delete), full-song
+  imports remembering their source song — plus MCP tools so Claude can read/write sketches too
+  (export-back-to-song is the remaining phase). See `docs/COMPOSER-SPEC.md`.
 - **Suno-accurate prompts** — the Generation Prompt stage follows current best practice: key +
   tempo in the **style** line, chords as `[Am]` tags **inline in the lyrics** (not sung).
 - **Freeze sections** — 🔒 lock any section in Structure / Chords / Lyric Spec / Lyrics and

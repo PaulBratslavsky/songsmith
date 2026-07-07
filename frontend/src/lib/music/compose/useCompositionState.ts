@@ -164,7 +164,7 @@ export type CompositionActions = {
   resizeNote: (lane: Lane, id: string, length: number) => void;
   removeNote: (lane: Lane, id: string) => void;
   clearAll: () => void;
-  /** Load a stored composition (mints fresh span ids). Seam for Phase 3. */
+  /** Load a stored composition (mints fresh span ids) — the library's open path. */
   load: (comp: Composition) => void;
   /** Start a fresh empty composition in the given key. */
   reset: (root: Composition['key']['root'], mode: KeyMode) => void;

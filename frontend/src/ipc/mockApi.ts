@@ -93,6 +93,25 @@ function seed(): Any {
     }
     return out;
   })();
+  // one saved Composer sketch so the library panel isn't empty on first open
+  // (the blob is a valid v3 Composition — parseStoredComposition loads it)
+  const seedComposition = {
+    id: "seed-comp", version: 3, name: "Neon idea", key: { root: "A", mode: "minor" }, bpm: 112,
+    bars: 8, totalTicks: 128,
+    chords: [
+      { id: "c1", degree: 1, seventh: false, start: 0, length: 16 },
+      { id: "c2", degree: 6, seventh: false, start: 16, length: 16 },
+      { id: "c3", degree: 3, seventh: false, start: 32, length: 16 },
+      { id: "c4", degree: 7, seventh: false, start: 48, length: 16 },
+    ],
+    melody: [
+      { id: "m1", degree: 5, octave: 0, start: 0, length: 8 },
+      { id: "m2", degree: 4, octave: 0, start: 8, length: 8 },
+      { id: "m3", degree: 3, octave: 0, start: 16, length: 16 },
+    ],
+    bass: [{ id: "b1", degree: 1, octave: 0, start: 0, length: 16 }],
+    sections: [], lyrics: [],
+  };
   return {
     presets: [
       {
@@ -121,6 +140,7 @@ function seed(): Any {
       artifact("prompt", "generation_prompt", { taggedLyrics }),
     ],
     skills, progressions: [], renders: [],
+    compositions: [{ id: uid(), name: "Neon idea", song_id: null, data: JSON.stringify(seedComposition), created_at: ts, updated_at: ts }],
     settings: { claude_model: "", claude_bin: "", mcp_token: "mock-token", ableton_mcp: "", music_folder: "", analyzer_cmd: "" },
     // mock claude.ai subscription auth — starts signed in so the card looks real
     auth: { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" },
@@ -331,6 +351,29 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
     case "list_progressions": return r(db.progressions);
     case "save_progression": { const p = { id: uid(), name: a.name, chords: a.chords, created_at: now() }; db.progressions.unshift(p); return r(p); }
     case "delete_progression": db.progressions = db.progressions.filter((x: Any) => x.id !== a.id); return r(undefined);
+    // saved compositions (`db.compositions ??= []` back-fills mock DBs seeded before Phase 3)
+    case "list_compositions": {
+      db.compositions ??= [];
+      // light listing (no data blob), newest first — mirrors db.rs
+      return r([...db.compositions]
+        .sort((x: Any, y: Any) => (y.updated_at > x.updated_at ? 1 : -1))
+        .map(({ data, ...meta }: Any) => meta));
+    }
+    case "get_composition": { db.compositions ??= []; return r(db.compositions.find((c: Any) => c.id === a.id) ?? null); }
+    case "save_composition": {
+      db.compositions ??= [];
+      JSON.parse(a.data); // reject garbage, like the core does
+      if (a.id) {
+        const c = db.compositions.find((x: Any) => x.id === a.id);
+        if (!c) throw new Error("composition not found");
+        Object.assign(c, { name: a.name, song_id: a.songId ?? null, data: a.data, updated_at: now() });
+        return r(c);
+      }
+      const c = { id: uid(), name: a.name, song_id: a.songId ?? null, data: a.data, created_at: now(), updated_at: now() };
+      db.compositions.unshift(c);
+      return r(c);
+    }
+    case "delete_composition": db.compositions = (db.compositions ?? []).filter((x: Any) => x.id !== a.id); return r(undefined);
     case "list_renders": return r(db.renders.filter((x: Any) => x.song_id === a.songId));
     case "add_render": { const x = { id: uid(), song_id: a.songId, label: a.label || "Render", file_path: a.filePath, source: a.source || "", notes: a.notes || "", is_pick: false, created_at: now() }; db.renders.unshift(x); return r(x); }
     case "set_render_pick": { const x = db.renders.find((y: Any) => y.id === a.id); if (a.isPick) db.renders.filter((y: Any) => y.song_id === x.song_id).forEach((y: Any) => (y.is_pick = false)); if (x) x.is_pick = a.isPick; return r(undefined); }
@@ -404,7 +447,8 @@ const MOCK_TOOLS = [
   "get_artifact","save_artifact","list_artifact_revisions","revert_artifact",
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",
   "list_progressions","save_progression","delete_progression",
+  "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
   "analyze_reference",
   "get_settings","set_settings",
-].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" }));
+].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" }));

@@ -1,10 +1,10 @@
-// Single source of truth for validating a Composition. Kept for Phase 3
-// persistence (libSQL `composition` table via the mcp-shim CRUD pattern) —
-// NOT wired to any network/Strapi code yet. The lenient read path
-// (parseStoredComposition) + reidentify are the seams the persistence
-// layer will load through. compositionFromSong (the song→Composition
-// builder) also runs its output through parseStoredComposition so the
-// invariants hold for imported songs too.
+// Single source of truth for validating a Composition. Phase 3 persistence
+// (the libSQL `composition` table) saves through CompositionSchema and loads
+// through the lenient read path (parseStoredComposition) + reidentify — the
+// Composer's Save/Open buttons and the MCP composition tools all move the
+// same blob. compositionFromSong (the song→Composition builder) also runs
+// its output through parseStoredComposition so the invariants hold for
+// imported songs too.
 
 import { z } from 'zod';
 import type { Composition } from './types';

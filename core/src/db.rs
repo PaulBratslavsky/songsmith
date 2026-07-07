@@ -70,6 +70,10 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS progression (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, chords TEXT NOT NULL, created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS composition (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, song_id TEXT,
+          data TEXT NOT NULL, created_at TEXT, updated_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS render (
           id TEXT PRIMARY KEY, song_id TEXT NOT NULL REFERENCES song(id),
           label TEXT, file_path TEXT NOT NULL, source TEXT, notes TEXT,
@@ -519,6 +523,75 @@ pub async fn delete_progression(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- Saved compositions (Composer sketches / full-song exports) -------------
+
+const COMPOSITION_COLS: &str = "id, name, song_id, data, created_at, updated_at";
+fn map_composition(r: &libsql::Row) -> CompositionRow {
+    CompositionRow {
+        id: s(r, 0), name: s(r, 1), song_id: so(r, 2), data: s(r, 3),
+        created_at: s(r, 4), updated_at: s(r, 5),
+    }
+}
+
+/// Light listing (no `data` blob) for the library panel / MCP, newest first.
+pub async fn list_compositions(conn: &Connection) -> Result<Vec<CompositionMeta>> {
+    let mut rows = conn
+        .query("SELECT id, name, song_id, created_at, updated_at FROM composition ORDER BY updated_at DESC", ())
+        .await?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await? {
+        out.push(CompositionMeta {
+            id: s(&r, 0), name: s(&r, 1), song_id: so(&r, 2), created_at: s(&r, 3), updated_at: s(&r, 4),
+        });
+    }
+    Ok(out)
+}
+pub async fn get_composition(conn: &Connection, id: &str) -> Result<Option<CompositionRow>> {
+    let mut rows = conn
+        .query(&format!("SELECT {COMPOSITION_COLS} FROM composition WHERE id = ?1"), params![id])
+        .await?;
+    Ok(rows.next().await?.as_ref().map(map_composition))
+}
+/// Upsert semantics: `id: None` inserts a new row (the caller adopts the
+/// minted id for subsequent saves); `Some(id)` updates that row in place and
+/// bumps `updated_at`. `data` must at least parse as JSON — the frontend
+/// sends the zod-validated Composition blob; garbage is rejected here so a
+/// bad MCP write can't poison the library.
+pub async fn save_composition(
+    conn: &Connection, id: Option<&str>, name: &str, song_id: Option<&str>, data: &str,
+) -> Result<CompositionRow> {
+    serde_json::from_str::<serde_json::Value>(data)
+        .map_err(|e| anyhow!("composition data is not valid JSON: {e}"))?;
+    let ts = now();
+    match id {
+        Some(id) => {
+            let n = conn
+                .execute(
+                    "UPDATE composition SET name=?2, song_id=?3, data=?4, updated_at=?5 WHERE id=?1",
+                    params![id, name, song_id, data, ts],
+                )
+                .await?;
+            if n == 0 {
+                return Err(anyhow!("composition not found"));
+            }
+            get_composition(conn, id).await?.ok_or_else(|| anyhow!("composition not found after update"))
+        }
+        None => {
+            let id = new_id();
+            conn.execute(
+                "INSERT INTO composition (id, name, song_id, data, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![id.clone(), name, song_id, data, ts],
+            )
+            .await?;
+            get_composition(conn, &id).await?.ok_or_else(|| anyhow!("composition not found after save"))
+        }
+    }
+}
+pub async fn delete_composition(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM composition WHERE id = ?1", params![id]).await?;
+    Ok(())
+}
+
 // ---- Settings --------------------------------------------------------------
 
 pub async fn get_settings(conn: &Connection) -> Result<Settings> {
@@ -558,4 +631,104 @@ pub async fn ensure_mcp_token(conn: &Connection) -> Result<String> {
         params![token.clone()],
     ).await?;
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libsql::Builder;
+
+    // libSQL `:memory:` gives each connection its OWN database, so return the
+    // single connection migrated here and reuse it for the whole test.
+    async fn mem_conn() -> (libsql::Database, Connection) {
+        let db = Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        migrate(&conn).await.unwrap();
+        (db, conn)
+    }
+
+    /// The stored blob comes back byte-for-byte (the Composer round-trips
+    /// sections/lyrics through it), and the nullable song link is kept.
+    #[tokio::test]
+    async fn composition_save_get_round_trips_blob_byte_for_byte() {
+        let (_db, conn) = mem_conn().await;
+        // key order + unicode + nesting all preserved exactly as sent
+        let data = r#"{"id":"comp-1","version":3,"name":"Sketch — épreuve","key":{"root":"C","mode":"major"},"bpm":100,"bars":8,"totalTicks":128,"chords":[{"id":"s1","degree":1,"seventh":false,"start":0,"length":16,"name":"Am"}],"melody":[],"bass":[],"sections":[{"id":"sec1","name":"Verse 1","startTick":0,"lengthTicks":64}],"lyrics":[{"tick":0,"text":"city lights","words":[{"text":"city","chord":"Am"},{"text":"lights"}]}]}"#;
+        let saved = save_composition(&conn, None, "Sketch", Some("song-42"), data).await.unwrap();
+        assert_eq!(saved.data, data);
+        assert_eq!(saved.song_id.as_deref(), Some("song-42"));
+
+        let got = get_composition(&conn, &saved.id).await.unwrap().unwrap();
+        assert_eq!(got.data, data, "blob must round-trip byte-for-byte");
+        assert_eq!(got.name, "Sketch");
+        assert_eq!(got.song_id.as_deref(), Some("song-42"));
+
+        // a blank sketch has no song link — None round-trips as NULL
+        let blank = save_composition(&conn, None, "Blank", None, r#"{"a":1}"#).await.unwrap();
+        assert_eq!(get_composition(&conn, &blank.id).await.unwrap().unwrap().song_id, None);
+    }
+
+    /// `Some(id)` updates in place: same row (no duplicate), `updated_at`
+    /// bumped, `created_at` untouched. Unknown ids are rejected.
+    #[tokio::test]
+    async fn composition_update_in_place_bumps_updated_at_without_duplicating() {
+        let (_db, conn) = mem_conn().await;
+        let first = save_composition(&conn, None, "v1", None, r#"{"n":1}"#).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+
+        let second = save_composition(&conn, Some(&first.id), "v2", None, r#"{"n":2}"#).await.unwrap();
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.name, "v2");
+        assert_eq!(second.data, r#"{"n":2}"#);
+        assert_eq!(second.created_at, first.created_at, "created_at is stable across updates");
+        assert!(second.updated_at > first.updated_at, "updated_at must bump on update");
+
+        let all = list_compositions(&conn).await.unwrap();
+        assert_eq!(all.len(), 1, "update must not duplicate the row");
+
+        // updating a row that doesn't exist is an error, not a silent insert
+        assert!(save_composition(&conn, Some("nope"), "x", None, "{}").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn composition_delete_removes_row() {
+        let (_db, conn) = mem_conn().await;
+        let saved = save_composition(&conn, None, "gone soon", None, "{}").await.unwrap();
+        delete_composition(&conn, &saved.id).await.unwrap();
+        assert!(get_composition(&conn, &saved.id).await.unwrap().is_none());
+        assert!(list_compositions(&conn).await.unwrap().is_empty());
+    }
+
+    /// Garbage `data` never lands in the table (insert or update path).
+    #[tokio::test]
+    async fn composition_rejects_invalid_json_data() {
+        let (_db, conn) = mem_conn().await;
+        assert!(save_composition(&conn, None, "bad", None, "not json {{").await.is_err());
+        assert!(list_compositions(&conn).await.unwrap().is_empty(), "rejected saves leave no row");
+
+        let ok = save_composition(&conn, None, "good", None, r#"{"ok":true}"#).await.unwrap();
+        assert!(save_composition(&conn, Some(&ok.id), "good", None, "],garbage").await.is_err());
+        let kept = get_composition(&conn, &ok.id).await.unwrap().unwrap();
+        assert_eq!(kept.data, r#"{"ok":true}"#, "rejected update must not touch the row");
+    }
+
+    /// Listing is newest-first by `updated_at` — an in-place save floats the
+    /// row to the top — and carries the song badge (song_id) without the blob.
+    #[tokio::test]
+    async fn composition_list_orders_newest_first() {
+        let (_db, conn) = mem_conn().await;
+        let a = save_composition(&conn, None, "older", None, "{}").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        let b = save_composition(&conn, None, "newer", Some("song-1"), "{}").await.unwrap();
+
+        let list = list_compositions(&conn).await.unwrap();
+        assert_eq!(list.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![b.id.as_str(), a.id.as_str()]);
+        assert_eq!(list[0].song_id.as_deref(), Some("song-1"));
+
+        // updating the older one floats it to the top
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        save_composition(&conn, Some(&a.id), "older", None, "{}").await.unwrap();
+        let list = list_compositions(&conn).await.unwrap();
+        assert_eq!(list[0].id, a.id);
+    }
 }

@@ -3,6 +3,8 @@
 
 import type {
   Artifact,
+  CompositionMeta,
+  CompositionRow,
   Settings,
   Progression,
   Render,
@@ -142,6 +144,14 @@ export const api = {
   listProgressions: () => call<Progression[]>("list_progressions"),
   saveProgression: (name: string, chords: string[]) => call<Progression>("save_progression", { name, chords }),
   deleteProgression: (id: string) => call<void>("delete_progression", { id }),
+
+  // saved compositions (Composer sketches / full-song exports; libSQL-backed)
+  listCompositions: () => call<CompositionMeta[]>("list_compositions"),
+  getComposition: (id: string) => call<CompositionRow | null>("get_composition", { id }),
+  /** `id: null` inserts (adopt the returned row id); a row id updates in place. */
+  saveComposition: (id: string | null, name: string, songId: string | null, data: string) =>
+    call<CompositionRow>("save_composition", { id, name, songId, data }),
+  deleteComposition: (id: string) => call<void>("delete_composition", { id }),
 
   // final renders (audio versions referenced on disk)
   listRenders: (songId: string) => call<Render[]>("list_renders", { songId }),
