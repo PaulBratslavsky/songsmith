@@ -54,13 +54,16 @@ function seed(): Any {
   });
   // chords carry explicit per-chord beats so the Composer lays them out at
   // the right widths (full-song export). Strings still work (default 4 beats).
+  // The Chords stage lists each progression ONCE; the LYRICS below cycle it
+  // (Chorus 1: 4 chords, 8 placements) — the lyric-sheet v3 repro: the
+  // Composer must lay one chord span per sung placement, not per entry.
   const ch = (name: string, beats = 4) => ({ name, beats });
   const chordsData = {
     sections: [
       { label: "Intro", chords: [ch("Am"), ch("Am"), ch("F"), ch("F")] },
-      { label: "Verse 1", chords: [ch("Dm"), ch("Bb"), ch("F"), ch("Am"), ch("Dm"), ch("Bb"), ch("F"), ch("Am")] },
+      { label: "Verse 1", chords: [ch("Dm"), ch("Bb"), ch("F"), ch("Am")] },
       { label: "Pre-Chorus / Build 1", chords: [ch("Dm", 2), ch("Em", 2), ch("F", 2), ch("G", 2)] },
-      { label: "Chorus 1", chords: [ch("C"), ch("G"), ch("Am"), ch("F"), ch("C"), ch("G"), ch("Am"), ch("F")] },
+      { label: "Chorus 1", chords: [ch("C"), ch("G"), ch("Am"), ch("F")] },
     ],
   };
   const taggedLyrics = [
@@ -82,14 +85,15 @@ function seed(): Any {
     "[Dm]And the static [Em]starts to feel like a [F]hand",
     "[G]take me under, one more time",
   ].join("\n");
-  // lyrics artifact derived from the tagged lyrics (chords stripped), so the
-  // Builder/Sheet (which derive chord-over-lyric from chords + lyrics) have data
+  // lyrics artifact derived from the tagged lyrics, KEEPING the inline
+  // ChordPro [chord] tags — the user-placed word-level placements are the
+  // ground truth the Sheet and the Composer (lyric sheet v3) lay from.
   const lyricsSections = (() => {
     const out: Any[] = []; let cur: Any | null = null;
     for (const line of taggedLyrics.split("\n")) {
       const t = line.trim(); const hm = t.match(/^\[([^\]]+)\]$/);
       if (hm) { cur = { label: hm[1], lines: [] }; out.push(cur); }
-      else if (cur && t) cur.lines.push(line.replace(/\[[^\]]+\]/g, ""));
+      else if (cur && t) cur.lines.push(line);
     }
     return out;
   })();

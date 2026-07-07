@@ -238,6 +238,34 @@ The v1 sheet (all sections stacked vertically) is wrong. Requirements:
   span mapping. Auto-scroll follows the active line (`block:'nearest'`). Visual-tested:
   `composer-sheet-v2.png` + one-section/chips assertions in `scripts/visual_test.py`.
 
+## Lyric sheet v3 — chords laid from LYRIC PLACEMENTS (user test-drive, 2026-07-07) — ✅ DONE (2026-07-07)
+v2 still desyncs when a section's lyrics cycle the progression more times than the Chords stage
+lists it (e.g. Chorus: 4 progression chords but 8 ChordPro placements across the lines) — 8 sheet
+occurrences can't map onto 4 timeline blocks; duplicates light again. FIX: in `compositionFromSong`,
+lay each section's chord spans from the **lyric ChordPro placements in order** (the ground truth of
+the sung song): walk the section's lines' tagged chords; each placement becomes ONE span (beats taken
+by cycling the section's progression entries by position, default 4 when unknown); section length =
+the sum; each line anchors exactly at its first placement's span start (lines with no tags anchor
+between neighbors). Sections with NO tagged placements (instrumentals / no lyrics) keep the current
+progression-once layout. Result: timeline blocks == sheet occurrences 1:1 (sync exact by
+construction — selection and play-along can never light a twin), and the timeline honestly shows the
+sung song (Chorus = the progression twice if that's how it's sung).
+- **Shipped 2026-07-07:** `compositionFromSong` walks each section's lines' ChordPro tags (the
+  word-level `words` model) — every placement becomes ONE span (name = the tag, degree as before),
+  beats cycling the section's Chords-stage progression **by position** (`progression[i % n].beats`,
+  4 when it's empty); section length = the sum; a tagged line anchors exactly at its first
+  placement's span start, untagged lines interpolate between their neighbours' anchors (a `pushLine`
+  guard keeps anchors unique + strictly increasing for the sheet keys and the active-line binary
+  search). Untagged sections (instrumentals / chordless) keep the progression-once layout.
+  `LyricSheet.buildSheetModel`'s claim is now purely POSITIONAL (occurrence i ↔ the section's i-th
+  span; the name-based fallback that lit twins is gone — tags past the spans of pre-v3 rows stay
+  unlinked/disabled). Playback (`activeChordId`/`activeLineTick`) and export
+  (`resolveCompositionSections`, which groups spans by section tick range — a re-export now writes
+  the sung layout) needed no changes. Mock "Cyber Dreams" now lists each progression once with
+  tagged lyrics cycling it (Chorus 1: 4 chords, 8 placements → 8 blocks); visual-tested:
+  `composer-sheet-v3-chorus.png` + spans==occurrences / unique-span-link / 28-block assertions in
+  `scripts/visual_test.py`. Saved pre-v3 compositions still load unchanged (schema untouched).
+
 ## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and
 the grid live-reloads) — after the visual builder + import/export work.

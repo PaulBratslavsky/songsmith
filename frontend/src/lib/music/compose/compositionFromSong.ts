@@ -4,6 +4,16 @@
 // variable-length timeline, attaches each section's lyric lines to the
 // chord starts they sit under, and keeps melody/bass empty (editable).
 //
+// Lyric sheet v3 (COMPOSER-SPEC): a section WITH tagged lyric placements
+// lays its chord spans FROM those placements — the ground truth of the
+// sung song. Each ChordPro [chord] tag becomes ONE span (beats cycle the
+// section's Chords-stage progression BY POSITION), so a chorus that sings
+// the progression twice honestly shows twice the blocks, and the timeline's
+// spans equal the sheet's chord occurrences 1:1 in order (sync by
+// construction — selection/play-along can never light a "twin"). Sections
+// with no tagged placements (instrumentals) keep the progression-once
+// layout.
+//
 // Pure + deterministic (no React/audio): given the song key, the Chords
 // stage data, and the Lyrics stage data, it returns a Composition that's
 // run through parseStoredComposition so the span invariants hold.
@@ -137,9 +147,103 @@ export function compositionFromSong(
   const lyrics: LyricLine[] = [];
   let tick = 0;
 
+  // Last anchor pushed overall — defensively keeps every lyric anchor
+  // unique + strictly increasing across the whole song (the sheet keys
+  // lines by anchor; the playback hook identifies the active line by it).
+  let lastAnchor = -1;
+  const pushLine = (anchor: number, words: LyricWord[]) => {
+    const a = Math.max(anchor, lastAnchor + 1);
+    lastAnchor = a;
+    const text = words.map((w) => w.text).filter(Boolean).join(' ');
+    lyrics.push({ tick: a, text, words });
+  };
+
   for (const sec of cSecs) {
     const label: string = sec.label || sec.type || 'Section';
     const raw = readChords(sec);
+    const lines = lyricLinesByLabel.get(label) ?? [];
+
+    // Flatten the section's tagged ChordPro placements in sung order, and
+    // remember each line's FIRST placement (its anchor chord).
+    const placements: string[] = [];
+    const firstPlacementOfLine: (number | null)[] = lines.map((words) => {
+      let first: number | null = null;
+      for (const w of words) {
+        if (!w.chord) continue;
+        if (first == null) first = placements.length;
+        placements.push(w.chord);
+      }
+      return first;
+    });
+
+    const sectionStart = tick;
+
+    if (placements.length) {
+      // Lyric-tagged section (lyric-sheet v3): ONE span per placement —
+      // the timeline lays the progression as many times as the lyrics
+      // actually cycle it. Beats cycle the Chords-stage progression BY
+      // POSITION (placement i → progression[i % n].beats; 4 when the
+      // progression is empty) — positional, never a name lookup. Section
+      // length = the sum of its spans. Invariant: this section's spans
+      // == its sheet chord occurrences, 1:1 in order.
+      const spanStarts: number[] = [];
+      placements.forEach((name, i) => {
+        const beats = raw.length ? raw[i % raw.length].beats : 4;
+        const length = Math.max(1, Math.round(beats * TICKS_PER_BEAT));
+        spanStarts.push(tick);
+        chords.push({
+          id: uid('span'),
+          degree: degreeForChordName(name, root, mode),
+          seventh: false,
+          name,
+          start: tick,
+          length,
+        });
+        tick += length;
+      });
+      sections.push({
+        id: uid('sec'),
+        name: label,
+        startTick: sectionStart,
+        lengthTicks: tick - sectionStart,
+      });
+
+      // Anchors: a tagged line sits EXACTLY at its first placement's span
+      // start; runs of untagged lines spread midway between their tagged
+      // neighbours' anchors (section start/end as the outer bounds).
+      const sectionEnd = tick;
+      const anchors: number[] = lines.map((_w, i) => {
+        const fp = firstPlacementOfLine[i];
+        return fp != null ? spanStarts[fp] : -1;
+      });
+      let i = 0;
+      while (i < lines.length) {
+        if (anchors[i] >= 0) {
+          i += 1;
+          continue;
+        }
+        let j = i;
+        while (j < lines.length && anchors[j] < 0) j += 1; // untagged run [i, j)
+        const lo = i > 0 ? anchors[i - 1] : sectionStart;
+        const hi = j < lines.length ? anchors[j] : sectionEnd;
+        const k = j - i;
+        for (let m = 0; m < k; m += 1) {
+          // A leading run starts at the section start; inner/trailing
+          // runs sit strictly between the bounds (gap permitting —
+          // pushLine keeps anchors unique either way).
+          anchors[i + m] =
+            i > 0
+              ? lo + Math.round(((m + 1) * (hi - lo)) / (k + 1))
+              : lo + Math.round((m * (hi - lo)) / (k + 1));
+        }
+        i = j;
+      }
+      lines.forEach((words, li) => pushLine(anchors[li], words));
+      continue;
+    }
+
+    // ---- No tagged placements: keep the progression-once layout. ----
+
     if (!raw.length) {
       // a chordless section (e.g. a bare Intro) — give it one bar so the
       // band still shows it.
@@ -147,7 +251,6 @@ export function compositionFromSong(
       tick += TICKS_PER_BAR;
       continue;
     }
-    const sectionStart = tick;
     const chordStarts: number[] = [];
     for (const rc of raw) {
       const length = Math.max(1, Math.round(rc.beats * TICKS_PER_BEAT));
@@ -169,24 +272,22 @@ export function compositionFromSong(
       lengthTicks: tick - sectionStart,
     });
 
-    // Anchor this section's lyric lines (lyric-sheet-v2 fix). When the
-    // CHORDS outnumber the lines, pair line i with chord start i (the song
-    // lands one chord at the start of each lyric line). When the LINES
-    // outnumber (or equal) the chords, distribute them evenly across the
-    // section's tick span instead — the old code pinned every overflow
+    // Anchor this section's (untagged) lyric lines (lyric-sheet-v2 fix).
+    // When the CHORDS outnumber the lines, pair line i with chord start i
+    // (the song lands one chord at the start of each lyric line). When the
+    // LINES outnumber (or equal) the chords, distribute them evenly across
+    // the section's tick span instead — the old code pinned every overflow
     // line to the LAST chord's tick, so play-along tracking skipped the
     // back half of the section. Either way every line gets a unique,
     // strictly increasing anchor. `words` carries the word-level chord
     // anchors for the lyric sheet.
-    const lines = lyricLinesByLabel.get(label) ?? [];
     const sectionLength = tick - sectionStart;
     lines.forEach((words, i) => {
       const anchor =
         lines.length >= chordStarts.length
           ? sectionStart + Math.round((i * sectionLength) / lines.length)
           : (chordStarts[i] ?? sectionStart);
-      const text = words.map((w) => w.text).filter(Boolean).join(' ');
-      lyrics.push({ tick: anchor, text, words });
+      pushLine(anchor, words);
     });
   }
 

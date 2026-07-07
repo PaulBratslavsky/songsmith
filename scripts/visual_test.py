@@ -14,9 +14,13 @@ Captures the key surfaces as regression screenshots:
   composer (blank sketch) + composer-library (Phase 3 persistence: Save the
   sketch, then the open library panel listing saved compositions) +
   composer-fullsong (timeline + lyric sheet v2 below it: ONE section at a
-  time, section chips, lines flowing left-to-right) +
+  time, section chips, lines flowing left-to-right; lyric sheet v3 lays the
+  timeline's chord spans FROM the lyric ChordPro placements, so a chorus
+  that sings its 4-chord progression twice shows 8 blocks) +
   composer-sheet-v2 (a section chip clicked — browsing the single-section
   left-to-right sheet) +
+  composer-sheet-v3-chorus (the Chorus chip: 8 chord occurrences over the
+  cycled 4-chord progression, each linked to its OWN timeline span) +
   composer-fullsong-chord-selected (two-way highlight: the selected chord's
   section shown + exact chord mark in the sheet) +
   composer-export (⤴ Export dialog: resolved sections preview + update-linked
@@ -127,6 +131,25 @@ def main():
             assert pg.locator(".cmp-sheet-section").count() == 1, \
                 "browsing chips must still show exactly one section"
             pg.screenshot(path=f"{OUT}/composer-sheet-v2.png", full_page=True)
+            # Lyric sheet v3: chord spans are laid FROM the lyric ChordPro
+            # placements, so a lyric-tagged section's timeline spans equal
+            # its sheet chord occurrences 1:1 (never a name-matched twin).
+            # Mock Chorus 1: the Chords stage lists C-G-Am-F ONCE, the two
+            # chorus lines cycle it TWICE → 8 occurrences and 8 blocks.
+            chips.filter(has_text="Chorus 1").first.click(); pg.wait_for_timeout(300)
+            occ = pg.locator(".cmp-sheet-section .cp-chord.set")
+            assert occ.count() == 8, \
+                f"chorus lyrics cycle the 4-chord progression twice → 8 sheet occurrences, got {occ.count()}"
+            cids = [occ.nth(i).get_attribute("data-cid") for i in range(occ.count())]
+            assert all(cids) and len(set(cids)) == len(cids), \
+                f"each sheet occurrence must link to its OWN chord span (1:1, in order), got {cids}"
+            # And the timeline honestly shows the sung song: one block per
+            # placement in lyric-tagged sections (Verse 12 + Pre-Chorus 4 +
+            # Chorus 8) plus the instrumental Intro's progression-once 4.
+            blocks = pg.locator("[aria-label='Remove chord']")
+            assert blocks.count() == 28, \
+                f"timeline must lay one chord span per lyric placement (4+12+4+8=28), got {blocks.count()}"
+            pg.screenshot(path=f"{OUT}/composer-sheet-v3-chorus.png", full_page=True)
             chips.nth(0).click(); pg.wait_for_timeout(200)  # back to the first
             # ⤴ Export dialog (export-back-to-song): the resolved sections
             # preview (absolute chord names in the composition's key) with the

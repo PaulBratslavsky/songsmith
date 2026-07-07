@@ -59,11 +59,14 @@ export type SheetSection = {
 /**
  * Pure: fold the composition's sections + lyric lines + chord spans into
  * the sheet model. Word-level chord tags (LyricLine.words, threaded from
- * the Lyrics stage's ChordPro) are matched to this section's chord spans
- * by name IN ORDER, so repeated progressions resolve to successive spans;
- * a line with no word tags falls back to line-level anchoring (the chord
- * at the line's anchor tick, above its first word). Wordless sections
- * (instrumentals) render as a chord-only line.
+ * the Lyrics stage's ChordPro) map to this section's chord spans purely
+ * POSITIONALLY: occurrence i ↔ the section's i-th span. compositionFromSong
+ * (lyric sheet v3) lays a tagged section's spans FROM those placements, so
+ * the mapping is 1:1 by construction — no name matching anywhere (name
+ * lookups lit "twin" chords when a progression repeated). A line with no
+ * word tags falls back to line-level anchoring (the chord at the line's
+ * anchor tick, above its first word). Wordless sections (instrumentals)
+ * render as a chord-only line.
  */
 export function buildSheetModel(
   sections: Section[],
@@ -77,20 +80,16 @@ export function buildSheetModel(
     const spans = sorted.filter((s) => s.start >= sec.startTick && s.start < secEnd);
     const srcLines = lyrics.filter((l) => l.tick >= sec.startTick && l.tick < secEnd);
 
-    // Greedy in-order matching of chord tags → chord spans (by name).
+    // Positional in-order mapping: the i-th chord tag in the section IS
+    // the section's i-th span (the v3 1:1 invariant). Tags past the
+    // section's spans (rows saved before v3 laid spans from placements)
+    // stay unlinked — shown but disabled — never a name-matched twin.
     let next = 0;
     const claim = (name?: string): ChordSpan | undefined => {
       if (!name) return undefined;
-      const wanted = name.trim();
-      for (let j = next; j < spans.length; j += 1) {
-        if (spans[j].name === wanted) {
-          next = j + 1;
-          return spans[j];
-        }
-      }
-      // Tag repeats after the section's spans ran out — reuse the first
-      // span with that name so highlight/click still land somewhere sane.
-      return spans.find((s) => s.name === wanted);
+      const span = spans[next];
+      next += 1;
+      return span;
     };
 
     const lines: SheetLine[] = srcLines.map((ln) => {
