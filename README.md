@@ -49,6 +49,10 @@ The output feeds a real pipeline:
   tempo in the **style** line, chords as `[Am]` tags **inline in the lyrics** (not sung).
 - **Freeze sections** — 🔒 lock any section in Structure / Chords / Lyric Spec / Lyrics and
   regenerating that stage keeps it byte-for-byte; only unlocked sections are rewritten.
+- **Paste finished lyrics** — 📋 drop completed lyrics into the Lyrics stage (or "New from lyrics"
+  on the Library) and they're parsed into sections with the words kept **verbatim** — header split
+  first, Claude only ever marks boundaries on unlabeled text (validated line-by-line against your
+  paste) — then the Structure stage is back-filled to match.
 - **Final renders** — reference your generated audio versions on disk (multiple takes), play
   them, reveal in Finder, ★ pick the winner. Audio stays in your DAW-friendly folder.
 - **Extensible skills** — every stage's songwriting method is an editable skill; add custom

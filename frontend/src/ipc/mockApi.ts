@@ -149,6 +149,98 @@ function advance(songId: string) {
   return { current_stage: next?.type };
 }
 
+// ---- Paste-lyrics import (mock = the deterministic header split only) -------
+// Mirrors core/src/agent.rs: `[Verse 1]` / Suno `[verse]` bracket headers and
+// `Verse 1:` line-style headers; words are NEVER altered; no headers → one
+// "Lyrics" section (the browser mock never calls Claude → used_claude:false).
+
+const HEADER_WORDS = [
+  "verse","chorus","prechorus","pre","post","postchorus","bridge","intro","outro","hook",
+  "refrain","drop","build","buildup","breakdown","break","interlude","instrumental","solo",
+  "tag","coda","vamp","middle","part","section","ending",
+];
+function headerLabel(line: string): string | null {
+  const t = line.trim();
+  if (t.length >= 3 && t.startsWith("[") && t.endsWith("]")) {
+    const inner = t.slice(1, -1).trim();
+    if (inner && !inner.includes("[") && !inner.includes("]")) return inner;
+  }
+  if (t.endsWith(":")) {
+    const name = t.slice(0, -1).trim();
+    if (name && name.length <= 40 && !name.includes(":")) {
+      const first = (name.match(/^[A-Za-z]+/)?.[0] ?? "").toLowerCase();
+      if (HEADER_WORDS.includes(first)) return name;
+    }
+  }
+  return null;
+}
+function trimBlankEdges(lines: string[]): string[] {
+  const out = [...lines];
+  while (out.length && !out[0].trim()) out.shift();
+  while (out.length && !out[out.length - 1].trim()) out.pop();
+  return out;
+}
+function parsePastedLyrics(text: string): { sections: { label: string; lines: string[] }[]; used_claude: boolean } {
+  const sections: { label: string; lines: string[] }[] = [];
+  let current: { label: string; lines: string[] } | null = null;
+  const preamble: string[] = [];
+  let found = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    const label = headerLabel(line);
+    if (label != null) {
+      found = true;
+      if (current) sections.push({ label: current.label, lines: trimBlankEdges(current.lines) });
+      current = { label, lines: [] };
+    } else if (current) current.lines.push(line);
+    else preamble.push(line);
+  }
+  if (!found) return { sections: [{ label: "Lyrics", lines: trimBlankEdges(text.split("\n").map((l) => l.replace(/\r$/, ""))) }], used_claude: false };
+  if (current) sections.push({ label: current.label, lines: trimBlankEdges(current.lines) });
+  const pre = trimBlankEdges(preamble);
+  if (pre.length) sections.unshift({ label: "Lyrics", lines: pre });
+  return { sections, used_claude: false };
+}
+const normLabel = (s: string) => s.trim().toLowerCase().split(/\s+/).join(" ");
+/** Replace the Lyrics artifact + back-fill Structure to the pasted sections (labels/order). */
+function importLyricsIntoSong(songId: string, text: string) {
+  const parsed = parsePastedLyrics(text);
+  if (parsed.sections.every((s) => s.lines.every((l) => !l.trim()))) throw new Error("no lyrics to import — paste some text first");
+  const song = db.songs.find((v: Any) => v.id === songId);
+  if (!song) throw new Error("song not found");
+  const stageOf = (t: string) => db.stages.find((s: Any) => s.song_id === songId && s.type === t);
+  const lyricsStage = stageOf("lyrics"), structureStage = stageOf("structure");
+  if (!lyricsStage || !structureStage) throw new Error("song has no lyrics/structure stage");
+  const push = (stage: Any, kind: string, content: string) => {
+    const ver = (currentArtifact(stage.id)?.version ?? 0) + 1;
+    db.artifacts.push({ id: uid(), song_id: songId, stage_id: stage.id, kind, content, version: ver, approved: false, created_at: now() });
+    stage.status = "done"; stage.updated_at = now();
+  };
+  // Lyrics — pasted words verbatim, editor-style text, no frozen flags carried
+  const lyricsData = { sections: parsed.sections.map((s) => ({ label: s.label, lines: s.lines })) };
+  const lyricsText = parsed.sections.map((s) => `[${s.label}]\n${s.lines.join("\n")}`).join("\n\n");
+  push(lyricsStage, "lyrics", JSON.stringify({ kind: "lyrics", text: lyricsText, data: lyricsData }));
+  // Structure — back-fill labels/order; keep bars/role (+ lock) on label match
+  let prior: Any | null = null;
+  try { prior = JSON.parse(currentArtifact(structureStage.id)?.content ?? "")?.data ?? null; } catch {}
+  const priorSecs: Any[] = Array.isArray(prior?.sections) ? prior.sections : [];
+  const sections = parsed.sections.map((p) => {
+    const old = priorSecs.find((s) => normLabel(s.label ?? s.type ?? "") === normLabel(p.label));
+    return old
+      ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? 8), role: old.role ?? "", ...(old.frozen ? { frozen: true } : {}) }
+      : { type: "", label: p.label, bars: 8, role: "" };
+  });
+  const sData = {
+    key: { root: prior?.key?.root ?? song.key_root, mode: prior?.key?.mode ?? song.key_mode },
+    bpm: prior?.bpm ?? song.bpm, keyNote: prior?.keyNote ?? "", tempoNote: prior?.tempoNote ?? "", sections,
+  };
+  const sText = [
+    `**KEY:** ${sData.key.root} ${sData.key.mode}`, `**TEMPO:** ${sData.bpm} BPM`, "", "**SECTION MAP**", "",
+    ...sections.map((s, i) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`),
+  ].join("\n");
+  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: sText, data: sData }));
+}
+
 export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
   const r = (x: any) => { save(db); return x as T; };
   switch (cmd) {
@@ -250,6 +342,19 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
       sections: [{ start_sec: 0, end_sec: 32, approx_bars: 8, chords: ["Am", "F", "C", "E"] }],
     });
     case "import_reference": return r(db.songs[0]?.id ?? null); // mock: just open the demo song
+    // paste-lyrics import (words verbatim; mock = deterministic header split only)
+    case "parse_pasted_lyrics": return r(parsePastedLyrics(a.text ?? ""));
+    case "import_lyrics": { importLyricsIntoSong(a.songId, a.text ?? ""); return r(undefined); }
+    case "create_song_from_lyrics": {
+      const id = uid();
+      const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+        current_stage: "concept", key_root: "A", key_mode: "minor", bpm: 120, voicings: "{}", created_at: now(), updated_at: now() };
+      db.songs.unshift(v);
+      STAGE_ORDER.forEach((type, ordinal) =>
+        db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
+      importLyricsIntoSong(id, a.text ?? "");
+      return r(v);
+    }
     case "self_check_stage": return r(currentArtifact(a.stageId)); // mock: no-op refine
     case "get_settings": return r(db.settings);
     case "set_settings": db.settings = a.settings; return r(db.settings);

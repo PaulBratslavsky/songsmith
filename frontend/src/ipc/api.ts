@@ -86,6 +86,9 @@ export type ClaudeAuthStatus = {
 };
 export type LoginResult = { url: string | null; instructions: string };
 export type LoginSubmitResult = { success: boolean; message: string };
+/** Pasted-lyrics parse result (words verbatim; `used_claude` = the fallback segmented unlabeled text). */
+export type ParsedLyricSection = { label: string; lines: string[] };
+export type ParsedLyrics = { sections: ParsedLyricSection[]; used_claude: boolean };
 
 export const api = {
   // style presets
@@ -105,6 +108,11 @@ export const api = {
   updateSongKey: (id: string, root: string, mode: string, bpm: number) => call<Song>("update_song_key", { id, root, mode, bpm }),
   updateSongVoicings: (id: string, voicings: string) => call<Song>("update_song_voicings", { id, voicings }),
   importReference: (audioPath: string) => call<string>("import_reference", { audioPath }),
+  // paste-lyrics import (words kept verbatim — parse/tag only, never rewrite)
+  parsePastedLyrics: (text: string) => call<ParsedLyrics>("parse_pasted_lyrics", { text }),
+  importLyrics: (songId: string, text: string) => call<void>("import_lyrics", { songId, text }),
+  createSongFromLyrics: (stylePresetId: string, title: string, text: string) =>
+    call<Song>("create_song_from_lyrics", { stylePresetId, title, text }),
   refineField: (stageLabel: string, fieldLabel: string, current: string, instruction: string) =>
     call<string>("refine_field", { stageLabel, fieldLabel, current, instruction }),
   deleteSong: (id: string) => call<void>("delete_song", { id }),

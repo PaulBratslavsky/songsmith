@@ -106,6 +106,31 @@ async fn refine_field(state: State<'_, AppState>, stage_label: String, field_lab
 async fn delete_song(state: State<'_, AppState>, id: String) -> R<()> {
     db::delete_song(&state.conn, &id).await.map_err(e2s)
 }
+
+// ---- Paste-lyrics import (spec Feature B — words kept verbatim) -------------
+
+/// Dry-run parse of pasted lyrics (drives the preview modal — saves nothing).
+#[tauri::command]
+async fn parse_pasted_lyrics(state: State<'_, AppState>, text: String) -> R<agent::ParsedLyrics> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    agent::parse_pasted_lyrics(&settings, &text).await.map_err(e2s)
+}
+
+/// Import pasted lyrics into an existing song: replace the Lyrics artifact and
+/// back-fill Structure to match. USER authority — replaces locked sections too
+/// (the UI warns before confirm).
+#[tauri::command]
+async fn import_lyrics(state: State<'_, AppState>, song_id: String, text: String) -> R<()> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    agent::import_lyrics(&state.conn, &settings, &song_id, &text).await.map(|_| ()).map_err(e2s)
+}
+
+/// New song from pasted lyrics: mirrors `create_song`'s inputs, then imports.
+#[tauri::command]
+async fn create_song_from_lyrics(state: State<'_, AppState>, style_preset_id: String, title: String, text: String) -> R<Song> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    agent::create_song_from_lyrics(&state.conn, &settings, &style_preset_id, &title, &text).await.map_err(e2s)
+}
 #[tauri::command]
 async fn get_stage(state: State<'_, AppState>, id: String) -> R<Option<StageDetail>> {
     db::get_stage_detail(&state.conn, &id).await.map_err(e2s)
@@ -1326,6 +1351,9 @@ pub fn run() {
             update_song_key,
             update_song_voicings,
             import_reference,
+            parse_pasted_lyrics,
+            import_lyrics,
+            create_song_from_lyrics,
             self_check_stage,
             refine_field,
             delete_song,

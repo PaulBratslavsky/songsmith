@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { api } from "../ipc/api";
+import { api, type ParsedLyrics } from "../ipc/api";
 import { FieldChat } from "./FieldChat";
 
 // ChordPro model: a lyric line is a sequence of words, each optionally carrying
@@ -136,6 +136,90 @@ function buildSections(content: string, chordsData: any): Section[] {
   return out.length ? out : [{ label: "Lyrics", lines: [[]] }];
 }
 
+/** Paste-lyrics modal: paste raw text → live parsed preview (words kept
+ *  VERBATIM — deterministic header split; Claude only ever marks boundaries on
+ *  unlabeled text, validated line-by-line) → confirm imports it as the Lyrics
+ *  artifact and back-fills the Structure stage's section list to match. */
+export function PasteLyricsModal({ songId, hasFrozen, onClose, onImported }: {
+  songId: string; hasFrozen: boolean; onClose: () => void; onImported: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [preview, setPreview] = useState<ParsedLyrics | null>(null);
+  const [parsing, setParsing] = useState(false);
+
+  // live preview — debounce the dry-run parse while the user pastes/types
+  useEffect(() => {
+    if (!text.trim()) { setPreview(null); setParsing(false); return; }
+    setParsing(true);
+    const t = setTimeout(() => {
+      api.parsePastedLyrics(text)
+        .then((p) => { setPreview(p); setParsing(false); })
+        .catch(() => { setPreview(null); setParsing(false); });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [text]);
+
+  const doImport = useMutation({
+    mutationFn: () => api.importLyrics(songId, text),
+    onSuccess: () => { onImported(); onClose(); },
+  });
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 720, maxWidth: "92vw" }}>
+        <h2>📋 Paste lyrics</h2>
+        <p className="muted">
+          Drop in finished lyrics — they're parsed into sections but the words are kept <b>verbatim</b>, never rewritten.
+          Importing replaces this song's Lyrics and back-fills the Structure section list to match (Concept is untouched).
+        </p>
+        <div className="row" style={{ gap: 12, alignItems: "stretch" }}>
+          <textarea
+            value={text} onChange={(e) => setText(e.target.value)} autoFocus
+            placeholder={"[Verse 1]\nCity lights are calling me home…\n\n[Chorus]\n…\n\n(headers optional — unlabeled text gets segmented, words untouched)"}
+            style={{ flex: 1, minHeight: 260, fontFamily: "var(--mono)", fontSize: 12 }}
+          />
+          <div style={{ flex: 1, minHeight: 260, maxHeight: 380, overflowY: "auto", border: "1px solid var(--line)", borderRadius: 2, padding: 8 }}>
+            {!text.trim() ? (
+              <span className="faint">The parsed preview appears here.</span>
+            ) : parsing ? (
+              <span className="faint">parsing…</span>
+            ) : !preview ? (
+              <span className="faint">Could not parse — importing would keep everything as one section.</span>
+            ) : (
+              <>
+                <div className="row" style={{ gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                  <span className="badge">{preview.sections.length} section{preview.sections.length === 1 ? "" : "s"}</span>
+                  {preview.used_claude && <span className="badge" title="the text had no section headers, so Claude marked the boundaries — every line was validated verbatim against your paste">🤖 Claude segmented — words verbatim</span>}
+                </div>
+                {preview.sections.map((s, i) => (
+                  <div key={i} style={{ marginBottom: 8 }}>
+                    <b style={{ fontSize: 12 }}>[{s.label}]</b>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 11, whiteSpace: "pre-wrap" }}>
+                      {s.lines.length ? s.lines.join("\n") : <span className="faint">(instrumental — no lines)</span>}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+        {hasFrozen && (
+          <div className="banner warn" style={{ marginTop: 10 }}>
+            ⚠️ This song's Lyrics has 🔒 locked sections — importing replaces <b>everything, including locked sections</b>.
+          </div>
+        )}
+        {doImport.isError && <div className="banner warn" style={{ marginTop: 10 }}>Import failed: {String((doImport.error as any)?.message ?? doImport.error)}</div>}
+        <div className="row" style={{ marginTop: 14, justifyContent: "flex-end", gap: 8 }}>
+          <button className="ghost" onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={!text.trim() || doImport.isPending} onClick={() => doImport.mutate()}>
+            {doImport.isPending ? "Importing…" : "Import lyrics"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LyricsEditor({
   songId, stageId, kind, artifactId, content, onChanged, chordsData,
 }: {
@@ -148,6 +232,9 @@ export function LyricsEditor({
   const [mode, setMode] = useState<"place" | "text">("place");
   const [sel, setSel] = useState<string>(""); // currently-armed chord to place
   const [custom, setCustom] = useState("");
+  const [pasteOpen, setPasteOpen] = useState(false);
+  // this stage's own frozen sections — the paste modal warns before replacing them
+  const hasFrozen = useMemo(() => Object.keys(frozenByLabel(content)).length > 0, [content]);
 
   // per-section chord palette from the Chords stage (label-matched), plus all-song fallback
   const paletteBySection = useMemo(() => {
@@ -225,6 +312,10 @@ export function LyricsEditor({
           <button className="sm" disabled={selfCheck.isPending || dirty} onClick={() => selfCheck.mutate()}
             title={dirty ? "save your edits first" : "Claude self-tests the lyrics (title lands as the hook, sections coherent, no clichés) and rewrites them as a new revision"}>
             {selfCheck.isPending ? "checking…" : "✓ Self-check & refine"}
+          </button>
+          <button className="sm" onClick={() => setPasteOpen(true)}
+            title="paste finished lyrics — parsed into sections with the words kept verbatim; replaces this stage and back-fills Structure to match">
+            📋 Paste lyrics
           </button>
         </div>
         <button className="sm primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
@@ -309,6 +400,15 @@ export function LyricsEditor({
       <p className="faint" style={{ fontSize: 11, marginTop: 4 }}>
         Sections &amp; their order come from the <b>Chords</b> stage — add, rename, and drag to reorder them there. This stage just adds the words.
       </p>
+
+      {pasteOpen && (
+        <PasteLyricsModal
+          songId={songId}
+          hasFrozen={hasFrozen}
+          onClose={() => setPasteOpen(false)}
+          onImported={() => { setDirty(false); onChanged(); }}
+        />
+      )}
     </div>
   );
 }

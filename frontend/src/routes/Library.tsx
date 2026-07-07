@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS } from "../ipc/api";
+import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS, type ParsedLyrics } from "../ipc/api";
 import type { Song } from "../ipc/generated";
 
 function StageTrack({ song }: { song: Song }) {
@@ -62,6 +62,102 @@ function NewSongButton() {
   );
 }
 
+/** "New from lyrics": paste finished lyrics → a new song with Structure +
+ *  Lyrics populated from the paste (words kept verbatim). Same preset/title
+ *  inputs as the normal create flow; Concept stays blank for the user. */
+function NewFromLyricsButton() {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [presetId, setPresetId] = useState("");
+  const [text, setText] = useState("");
+  const [preview, setPreview] = useState<ParsedLyrics | null>(null);
+  const nav = useNavigate();
+  const qc = useQueryClient();
+  const presets = useQuery({ queryKey: ["presets"], queryFn: api.listStylePresets });
+
+  // live parsed preview (dry-run, debounced)
+  useEffect(() => {
+    if (!open || !text.trim()) { setPreview(null); return; }
+    const t = setTimeout(() => { api.parsePastedLyrics(text).then(setPreview).catch(() => setPreview(null)); }, 400);
+    return () => clearTimeout(t);
+  }, [text, open]);
+
+  const create = useMutation({
+    mutationFn: () => api.createSongFromLyrics(presetId || presets.data![0].id, title || "Untitled song", text),
+    onSuccess: (s) => {
+      qc.invalidateQueries({ queryKey: ["songs"] });
+      setOpen(false); setTitle(""); setText(""); setPreview(null);
+      nav({ to: "/song/$id", params: { id: s.id } });
+    },
+  });
+  const noPresets = !presets.data || presets.data.length === 0;
+
+  return (
+    <>
+      <button onClick={() => setOpen(true)} disabled={noPresets}
+        title="Paste finished lyrics → new song with Structure + Lyrics populated (words kept verbatim)">
+        📋 New from lyrics
+      </button>
+      {open && (
+        <div className="modal-bg" onClick={() => setOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 720, maxWidth: "92vw" }}>
+            <h2>New song from pasted lyrics</h2>
+            <p className="muted">
+              Your words are kept <b>verbatim</b> — they're only parsed into sections. Structure + Lyrics land
+              filled in; add the Concept and run Chords next.
+            </p>
+            <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <label>Style preset</label>
+                <select value={presetId || presets.data?.[0]?.id || ""} onChange={(e) => setPresetId(e.target.value)} style={{ width: "100%" }}>
+                  {presets.data?.map((p) => (<option key={p.id} value={p.id}>{p.name}</option>))}
+                </select>
+              </div>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <label>Working title (optional)</label>
+                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Taillights" style={{ width: "100%" }} />
+              </div>
+            </div>
+            <label style={{ marginTop: 8, display: "block" }}>Lyrics</label>
+            <div className="row" style={{ gap: 12, alignItems: "stretch" }}>
+              <textarea
+                value={text} onChange={(e) => setText(e.target.value)} autoFocus
+                placeholder={"[Verse 1]\nCity lights are calling me home…\n\n[Chorus]\n…"}
+                style={{ flex: 1, minHeight: 220, fontFamily: "var(--mono)", fontSize: 12 }}
+              />
+              <div style={{ flex: 1, minHeight: 220, maxHeight: 320, overflowY: "auto", border: "1px solid var(--line)", borderRadius: 2, padding: 8 }}>
+                {!preview ? (
+                  <span className="faint">The parsed sections appear here.</span>
+                ) : (
+                  <>
+                    <div className="row" style={{ gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                      <span className="badge">{preview.sections.length} section{preview.sections.length === 1 ? "" : "s"}</span>
+                      {preview.used_claude && <span className="badge" title="no headers found — Claude marked the boundaries; every line was validated verbatim">🤖 Claude segmented — words verbatim</span>}
+                    </div>
+                    {preview.sections.map((s, i) => (
+                      <div key={i} style={{ marginBottom: 8 }}>
+                        <b style={{ fontSize: 12 }}>[{s.label}]</b>
+                        <div style={{ fontFamily: "var(--mono)", fontSize: 11, whiteSpace: "pre-wrap" }}>{s.lines.join("\n")}</div>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            </div>
+            {create.isError && <div className="banner warn" style={{ marginTop: 10 }}>Create failed: {String((create.error as any)?.message ?? create.error)}</div>}
+            <div className="row" style={{ marginTop: 16, justifyContent: "flex-end", gap: 8 }}>
+              <button className="ghost" onClick={() => setOpen(false)}>Cancel</button>
+              <button className="primary" onClick={() => create.mutate()} disabled={!text.trim() || create.isPending}>
+                {create.isPending ? "Creating…" : "Create from lyrics"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function Library() {
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -95,6 +191,7 @@ export function Library() {
             title="Import an audio file → analyze locally → new song with Structure + Chords filled in">
             {importRef.isPending ? "Analyzing…" : "⤵ Import reference"}
           </button>
+          <NewFromLyricsButton />
           <NewSongButton />
         </div>
       </div>

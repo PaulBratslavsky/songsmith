@@ -899,6 +899,279 @@ where
     Ok(out)
 }
 
+// ---- Paste-lyrics import (spec Feature B) ----------------------------------
+//
+// The user pastes FINISHED lyrics instead of generating. We only parse/tag —
+// the words are kept VERBATIM everywhere. Deterministic header split first
+// (`[Verse 1]` / Suno-style `[verse]` / line-style `Verse 1:`); Claude is asked
+// ONLY for section boundaries on unlabeled text, and a validator rebuilds every
+// line from the ORIGINAL input (whitespace-normalized match, every input line
+// used exactly once, in order) — any alteration discards the segmentation and
+// falls back to one section. The validator is the guarantee, not the prompt.
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParsedSection {
+    pub label: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParsedLyrics {
+    pub sections: Vec<ParsedSection>,
+    pub used_claude: bool,
+}
+
+/// First words that make a `Something:` line a section header. Kept tight so a
+/// lyric line that happens to end with ':' is never eaten as a header.
+const HEADER_WORDS: &[&str] = &[
+    "verse", "chorus", "prechorus", "pre", "post", "postchorus", "bridge", "intro", "outro",
+    "hook", "refrain", "drop", "build", "buildup", "breakdown", "break", "interlude",
+    "instrumental", "solo", "tag", "coda", "vamp", "middle", "part", "section", "ending",
+];
+
+/// The section label when `line` is a header, else None. Two styles:
+/// `[Verse 1]` (any bracket-only line, Suno-style included) and `Verse 1:`
+/// (line-style, only when the first word is a known section word).
+fn header_label(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.len() >= 3 && t.starts_with('[') && t.ends_with(']') {
+        let inner = t[1..t.len() - 1].trim();
+        if !inner.is_empty() && !inner.contains('[') && !inner.contains(']') {
+            return Some(inner.to_string());
+        }
+    }
+    if let Some(name) = t.strip_suffix(':') {
+        let name = name.trim();
+        if !name.is_empty() && name.len() <= 40 && !name.contains(':') {
+            let first: String = name.chars().take_while(|c| c.is_alphabetic()).collect::<String>().to_lowercase();
+            if HEADER_WORDS.contains(&first.as_str()) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Trim leading/trailing blank lines; interior blanks (stanza breaks) stay.
+fn trim_blank_edges(mut lines: Vec<String>) -> Vec<String> {
+    while lines.first().is_some_and(|l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Whitespace-normalized form of a lyric line (the verbatim compare unit).
+fn norm_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Deterministic split on section headers — the safe path, no model can touch
+/// the words. Returns None when the text has no headers at all. Non-header
+/// lines are kept verbatim (only `\r` stripped, blank edges trimmed per section).
+fn split_labeled_lyrics(text: &str) -> Option<Vec<ParsedSection>> {
+    let mut sections: Vec<ParsedSection> = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+    let mut preamble: Vec<String> = Vec::new();
+    let mut found = false;
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        if let Some(label) = header_label(line) {
+            found = true;
+            if let Some((lbl, lines)) = current.take() {
+                sections.push(ParsedSection { label: lbl, lines: trim_blank_edges(lines) });
+            }
+            current = Some((label, Vec::new()));
+        } else if let Some((_, lines)) = current.as_mut() {
+            lines.push(line.to_string());
+        } else {
+            preamble.push(line.to_string());
+        }
+    }
+    if !found {
+        return None;
+    }
+    if let Some((lbl, lines)) = current.take() {
+        sections.push(ParsedSection { label: lbl, lines: trim_blank_edges(lines) });
+    }
+    let pre = trim_blank_edges(preamble);
+    if !pre.is_empty() {
+        sections.insert(0, ParsedSection { label: "Lyrics".into(), lines: pre });
+    }
+    Some(sections)
+}
+
+/// The no-segmentation fallback: everything as ONE section, words verbatim.
+fn single_section(text: &str) -> Vec<ParsedSection> {
+    let lines = trim_blank_edges(text.lines().map(|l| l.trim_end_matches('\r').to_string()).collect());
+    vec![ParsedSection { label: "Lyrics".into(), lines }]
+}
+
+/// THE VERBATIM VALIDATOR. Rebuild the sections from the ORIGINAL input using
+/// only Claude's boundaries: each returned non-empty line must match the next
+/// input line (whitespace-normalized) and every input line must be consumed —
+/// the kept text is the input's bytes, never the model's. Any altered, dropped,
+/// reordered, or invented line rejects the whole segmentation (None).
+fn rebuild_from_input(input: &str, parsed: &Value) -> Option<Vec<ParsedSection>> {
+    let secs = parsed.get("sections")?.as_array()?;
+    let input_lines: Vec<&str> = input
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let mut idx = 0usize;
+    let mut out = Vec::new();
+    for (i, sec) in secs.iter().enumerate() {
+        let label = sec
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| format!("Section {}", i + 1));
+        let lines = sec.get("lines")?.as_array()?;
+        let mut kept = Vec::new();
+        for l in lines {
+            let l = l.as_str()?;
+            if l.trim().is_empty() {
+                continue; // blank separators carry no words
+            }
+            let orig = input_lines.get(idx)?;
+            if norm_line(l) != norm_line(orig) {
+                return None; // altered or reordered → reject everything
+            }
+            kept.push((*orig).to_string()); // keep the INPUT text, not the model's
+            idx += 1;
+        }
+        if !kept.is_empty() {
+            out.push(ParsedSection { label, lines: kept });
+        }
+    }
+    // leftover input lines mean the model dropped words — reject
+    if idx != input_lines.len() || out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Parse pasted lyrics into sections (dry-run — drives the preview, saves
+/// nothing). Deterministic header split first; Claude fallback ONLY for
+/// unlabeled multi-line text, validated by `rebuild_from_input`. Never errors
+/// on parse trouble — the worst case is one "Lyrics" section, words verbatim.
+pub async fn parse_pasted_lyrics(settings: &Settings, text: &str) -> Result<ParsedLyrics> {
+    if let Some(sections) = split_labeled_lyrics(text) {
+        return Ok(ParsedLyrics { sections, used_claude: false });
+    }
+    let non_empty = text.lines().filter(|l| !l.trim().is_empty()).count();
+    if non_empty > 1 {
+        let system = "You mark SECTION BOUNDARIES in finished song lyrics. You never write, rewrite, add, remove, or reorder lyrics — you only decide where each section starts and what it is called (Verse 1, Chorus, Bridge, …).\nRespond with ONLY a single fenced ```json block of the shape {\"sections\":[{\"label\":\"Verse 1\",\"lines\":[\"…\"]}]} where every entry of every `lines` array is a line COPIED VERBATIM from the input, in the original order, with every input line used exactly once.";
+        let user = format!("Segment these lyrics into sections (copy every line verbatim):\n\n{text}\n\nReturn the JSON now.");
+        if let Ok(out) = call_claude(settings, system, &user, &|_| {}, None).await {
+            if let Some(v) = extract_json(&out) {
+                if let Some(sections) = rebuild_from_input(text, &v) {
+                    return Ok(ParsedLyrics { sections, used_claude: true });
+                }
+            }
+        }
+    }
+    Ok(ParsedLyrics { sections: single_section(text), used_claude: false })
+}
+
+/// Write the parsed paste into a song: replace the Lyrics artifact and
+/// back-fill the Structure stage's section list to match (labels/order), then
+/// mark both stages done. Pasting is the USER's deliberate action, so it
+/// replaces everything including locked sections (the UI warns first) and
+/// carries no frozen flags into the new Lyrics artifact.
+async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyrics) -> Result<()> {
+    let stages = db::list_stages(conn, &song.id).await?;
+    let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").ok_or_else(|| anyhow!("song has no lyrics stage"))?;
+    let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
+
+    // Lyrics artifact — the pasted words verbatim, text rendered like the editor
+    let lyrics_data = json!({
+        "sections": parsed.sections.iter().map(|s| json!({ "label": s.label, "lines": s.lines })).collect::<Vec<_>>()
+    });
+    let content = json!({ "kind": "lyrics", "text": lyrics_text(&lyrics_data), "data": lyrics_data }).to_string();
+    db::save_artifact(conn, &song.id, Some(&lyrics_stage.id), "lyrics", &content).await?;
+    db::set_stage_status(conn, &lyrics_stage.id, "done").await?;
+
+    // Structure back-fill — the pasted labels/order become the section map;
+    // bars/role/type (and an existing lock) survive where a label matches,
+    // new sections get the editor defaults (bars=8, role="").
+    let prior_data = match db::current_artifact(conn, &structure_stage.id).await? {
+        Some(a) => serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned()).unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    let prior_secs: Vec<Value> = prior_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let new_secs: Vec<Value> = parsed
+        .sections
+        .iter()
+        .map(|p| {
+            let old = prior_secs.iter().find(|s| norm_label(&section_label("structure", s)) == norm_label(&p.label));
+            match old {
+                Some(old) => {
+                    let mut o = json!({
+                        "type": old.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+                        "label": p.label,
+                        "bars": old.get("bars").and_then(|b| b.as_i64()).unwrap_or(8),
+                        "role": old.get("role").and_then(|v| v.as_str()).unwrap_or(""),
+                    });
+                    if old.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false) {
+                        o["frozen"] = json!(true);
+                    }
+                    o
+                }
+                None => json!({ "type": "", "label": p.label, "bars": 8, "role": "" }),
+            }
+        })
+        .collect();
+    let structure_data = json!({
+        "key": {
+            "root": prior_data.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or(&song.key_root),
+            "mode": prior_data.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or(&song.key_mode),
+        },
+        "bpm": prior_data.get("bpm").and_then(|v| v.as_i64()).unwrap_or(song.bpm),
+        "keyNote": prior_data.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "sections": new_secs,
+    });
+    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data }).to_string();
+    db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
+    db::set_stage_status(conn, &structure_stage.id, "done").await?;
+    Ok(())
+}
+
+fn ensure_has_words(parsed: &ParsedLyrics) -> Result<()> {
+    if parsed.sections.iter().all(|s| s.lines.iter().all(|l| l.trim().is_empty())) {
+        return Err(anyhow!("no lyrics to import — paste some text first"));
+    }
+    Ok(())
+}
+
+/// Import pasted lyrics into an existing song (entry point 1): parse, replace
+/// the Lyrics artifact, back-fill Structure. Returns the parse for callers.
+pub async fn import_lyrics(conn: &Connection, settings: &Settings, song_id: &str, text: &str) -> Result<ParsedLyrics> {
+    let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let parsed = parse_pasted_lyrics(settings, text).await?;
+    ensure_has_words(&parsed)?;
+    apply_parsed_lyrics(conn, &song, &parsed).await?;
+    Ok(parsed)
+}
+
+/// New song from pasted lyrics (entry point 2): mirror the create flow's inputs
+/// (preset + working title), then run the same import. Concept stays blank —
+/// the user adds it and runs Chords next; key/BPM keep the create defaults.
+pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, style_preset_id: &str, title: &str, text: &str) -> Result<Song> {
+    // parse (and validate) BEFORE creating, so a bad paste never leaves an empty song
+    let parsed = parse_pasted_lyrics(settings, text).await?;
+    ensure_has_words(&parsed)?;
+    let song = db::create_song(conn, style_preset_id, title).await?;
+    apply_parsed_lyrics(conn, &song, &parsed).await?;
+    db::get_song(conn, &song.id).await?.ok_or_else(|| anyhow!("song not found after import"))
+}
+
 /// Extract the first JSON object from model output (fenced or bare).
 pub fn extract_json(text: &str) -> Option<Value> {
     if let Some(start) = text.find("```json") {
@@ -1261,6 +1534,159 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(200), t.cancelled())
             .await
             .expect("a pre-cancelled token must resolve immediately");
+    }
+
+    // ---- Paste-lyrics import (Feature B) ------------------------------------
+
+    /// (a) Deterministic header split: `[x]` and `x:` styles, labels/order kept,
+    /// every word verbatim, no Claude involved.
+    #[tokio::test]
+    async fn paste_split_on_headers_is_deterministic_and_verbatim() {
+        let text = "[Verse 1]\nCity lights are calling me home\nEvery street I know by heart\n\n[Chorus]\nWe run until the morning finds us\n\nBridge:\nHold on to the static in the air";
+        let p = parse_pasted_lyrics(&Settings::default(), text).await.unwrap();
+        assert!(!p.used_claude);
+        let labels: Vec<&str> = p.sections.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"]);
+        assert_eq!(p.sections[0].lines, ["City lights are calling me home", "Every street I know by heart"]);
+        assert_eq!(p.sections[1].lines, ["We run until the morning finds us"]);
+        assert_eq!(p.sections[2].lines, ["Hold on to the static in the air"]);
+    }
+
+    /// (b) Unlabeled text: Claude (mocked) returns a VALID segmentation — the
+    /// boundaries are used, `used_claude` is true, and the kept lines are the
+    /// input's own bytes.
+    #[tokio::test]
+    async fn paste_unlabeled_uses_claude_segmentation_when_valid() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let text = "City lights are calling me home\nEvery street I know by heart\nWe run until the morning finds us";
+        let seg = json!({ "sections": [
+            { "label": "Verse 1", "lines": ["City lights are calling me home", "Every street I know by heart"] },
+            { "label": "Chorus", "lines": ["We run until the morning finds us"] }
+        ]});
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", format!("```json\n{seg}\n```"));
+        let p = parse_pasted_lyrics(&Settings::default(), text).await.unwrap();
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
+        assert!(p.used_claude);
+        assert_eq!(p.sections.len(), 2);
+        assert_eq!(p.sections[0].label, "Verse 1");
+        assert_eq!(p.sections[0].lines, ["City lights are calling me home", "Every street I know by heart"]);
+        assert_eq!(p.sections[1].label, "Chorus");
+        assert_eq!(p.sections[1].lines, ["We run until the morning finds us"]);
+    }
+
+    /// (c) THE VERBATIM GUARANTEE: Claude (mocked) alters one word — the
+    /// validator rejects the whole segmentation and the parse falls back to a
+    /// single section whose lines are the INPUT text, untouched.
+    #[tokio::test]
+    async fn paste_claude_altering_a_word_falls_back_to_single_section() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let text = "City lights are calling me home\nEvery street I know by heart";
+        // the model "improved" home → homeward: every line must match or nothing does
+        let seg = json!({ "sections": [
+            { "label": "Verse 1", "lines": ["City lights are calling me homeward", "Every street I know by heart"] }
+        ]});
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", format!("```json\n{seg}\n```"));
+        let p = parse_pasted_lyrics(&Settings::default(), text).await.unwrap();
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
+        assert!(!p.used_claude, "a rejected segmentation is not Claude's");
+        assert_eq!(p.sections.len(), 1);
+        assert_eq!(p.sections[0].label, "Lyrics");
+        assert_eq!(p.sections[0].lines, ["City lights are calling me home", "Every street I know by heart"]);
+    }
+
+    /// (d) `import_lyrics` replaces the Lyrics artifact (dropping frozen flags —
+    /// pasting is the user's authority) and back-fills Structure to the pasted
+    /// labels/order, keeping bars/role where a label matches.
+    #[tokio::test]
+    async fn import_lyrics_backfills_structure_preserving_bars_and_role() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+        let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").unwrap();
+
+        // prior Structure: Verse 1 + Chorus carry bars/role to preserve; Outro will be dropped
+        let s_data = json!({ "key": {"root":"A","mode":"minor"}, "bpm": 120, "keyNote": "", "tempoNote": "", "sections": [
+            { "type": "verse", "label": "Verse 1", "bars": 16, "role": "story" },
+            { "label": "Chorus", "bars": 8, "role": "lift" },
+            { "label": "Outro", "bars": 4, "role": "fade" }
+        ]});
+        let s_content = json!({ "kind": "structure", "text": structure_editor_text(&s_data), "data": s_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await.unwrap();
+        // prior Lyrics with a FROZEN section — the paste replaces it (user authority)
+        let l_data = json!({ "sections": [ { "label": "Verse 1", "lines": ["old words"], "frozen": true } ] });
+        let l_content = json!({ "kind": "lyrics", "text": lyrics_text(&l_data), "data": l_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&lyrics_stage.id), "lyrics", &l_content).await.unwrap();
+
+        let text = "[Verse 1]\nNew words all the way down\n\n[Chorus]\nSing it loud\n\n[Bridge]\nSomething new";
+        import_lyrics(&conn, &settings, &song.id, text).await.unwrap();
+
+        // Lyrics: pasted words verbatim, editor-style text, no frozen flags carried
+        let lyr = db::current_artifact(&conn, &lyrics_stage.id).await.unwrap().unwrap();
+        let lv = serde_json::from_str::<Value>(&lyr.content).unwrap();
+        assert_eq!(lv["text"].as_str().unwrap(), "[Verse 1]\nNew words all the way down\n\n[Chorus]\nSing it loud\n\n[Bridge]\nSomething new");
+        let lsecs = lv["data"]["sections"].as_array().unwrap();
+        assert_eq!(lsecs[0]["lines"][0], "New words all the way down");
+        assert!(lsecs.iter().all(|s| s.get("frozen").is_none()), "paste carries no frozen flags");
+
+        // Structure: back-filled to the pasted labels/order, bars/role preserved on match
+        let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
+        let sv = serde_json::from_str::<Value>(&st.content).unwrap();
+        let ssecs = sv["data"]["sections"].as_array().unwrap();
+        let labels: Vec<&str> = ssecs.iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"]);
+        assert_eq!(ssecs[0]["bars"], json!(16));
+        assert_eq!(ssecs[0]["role"], json!("story"));
+        assert_eq!(ssecs[0]["type"], json!("verse"));
+        assert_eq!(ssecs[1]["bars"], json!(8));
+        assert_eq!(ssecs[1]["role"], json!("lift"));
+        assert_eq!(ssecs[2]["bars"], json!(8), "new section gets the editor default");
+        assert_eq!(ssecs[2]["role"], json!(""));
+        // both stages marked done
+        assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "done");
+        assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
+    }
+
+    /// (e) `create_song_from_lyrics` end-to-end: a new song whose Lyrics AND
+    /// Structure match the paste, ready for Concept + Chords.
+    #[tokio::test]
+    async fn create_song_from_lyrics_populates_structure_and_lyrics() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+
+        let text = "[Verse 1]\nFirst line here\nSecond line here\n\n[Chorus]\nHook line";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Pasted Song", text).await.unwrap();
+        assert_eq!(song.title, "Pasted Song");
+        assert_eq!(song.status, "in_progress");
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").unwrap();
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+        let lyr = db::current_artifact(&conn, &lyrics_stage.id).await.unwrap().unwrap();
+        let lv = serde_json::from_str::<Value>(&lyr.content).unwrap();
+        assert_eq!(lv["data"]["sections"][0]["label"], "Verse 1");
+        assert_eq!(lv["data"]["sections"][0]["lines"], json!(["First line here", "Second line here"]));
+        assert_eq!(lv["data"]["sections"][1]["lines"], json!(["Hook line"]));
+        let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
+        let sv = serde_json::from_str::<Value>(&st.content).unwrap();
+        let labels: Vec<&str> = sv["data"]["sections"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus"]);
+        assert_eq!(sv["data"]["key"]["root"], "A"); // create-flow defaults
+        assert_eq!(sv["data"]["bpm"], json!(120));
+        assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "done");
+        assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
+        // Concept stays pending — the user adds it and runs Chords next
+        let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
+        assert_eq!(db::get_stage(&conn, &concept.id).await.unwrap().unwrap().status, "pending");
     }
 
     // Audit Tier-2 #6: user skills must outrank builtins, and reseeding must not

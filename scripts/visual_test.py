@@ -15,6 +15,9 @@ Captures the key surfaces as regression screenshots:
   sheet below it) + composer-fullsong-chord-selected (two-way highlight:
   section tint + exact chord mark in the sheet),
   lyrics-chordpro (click-to-place editor) + lyrics-autoplace (⚡ Auto-place),
+  paste-modal-with-preview (📋 Paste lyrics → live parsed sections, words
+  verbatim) + lyrics-after-import (the stage after Import replaced the lyrics
+  and back-filled Structure),
   sheet-chordpro (exact chord-over-word alignment),
   style-flyout (right inspector overlay), renders-tab, terminal.
 """
@@ -121,6 +124,28 @@ def main():
             # Lyrics stage = ChordPro click-to-place editor (chords pinned over words)
             pg.click(".song-nav >> text=Lyrics"); pg.wait_for_timeout(500)
             pg.screenshot(path=f"{OUT}/lyrics-chordpro.png", full_page=True)
+
+            # 📋 Paste lyrics: paste finished lyrics → live parsed preview
+            # (deterministic header split, [x] and x: styles, words VERBATIM)
+            # → Import replaces the Lyrics artifact and back-fills Structure.
+            paste = "\n".join([
+                "[Verse 1]",
+                "City lights are calling me home tonight",
+                "Every street I know by heart",
+                "",
+                "[Chorus 1]",
+                "We run until the morning finds us",
+                "We run until we disappear",
+                "",
+                "Bridge:",
+                "Hold on to the static in the air",
+            ])
+            pg.click("button:has-text('Paste lyrics')"); pg.wait_for_timeout(300)
+            pg.fill(".modal textarea", paste)
+            pg.wait_for_timeout(1000)  # debounce + dry-run parse
+            pg.screenshot(path=f"{OUT}/paste-modal-with-preview.png", full_page=True)
+            pg.click(".modal button:has-text('Import lyrics')"); pg.wait_for_timeout(700)
+            pg.screenshot(path=f"{OUT}/lyrics-after-import.png", full_page=True)
 
             # Section freeze: lock the first section (🔓 → 🔒) so regeneration keeps it.
             lock = pg.locator(".card button:has-text('🔓')")

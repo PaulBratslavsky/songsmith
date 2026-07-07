@@ -50,9 +50,25 @@ identical to before.
 
 ---
 
-## Feature B — Paste completed lyrics → processed in the flow
+## Feature B — Paste completed lyrics → processed in the flow — ✅ DONE (2026-07-07)
 **Decisions:** BOTH entry points; reconcile **Structure too**; **words kept verbatim** (parse/tag only,
 never rewrite).
+
+**Built:** `core/src/agent.rs` — `parse_pasted_lyrics` (dry-run, drives the preview), `import_lyrics`
+(replace Lyrics + back-fill Structure, both marked done), `create_song_from_lyrics` (mirrors the create
+flow's preset/title inputs). Deterministic header split first (`[Verse 1]` / Suno `[verse]` / line-style
+`Verse 1:`); Claude fallback ONLY for unlabeled text, asking ONLY for boundaries — and the
+`rebuild_from_input` validator reconstructs every section from the ORIGINAL input lines
+(whitespace-normalized match, every line used exactly once, in order), so any alteration discards the
+segmentation into a single "Lyrics" section. The validator is the guarantee, not the prompt. Structure
+back-fill keeps bars/role/type (and an existing 🔒) where a label matches; new sections get bars=8,
+role="". Pasting is user authority: it replaces locked Lyrics sections too, with a warning in the modal.
+Tauri commands `parse_pasted_lyrics` / `import_lyrics` / `create_song_from_lyrics`; UI: "📋 Paste lyrics"
+modal with live parsed preview (+ `used_claude` badge + frozen warning) in `LyricsEditor.tsx`, "📋 New
+from lyrics" on the Library (`Library.tsx`); `api.ts` + `mockApi.ts` parity (mock = deterministic TS
+split only). 5 tests (deterministic split, valid mock-Claude segmentation, altered-word → single-section
+fallback, Structure back-fill preserving bars/role, create-from-lyrics e2e); screenshots
+`paste-modal-with-preview.png` + `lyrics-after-import.png` in `scripts/visual_test.py`.
 
 ### Entry points
 1. **Into the current song's Lyrics stage** — a "Paste lyrics" action in `LyricsEditor`: paste raw text
