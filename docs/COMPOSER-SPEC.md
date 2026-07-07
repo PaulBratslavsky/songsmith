@@ -168,6 +168,14 @@ editing surface; the sheet below is the readable view.
   Same build replaced the per-tick lane button grids with CSS-gradient gridlines + one pointer hit
   surface per lane (audit Tier-2 #12).
 
+## Queued: prominent "Open in Composer" on song completion (user, 2026-07-07)
+The header "🎹 Open in Composer" button exists (always visible). ADD, after the current queue
+(paste-lyrics → Phase 3 persistence → export-back-to-song): when a song is **marked done**, surface
+the Composer path prominently — a clear CTA in the done state of the song workspace (e.g. next to
+the "Reopen" control / in the done confirmation moment) and on done songs' Library rows, so opening
+the finished song on the full timeline is the natural next step. Small UI affordance; no new
+backend.
+
 ## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and
 the grid live-reloads) — after the visual builder + import/export work.
