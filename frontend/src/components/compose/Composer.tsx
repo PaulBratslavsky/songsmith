@@ -155,10 +155,8 @@ export function Composer({
   // Sticky placement mode: newly-dropped chords are sevenths while on.
   const [seventhMode, setSeventhMode] = useState(false);
 
-  const { isPlaying, currentStep, activeChordId, toggle, stop } = useCompositionPlayback(
-    comp,
-    { loop },
-  );
+  const { isPlaying, currentStep, activeChordId, activeLineTick, toggle, stop } =
+    useCompositionPlayback(comp, { loop });
 
   useEffect(() => {
     synth.setMuted(muted);
@@ -672,11 +670,13 @@ export function Composer({
 
       {/* ChordPro lyric sheet — the readable view below the timeline
           (full-song mode only; blank sketches have no sections → no sheet).
-          Highlight follows the selected chord / the playhead's chord. */}
+          One section at a time (chips to browse); playback highlights the
+          ACTIVE LINE + its chord, selection marks the exact chord. */}
       <LyricSheet
         sections={sheetSections}
         selectedChordId={chordSelId}
         activeChordId={activeChordId}
+        activeLineTick={activeLineTick}
         onSelectChord={chordHandlers.onSelect}
       />
 

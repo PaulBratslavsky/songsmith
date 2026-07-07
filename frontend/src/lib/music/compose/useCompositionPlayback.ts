@@ -22,6 +22,13 @@ export type CompositionPlayback = {
    *  Derived from the tick but only SET when it changes, so consumers
    *  (the lyric sheet) re-render per chord, never per tick. */
   activeChordId: string | null;
+  /** Anchor tick of the ACTIVE lyric line — the line whose
+   *  [anchor, nextAnchor) range contains the playhead — or null (stopped /
+   *  before the first line). Anchors are unique per line (see
+   *  compositionFromSong), so this identifies exactly one line. Same
+   *  discipline as activeChordId: derived per tick but only SET on a line
+   *  boundary, never per tick. */
+  activeLineTick: number | null;
   play: () => void;
   stop: () => void;
   toggle: () => void;
@@ -35,6 +42,7 @@ export function useCompositionPlayback(
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentStep, setCurrentStep] = useState<number | null>(null);
   const [activeChordId, setActiveChordId] = useState<string | null>(null);
+  const [activeLineTick, setActiveLineTick] = useState<number | null>(null);
 
   const eventsByStep = useMemo(() => {
     const map = new Map<number, ReturnType<typeof buildSchedule>[number]>();
@@ -54,17 +62,29 @@ export function useCompositionPlayback(
   // Chord spans, read live for the active-chord derivation.
   const chordsRef = useRef(comp.chords);
   chordsRef.current = comp.chords;
+  // Sorted lyric anchors, read live for the active-LINE derivation (line i
+  // is active on [anchor_i, anchor_i+1); the last line runs to the end).
+  const lyricAnchors = useMemo(
+    () => Array.from(new Set(comp.lyrics.map((l) => l.tick))).sort((a, b) => a - b),
+    [comp.lyrics],
+  );
+  const anchorsRef = useRef(lyricAnchors);
+  anchorsRef.current = lyricAnchors;
 
   const stepRef = useRef(0);
-  // Last derived chord id — state is only set when this changes, so the
-  // per-tick clock never causes a per-tick re-render downstream.
+  // Last derived chord id / line anchor — state is only set when these
+  // change, so the per-tick clock never causes a per-tick re-render
+  // downstream.
   const lastChordIdRef = useRef<string | null>(null);
+  const lastLineTickRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!isPlaying) {
       setCurrentStep(null);
       lastChordIdRef.current = null;
       setActiveChordId(null);
+      lastLineTickRef.current = null;
+      setActiveLineTick(null);
       return;
     }
 
@@ -73,6 +93,25 @@ export function useCompositionPlayback(
       if (id !== lastChordIdRef.current) {
         lastChordIdRef.current = id;
         setActiveChordId(id);
+      }
+      // Active line = greatest anchor <= step (binary search; anchors are
+      // sorted ascending). Null before the first line.
+      const anchors = anchorsRef.current;
+      let line: number | null = null;
+      let lo = 0;
+      let hi = anchors.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (anchors[mid] <= step) {
+          line = anchors[mid];
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      if (line !== lastLineTickRef.current) {
+        lastLineTickRef.current = line;
+        setActiveLineTick(line);
       }
     };
 
@@ -120,6 +159,7 @@ export function useCompositionPlayback(
     isPlaying,
     currentStep,
     activeChordId,
+    activeLineTick,
     play: () => setIsPlaying(true),
     stop: () => setIsPlaying(false),
     toggle: () => setIsPlaying((p) => !p),

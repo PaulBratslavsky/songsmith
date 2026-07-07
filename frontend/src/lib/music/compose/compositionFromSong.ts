@@ -169,12 +169,22 @@ export function compositionFromSong(
       lengthTicks: tick - sectionStart,
     });
 
-    // Pair this section's lyric lines with its chord starts, in order:
-    // the song lands one chord at the start of each lyric line. `words`
-    // carries the word-level chord anchors for the lyric sheet.
+    // Anchor this section's lyric lines (lyric-sheet-v2 fix). When the
+    // CHORDS outnumber the lines, pair line i with chord start i (the song
+    // lands one chord at the start of each lyric line). When the LINES
+    // outnumber (or equal) the chords, distribute them evenly across the
+    // section's tick span instead — the old code pinned every overflow
+    // line to the LAST chord's tick, so play-along tracking skipped the
+    // back half of the section. Either way every line gets a unique,
+    // strictly increasing anchor. `words` carries the word-level chord
+    // anchors for the lyric sheet.
     const lines = lyricLinesByLabel.get(label) ?? [];
+    const sectionLength = tick - sectionStart;
     lines.forEach((words, i) => {
-      const anchor = chordStarts[Math.min(i, chordStarts.length - 1)] ?? sectionStart;
+      const anchor =
+        lines.length >= chordStarts.length
+          ? sectionStart + Math.round((i * sectionLength) / lines.length)
+          : (chordStarts[i] ?? sectionStart);
       const text = words.map((w) => w.text).filter(Boolean).join(' ');
       lyrics.push({ tick: anchor, text, words });
     });

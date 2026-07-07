@@ -1,25 +1,32 @@
 // The ChordPro lyric SHEET below the Composer timeline (full-song mode
-// only) — the readable replacement for the old tick-pinned LyricRow
-// (COMPOSER-SPEC "Lyric display refinement"). Grouped by section, each
-// lyric line rendered ChordPro-style: chord name in accent directly above
-// the word it lands on, left-aligned, wrapping naturally. Reuses the
-// existing `.cp-*` ChordPro styles (LyricsEditor / Sheet) — no ChordPro
-// re-implementation, just the read-only view.
+// only) — the readable replacement for the old tick-pinned LyricRow,
+// reshaped by "Lyric sheet v2" (COMPOSER-SPEC, user test-drive feedback):
+//
+//   - ONE section shown at a time: the playing section (follows the
+//     playhead), else the selected chord's section, else the first —
+//     with compact clickable section CHIPS to browse the others (a chip
+//     choice holds until the followed section changes).
+//   - A section's lyric lines flow LEFT-TO-RIGHT: each line is an inline
+//     chunk that wraps like text, chords still printed in accent above
+//     the exact words (the word-level ChordPro model).
+//   - Play-along tracking is LINE-based: the hook derives activeLineTick
+//     (the line whose [anchor, nextAnchor) range holds the playhead), the
+//     sheet tints that line and marks only THAT line's chord occurrence —
+//     never name-matched duplicates in other lines/halves.
 //
 // Two-way sync:
-//   timeline → sheet: the highlighted chord (selected block, or the chord
-//     under the playhead) tints its section and marks the exact chord/word;
-//     during playback the sheet gently scrolls to keep it in view.
+//   timeline → sheet: playback follows the active line; clicking a
+//     timeline chord shows its section and marks that exact occurrence
+//     (span-id mapping, not name matching).
 //   sheet → timeline: clicking a chord selects the matching chord span
 //     (same selection state the ChordLane uses).
 //
-// Perf: the sheet receives `activeChordId` (which the playback hook only
-// sets when the chord CHANGES — never per tick), the top level is memo'd,
-// and each section is memo'd with a section-scoped highlight prop, so a
-// chord change re-renders at most two sections and a tick change renders
-// nothing here at all.
+// Perf: the sheet receives `activeChordId` + `activeLineTick`, which the
+// playback hook only sets when they CHANGE — never per tick — and the top
+// level is memo'd, so the sheet re-renders on chord/line boundaries and a
+// tick change renders nothing here at all.
 
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChordSpan,
   LyricLine,
@@ -35,12 +42,17 @@ export type SheetWord = {
   /** Matching timeline chord-span id (click-to-select + highlight). */
   chordId?: string;
 };
-export type SheetLine = { words: SheetWord[] };
+export type SheetLine = {
+  words: SheetWord[];
+  /** The line's anchor tick (unique per line — see compositionFromSong);
+   *  matched against the playback hook's activeLineTick. */
+  anchor: number;
+};
 export type SheetSection = {
   id: string;
   name: string;
   lines: SheetLine[];
-  /** Every chord-span id inside the section (drives the section tint). */
+  /** Every chord-span id inside the section (maps a chord to its section). */
   chordIds: string[];
 };
 
@@ -99,12 +111,13 @@ export function buildSheetModel(
           words[0] = { ...words[0], chord: at.name, chordId: at.id };
         }
       }
-      return { words };
+      return { words, anchor: ln.tick };
     });
 
     // Instrumental (no lyric lines): one chord-only line, still clickable.
     if (!lines.length && spans.some((s) => s.name)) {
       lines.push({
+        anchor: sec.startTick,
         words: spans
           .filter((s) => s.name)
           .map((s) => ({ text: '', chord: s.name, chordId: s.id })),
@@ -115,61 +128,11 @@ export function buildSheetModel(
   });
 }
 
-function SheetSectionImpl({
-  section,
-  highlightId,
-  tinted,
-  onSelectChord,
-}: {
-  section: SheetSection;
-  /** The highlighted chord id IF it lives in this section, else null. */
-  highlightId: string | null;
-  tinted: boolean;
-  onSelectChord: (id: string | null) => void;
-}) {
-  return (
-    <div className={'cmp-sheet-section' + (tinted ? ' active' : '')}>
-      <div className="cmp-sheet-head">{section.name}</div>
-      <div className="cp-lyrics">
-        {section.lines.map((line, li) => (
-          <div key={li} className="cp-line">
-            {line.words.map((w, wi) => (
-              <span key={wi} className="cp-word">
-                {w.chord ? (
-                  <button
-                    type="button"
-                    className={
-                      'cp-chord set' +
-                      (w.chordId && w.chordId === highlightId ? ' current' : '')
-                    }
-                    data-cid={w.chordId}
-                    disabled={!w.chordId}
-                    title={w.chordId ? 'Select this chord in the timeline' : undefined}
-                    onClick={() => w.chordId && onSelectChord(w.chordId)}
-                  >
-                    {w.chord}
-                  </button>
-                ) : (
-                  <span className="cp-chord" aria-hidden="true" />
-                )}
-                {w.text ? <span className="cp-text">{w.text}</span> : null}
-              </span>
-            ))}
-          </div>
-        ))}
-        {!section.lines.length && (
-          <span className="faint" style={{ fontSize: 11 }}>·</span>
-        )}
-      </div>
-    </div>
-  );
-}
-const SheetSection_ = memo(SheetSectionImpl);
-
 function LyricSheetImpl({
   sections,
   selectedChordId,
   activeChordId,
+  activeLineTick,
   onSelectChord,
 }: {
   sections: SheetSection[];
@@ -177,40 +140,123 @@ function LyricSheetImpl({
   selectedChordId: string | null;
   /** Chord under the playhead (playback only; changes per chord, not per tick). */
   activeChordId: string | null;
+  /** Anchor tick of the lyric line under the playhead (playback only;
+   *  changes per LINE, not per tick). */
+  activeLineTick: number | null;
   onSelectChord: (id: string | null) => void;
 }) {
-  // Playback highlight wins; otherwise the timeline selection.
-  const highlightId = activeChordId ?? selectedChordId;
   const rootRef = useRef<HTMLDivElement>(null);
+  // Manual chip browsing — holds until the followed section changes
+  // (playhead crosses a section / a different chord is selected).
+  const [manualId, setManualId] = useState<string | null>(null);
 
-  // Gentle auto-scroll while playing: only when the active chord's mark
-  // actually left the viewport (block:'nearest' is a no-op when visible).
+  const sectionOf = (chordId: string | null) =>
+    chordId != null ? (sections.find((s) => s.chordIds.includes(chordId))?.id ?? null) : null;
+
+  // Section to follow (spec order): the selected chord's, else the playing
+  // one (active chord's section, else the active line's).
+  const followId = useMemo(() => {
+    const playing = () =>
+      sectionOf(activeChordId) ??
+      (activeLineTick != null
+        ? (sections.find((s) => s.lines.some((l) => l.anchor === activeLineTick))?.id ?? null)
+        : null);
+    return sectionOf(selectedChordId) ?? playing();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sectionOf reads `sections`
+  }, [sections, activeChordId, activeLineTick, selectedChordId]);
+
+  // A follow change (chord/line boundary at most) releases the manual chip.
   useEffect(() => {
-    if (!activeChordId || !rootRef.current) return;
-    const el = rootRef.current.querySelector(`[data-cid="${activeChordId}"]`);
-    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, [activeChordId]);
+    setManualId(null);
+  }, [followId]);
 
-  if (!sections.length) return null;
+  const visibleId = manualId ?? followId ?? sections[0]?.id ?? null;
+  const visible = sections.find((s) => s.id === visibleId) ?? sections[0];
+
+  // Gentle auto-scroll while playing: keep the active line in view (only
+  // scrolls when it actually left the viewport — block:'nearest').
+  useEffect(() => {
+    if (activeLineTick == null || !rootRef.current) return;
+    const el = rootRef.current.querySelector(`[data-line="${activeLineTick}"]`);
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [activeLineTick, visibleId]);
+
+  if (!sections.length || !visible) return null;
+
+  const playing = activeChordId != null || activeLineTick != null;
+
   return (
     <div ref={rootRef} className="card cmp-sheet">
       <div className="cmp-cap">Lyrics &amp; chords</div>
-      {sections.map((sec) => {
-        const owns = highlightId != null && sec.chordIds.includes(highlightId);
-        return (
-          <SheetSection_
-            key={sec.id}
-            section={sec}
-            highlightId={owns ? highlightId : null}
-            tinted={owns}
-            onSelectChord={onSelectChord}
-          />
-        );
-      })}
+
+      {/* Compact section chips — browse the sections one at a time. */}
+      <div className="cmp-sheet-chips">
+        {sections.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            className={'cmp-sheet-chip' + (s.id === visible.id ? ' active' : '')}
+            onClick={() => setManualId(s.id)}
+            title={`Show ${s.name}`}
+          >
+            {s.name}
+          </button>
+        ))}
+      </div>
+
+      {/* The ONE visible section: lines flow left-to-right as inline
+          chunks that wrap like text, chords above their exact words. */}
+      <div className={'cmp-sheet-section' + (followId === visible.id ? ' active' : '')}>
+        <div className="cp-lyrics cmp-sheet-flow">
+          {visible.lines.map((line) => {
+            const lineActive = activeLineTick != null && line.anchor === activeLineTick;
+            return (
+              <span
+                key={line.anchor}
+                data-line={line.anchor}
+                className={'cmp-sheet-line' + (lineActive ? ' active' : '')}
+              >
+                {line.words.map((w, wi) => {
+                  // Playing: mark the active chord only inside the ACTIVE
+                  // line (span-id match — never name-matched duplicates).
+                  // Stopped: mark the selected chord's exact occurrence.
+                  const current = playing
+                    ? lineActive && w.chordId != null && w.chordId === activeChordId
+                    : w.chordId != null && w.chordId === selectedChordId;
+                  return (
+                    <span key={wi} className="cp-word">
+                      {w.chord ? (
+                        <button
+                          type="button"
+                          className={'cp-chord set' + (current ? ' current' : '')}
+                          data-cid={w.chordId}
+                          disabled={!w.chordId}
+                          title={w.chordId ? 'Select this chord in the timeline' : undefined}
+                          onClick={() => w.chordId && onSelectChord(w.chordId)}
+                        >
+                          {w.chord}
+                        </button>
+                      ) : (
+                        <span className="cp-chord" aria-hidden="true" />
+                      )}
+                      {w.text ? <span className="cp-text">{w.text}</span> : null}
+                    </span>
+                  );
+                })}
+              </span>
+            );
+          })}
+          {!visible.lines.length && (
+            <span className="faint" style={{ fontSize: 11 }}>
+              ·
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-// Memoized: re-renders only when the sheet model, the selection, or the
-// ACTIVE CHORD changes — never on playhead ticks.
+// Memoized: re-renders only when the sheet model, the selection, the
+// active CHORD, or the active LINE changes — never on playhead ticks.
 export const LyricSheet = memo(LyricSheetImpl);

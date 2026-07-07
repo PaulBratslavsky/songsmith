@@ -213,6 +213,31 @@ backend.
   small **🎹** affordance that opens `/composer?song=<id>` (row click still opens the song). No new
   backend; visual-tested (`song-done-cta.png` + a Library-row assertion in `scripts/visual_test.py`).
 
+## Lyric sheet v2 (user test-drive feedback, 2026-07-07) — ✅ DONE (2026-07-07)
+The v1 sheet (all sections stacked vertically) is wrong. Requirements:
+1. **Show ONE section at a time** — the selected chord's section, else the playing section (follows
+   the playhead), else the first. Compact section chips (or prev/next) to browse the others.
+2. **Lines flow LEFT-TO-RIGHT** — a section's lyric lines flow inline (wrapping like text, each line
+   an inline chunk), chords still printed above the exact words — NOT one line per row stacked down.
+3. **Fix play-along line tracking (bug found in test drive):** when a section has more lyric lines
+   than chords, `compositionFromSong` anchored every overflow line at the LAST chord's tick, so
+   playback "skipped the second half"; and the sheet marked the active chord BY NAME, so repeated
+   chords (Dm in both halves) lit both halves at once. Fix: (a) distribute a section's lines evenly
+   across the section's tick span when lines ≥ chords (unique, increasing anchors); (b) the sheet
+   highlights the ACTIVE LINE — the line whose anchor range contains the playhead — and only that
+   line's chord occurrence, never name-matched duplicates.
+- **Shipped 2026-07-07:** `compositionFromSong` distributes anchors evenly
+  (`sectionStart + round(i * lengthTicks / lines.length)`) when lines ≥ chords, keeps chord-start
+  pairing otherwise. `useCompositionPlayback` now also derives `activeLineTick` (greatest lyric
+  anchor ≤ playhead, binary search) with the same only-set-on-change discipline as `activeChordId`
+  — state changes on line/chord boundaries only, never per tick. `LyricSheet` shows ONE section
+  (selected chord's, else the playing one, else the first) with clickable section chips (a chip
+  choice holds until the followed section changes); lines flow left-to-right as inline wrapping
+  chunks (chords still above their exact words); playback tints the active line and marks only that
+  line's chord occurrence by span id; selection still marks the exact occurrence via the in-order
+  span mapping. Auto-scroll follows the active line (`block:'nearest'`). Visual-tested:
+  `composer-sheet-v2.png` + one-section/chips assertions in `scripts/visual_test.py`.
+
 ## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and
 the grid live-reloads) — after the visual builder + import/export work.

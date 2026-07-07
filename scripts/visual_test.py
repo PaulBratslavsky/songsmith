@@ -13,9 +13,12 @@ Captures the key surfaces as regression screenshots:
   workspace (sidebar SONG nav + full-width editor),
   composer (blank sketch) + composer-library (Phase 3 persistence: Save the
   sketch, then the open library panel listing saved compositions) +
-  composer-fullsong (timeline + ChordPro lyric sheet below it) +
-  composer-fullsong-chord-selected (two-way highlight: section tint + exact
-  chord mark in the sheet) +
+  composer-fullsong (timeline + lyric sheet v2 below it: ONE section at a
+  time, section chips, lines flowing left-to-right) +
+  composer-sheet-v2 (a section chip clicked — browsing the single-section
+  left-to-right sheet) +
+  composer-fullsong-chord-selected (two-way highlight: the selected chord's
+  section shown + exact chord mark in the sheet) +
   composer-export (⤴ Export dialog: resolved sections preview + update-linked
   / create-new destinations),
   song-done-cta (song marked done → the header "🎹 Open in Composer" turns
@@ -107,10 +110,24 @@ def main():
             # song as one long, scrollable, multi-section timeline — labeled
             # section band, the real named chords on the chord lane, melody +
             # bass lanes spanning the song — and the ChordPro lyric SHEET
-            # below the timeline (section headers, chord names in accent
-            # above the words they land on).
+            # below the timeline (lyric sheet v2: one section at a time,
+            # chord names in accent above the words they land on).
             pg.click("button:has-text('Open in Composer')"); pg.wait_for_timeout(900)
             pg.screenshot(path=f"{OUT}/composer-fullsong.png", full_page=True)
+            # Lyric sheet v2: exactly ONE section shows at a time, with
+            # compact clickable chips to browse; a section's lines flow
+            # LEFT-TO-RIGHT as inline wrapping chunks (not stacked rows).
+            assert pg.locator(".cmp-sheet-section").count() == 1, \
+                "lyric sheet must show exactly one section at a time"
+            chips = pg.locator(".cmp-sheet-chip")
+            assert chips.count() >= 2, "lyric sheet must offer section chips to browse"
+            chips.nth(1).click(); pg.wait_for_timeout(300)  # browse to the 2nd section
+            assert "active" in (chips.nth(1).get_attribute("class") or ""), \
+                "the clicked section chip must become the active one"
+            assert pg.locator(".cmp-sheet-section").count() == 1, \
+                "browsing chips must still show exactly one section"
+            pg.screenshot(path=f"{OUT}/composer-sheet-v2.png", full_page=True)
+            chips.nth(0).click(); pg.wait_for_timeout(200)  # back to the first
             # ⤴ Export dialog (export-back-to-song): the resolved sections
             # preview (absolute chord names in the composition's key) with the
             # two destinations — Update the linked song's Chords + Structure
