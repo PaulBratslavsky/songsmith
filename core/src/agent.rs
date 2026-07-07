@@ -343,32 +343,57 @@ pub async fn save_artifact_guarded(
     if let Some(sid) = stage_id {
         if let Some(stage) = db::get_stage(conn, sid).await? {
             if is_section_stage(&stage.r#type) {
-                if let Some(prior) = db::current_artifact(conn, sid).await? {
-                    let prior_data = serde_json::from_str::<Value>(&prior.content)
+                let prior_data = match db::current_artifact(conn, sid).await? {
+                    Some(prior) => serde_json::from_str::<Value>(&prior.content)
                         .ok()
-                        .and_then(|v| v.get("data").cloned());
-                    if let Some(prior_data) = prior_data {
-                        if has_frozen_sections(&stage.r#type, &prior_data) {
-                            let incoming = serde_json::from_str::<Value>(content).map_err(|_| anyhow!(
-                                "this stage has locked (frozen) sections and the incoming content is not valid JSON — refusing to save. Unlock the sections in the app to rewrite them."
-                            ))?;
-                            // accept the `{kind,text,data}` wrapper or bare data
-                            // (an object already carrying the stage's section array)
-                            let (arr_key, _) = section_keys(&stage.r#type);
-                            let incoming_data = incoming
-                                .get("data")
-                                .cloned()
-                                .or_else(|| incoming.get(arr_key).is_some().then(|| incoming.clone()))
-                                .unwrap_or(Value::Null);
-                            let merged = merge_frozen_sections(&stage.r#type, &prior_data, &incoming_data);
-                            let text = render_stage_text(&stage.r#type, &merged)
-                                .or_else(|| incoming.get("text").and_then(|t| t.as_str()).map(String::from))
-                                .unwrap_or_default();
-                            let guarded = json!({ "kind": kind, "text": text, "data": merged }).to_string();
-                            return db::save_artifact(conn, song_id, Some(sid), kind, &guarded).await;
-                        }
+                        .and_then(|v| v.get("data").cloned()),
+                    None => None,
+                };
+                let frozen = prior_data
+                    .as_ref()
+                    .map(|d| has_frozen_sections(&stage.r#type, d))
+                    .unwrap_or(false);
+
+                let incoming = match serde_json::from_str::<Value>(content) {
+                    Ok(v) => v,
+                    Err(_) if frozen => {
+                        return Err(anyhow!(
+                            "this stage has locked (frozen) sections and the incoming content is not valid JSON — refusing to save. Unlock the sections in the app to rewrite them."
+                        ))
                     }
+                    // non-JSON with nothing frozen: pass through unchanged (legacy behavior)
+                    Err(_) => return db::save_artifact(conn, song_id, Some(sid), kind, content).await,
+                };
+                // accept the `{kind,text,data}` wrapper or bare data
+                // (an object already carrying the stage's section array)
+                let (arr_key, _) = section_keys(&stage.r#type);
+                let incoming_data = incoming
+                    .get("data")
+                    .cloned()
+                    .or_else(|| incoming.get(arr_key).is_some().then(|| incoming.clone()))
+                    .unwrap_or(Value::Null);
+
+                let final_data = match (&prior_data, frozen) {
+                    (Some(pd), true) => merge_frozen_sections(&stage.r#type, pd, &incoming_data),
+                    _ => incoming_data,
+                };
+
+                // NORMALIZE `text` from `data` whenever the data renders — not only on
+                // frozen merges. Claude-originated saves (stage chat over MCP) were
+                // storing commentary/changelogs as `text` while the real content sat in
+                // `data`; downstream stages read `text` via gather_prior_context, so the
+                // Generation Prompt received a changelog instead of the lyrics. The
+                // write boundary now keeps text == render(data) for section stages.
+                if let Some(text) = render_stage_text(&stage.r#type, &final_data) {
+                    let guarded = json!({ "kind": kind, "text": text, "data": final_data }).to_string();
+                    return db::save_artifact(conn, song_id, Some(sid), kind, &guarded).await;
+                } else if frozen {
+                    let text = incoming.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                    let guarded = json!({ "kind": kind, "text": text, "data": final_data }).to_string();
+                    return db::save_artifact(conn, song_id, Some(sid), kind, &guarded).await;
                 }
+                // unrenderable data with nothing frozen: pass through unchanged
+                return db::save_artifact(conn, song_id, Some(sid), kind, content).await;
             }
         }
     }
@@ -588,9 +613,21 @@ async fn gather_prior_context(conn: &Connection, song_id: &str, ordinal: i64) ->
         // content. Saving an edit creates a new (unapproved) revision, and the user
         // expects that to be what downstream sees.
         if let Some(art) = db::current_artifact(conn, &s.id).await? {
-            let body = serde_json::from_str::<Value>(&art.content)
-                .ok()
-                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            let parsed = serde_json::from_str::<Value>(&art.content).ok();
+            // Prefer rendering the structured `data` over trusting the stored `text`:
+            // Claude-originated saves historically wrote commentary into `text` while
+            // the real content lived in `data` — feeding a changelog to downstream
+            // stages (e.g. the Generation Prompt saw "v4 — reconciled labels…" instead
+            // of the lyrics). render(data) is the ground truth when it exists.
+            let body = parsed
+                .as_ref()
+                .and_then(|v| v.get("data"))
+                .and_then(|d| render_stage_text(&s.r#type, d))
+                .or_else(|| {
+                    parsed
+                        .as_ref()
+                        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                })
                 .unwrap_or(art.content.clone());
             blocks.push(format!("### {} output\n{}", stage_label(&s.r#type), body));
         }
@@ -2082,5 +2119,43 @@ mod tests {
         let songs_before = db::list_songs(&conn).await.unwrap().len();
         assert!(create_song_from_composition(&conn, &preset_id, "X", "C", "major", 100, "[]").await.is_err());
         assert_eq!(db::list_songs(&conn).await.unwrap().len(), songs_before, "no empty song is created on a bad export");
+    }
+
+    /// text/data divergence (found in the wild — "Black Eucharist"): a Claude
+    /// stage-chat save stored its CHANGELOG as `text` while the lyrics lived in
+    /// `data`, so the Generation Prompt received a changelog instead of lyrics.
+    /// (1) read side: gather_prior_context must render from `data`, healing
+    /// legacy artifacts; (2) write side: save_artifact_guarded must rebuild
+    /// `text` from `data` on every section-stage save, not only frozen merges.
+    #[tokio::test]
+    async fn prior_context_and_guarded_save_prefer_data_over_commentary_text() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "phonk".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Black Eucharist").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").unwrap();
+        let prompt_ordinal = stages.iter().find(|s| s.r#type == "prompt").unwrap().ordinal;
+
+        let data = json!({ "sections": [
+            { "label": "Intro", "lines": ["[Am] kneel…", "the candle keeps my name"] }
+        ]});
+
+        // (1) legacy broken artifact written straight to the DB: changelog in `text`
+        let broken = json!({ "kind": "lyrics", "text": "v4 — reconciled section labels (changelog)", "data": data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&lyrics_stage.id), "lyrics", &broken).await.unwrap();
+        let ctx = gather_prior_context(&conn, &song.id, prompt_ordinal).await.unwrap();
+        assert!(ctx.contains("[Am] kneel…"), "prior context must carry the rendered lyrics, got: {ctx}");
+        assert!(!ctx.contains("changelog"), "prior context must not carry the commentary text, got: {ctx}");
+
+        // (2) the guarded (Claude/MCP) write path normalizes text from data
+        let incoming = json!({ "kind": "lyrics", "text": "v5 — more commentary, not lyrics", "data": data }).to_string();
+        let saved = save_artifact_guarded(&conn, &song.id, Some(&lyrics_stage.id), "lyrics", &incoming).await.unwrap();
+        let v: Value = serde_json::from_str(&saved.content).unwrap();
+        let text = v["text"].as_str().unwrap();
+        assert!(text.contains("[Am] kneel…"), "guarded save must rebuild text from data, got: {text}");
+        assert!(!text.contains("commentary"), "commentary must not survive as text, got: {text}");
     }
 }
