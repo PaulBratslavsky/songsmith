@@ -218,7 +218,18 @@ export function Library() {
               <span className="faint">{STAGE_LABELS[v.current_stage] ?? v.current_stage}</span>
             </div>
           </div>
-          <span className="faint">open →</span>
+          <div className="row" style={{ gap: 10, alignItems: "center" }}>
+            {v.status === "done" && (
+              <button
+                className="sm"
+                title="Done — open the finished song on the full Composer timeline"
+                onClick={(e) => { e.stopPropagation(); nav({ to: "/composer", search: { song: v.id } }); }}
+              >
+                🎹
+              </button>
+            )}
+            <span className="faint">open →</span>
+          </div>
         </div>
       ))}
     </div>

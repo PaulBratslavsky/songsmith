@@ -45,8 +45,12 @@ The output feeds a real pipeline:
   real chords on the chord lane with the lyric line under each, melody + bass editable across the song.
   Degree-based + key-relative. **Compositions persist**: 💾 Save (insert-or-update) into the libSQL
   `composition` table, 📂 Open from a saved-compositions library (with per-row delete), full-song
-  imports remembering their source song — plus MCP tools so Claude can read/write sketches too
-  (export-back-to-song is the remaining phase). See `docs/COMPOSER-SPEC.md`.
+  imports remembering their source song — plus MCP tools so Claude can read/write sketches too.
+  The loop is now **bidirectional**: **⤴ Export** pushes a composition back into a song — update
+  the linked song's Chords + Structure stages (🔒 frozen sections are skipped and preserved) or
+  create a brand-new song from any sketch (degrees resolve to absolute chords in the composition's
+  key; key/BPM carry over; lyrics stay empty). Done songs surface the Composer as the next step
+  (primary header CTA + a 🎹 shortcut on Library rows). See `docs/COMPOSER-SPEC.md`.
 - **Suno-accurate prompts** — the Generation Prompt stage follows current best practice: key +
   tempo in the **style** line, chords as `[Am]` tags **inline in the lyrics** (not sung).
 - **Freeze sections** — 🔒 lock any section in Structure / Chords / Lyric Spec / Lyrics and

@@ -15,7 +15,11 @@ Captures the key surfaces as regression screenshots:
   sketch, then the open library panel listing saved compositions) +
   composer-fullsong (timeline + ChordPro lyric sheet below it) +
   composer-fullsong-chord-selected (two-way highlight: section tint + exact
-  chord mark in the sheet),
+  chord mark in the sheet) +
+  composer-export (⤴ Export dialog: resolved sections preview + update-linked
+  / create-new destinations),
+  song-done-cta (song marked done → the header "🎹 Open in Composer" turns
+  primary; the Library row check covers the 🎹 affordance),
   lyrics-chordpro (click-to-place editor) + lyrics-autoplace (⚡ Auto-place),
   paste-modal-with-preview (📋 Paste lyrics → live parsed sections, words
   verbatim) + lyrics-after-import (the stage after Import replaced the lyrics
@@ -107,6 +111,14 @@ def main():
             # above the words they land on).
             pg.click("button:has-text('Open in Composer')"); pg.wait_for_timeout(900)
             pg.screenshot(path=f"{OUT}/composer-fullsong.png", full_page=True)
+            # ⤴ Export dialog (export-back-to-song): the resolved sections
+            # preview (absolute chord names in the composition's key) with the
+            # two destinations — Update the linked song's Chords + Structure
+            # (🔒 frozen sections listed + skipped) OR Create a new song
+            # (preset/title; key/bpm from the composition).
+            pg.click("button:has-text('⤴ Export')"); pg.wait_for_timeout(500)
+            pg.screenshot(path=f"{OUT}/composer-export.png", full_page=True)
+            pg.click(".modal button:has-text('Cancel')"); pg.wait_for_timeout(300)
             # two-way highlight sync: select a chord block in the timeline →
             # its section tints in the sheet + the exact chord/word is marked
             blk = pg.locator("[aria-label='Remove chord']")
@@ -203,6 +215,18 @@ def main():
             pg.click(".inspector-flyout button:has-text('✕')"); pg.wait_for_timeout(300)  # close via the flyout's own ✕
             pg.click("button:has-text('Renders')"); pg.wait_for_timeout(400)
             pg.screenshot(path=f"{OUT}/renders-tab.png", full_page=True)
+
+            # Done-state CTA: mark the song done → the header "🎹 Open in
+            # Composer" becomes the primary next step, and the Library row
+            # gains a small 🎹 affordance to /composer?song=<id>.
+            pg.click("button:has-text('Workspace')"); pg.wait_for_timeout(300)
+            pg.click("button:has-text('Mark done')"); pg.wait_for_timeout(500)
+            pg.screenshot(path=f"{OUT}/song-done-cta.png", full_page=True)
+            pg.click(".nav >> text=Library"); pg.wait_for_timeout(400)
+            assert pg.locator(".list-item button:has-text('🎹')").count() > 0, \
+                "done song's Library row must show the 🎹 Composer affordance"
+            pg.click("text=Cyber Dreams"); pg.wait_for_timeout(500)
+            pg.click("button:has-text('Reopen')"); pg.wait_for_timeout(400)  # restore in_progress
 
             # global chat terminal (docked, reachable from every page)
             pg.click("text=Chat with Claude"); pg.wait_for_timeout(500)

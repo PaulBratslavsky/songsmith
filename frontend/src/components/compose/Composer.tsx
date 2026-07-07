@@ -51,6 +51,7 @@ import { ChordLane } from './ChordLane';
 import { NoteLane } from './NoteLane';
 import { SectionBand } from './SectionBand';
 import { LyricSheet, buildSheetModel } from './LyricSheet';
+import { ExportDialog } from './ExportDialog';
 
 const MELODY_COLOR = '#2563eb';
 const BASS_COLOR = '#9333ea';
@@ -130,6 +131,8 @@ export function Composer({
   const [libOpen, setLibOpen] = useState(false);
   const [library, setLibrary] = useState<CompositionMeta[]>([]);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  // ⤴ Export (composition → song): update the linked song or create a new one
+  const [exportOpen, setExportOpen] = useState(false);
 
   // If the imported composition changes (navigating to a different song,
   // or the song's chords/lyrics load in), load it into the editor.
@@ -491,6 +494,14 @@ export function Composer({
         >
           📂 Open
         </button>
+        <button
+          type="button"
+          className="sm"
+          onClick={() => setExportOpen(true)}
+          title="Export this composition into a song — update the linked song's Chords + Structure stages, or create a new song from it (degrees resolve to absolute chords in the composition's key)"
+        >
+          ⤴ Export
+        </button>
         <button type="button" className="sm ghost" onClick={newBlank}>
           New blank
         </button>
@@ -668,6 +679,11 @@ export function Composer({
         activeChordId={activeChordId}
         onSelectChord={chordHandlers.onSelect}
       />
+
+      {/* ⤴ Export dialog — composition → song (update linked / create new) */}
+      {exportOpen && (
+        <ExportDialog comp={comp} songId={linkedSongId} onClose={() => setExportOpen(false)} />
+      )}
     </div>
   );
 }

@@ -261,6 +261,72 @@ function importLyricsIntoSong(songId: string, text: string) {
   push(structureStage, "structure", JSON.stringify({ kind: "structure", text: sText, data: sData }));
 }
 
+// ---- Composer export (composition → song) — mirrors core/src/agent.rs -------
+// The sections arrive RESOLVED (label/bars/chords{name,beats}); 🔒 frozen
+// chord/structure sections are skipped and preserved (re-inserted if dropped).
+
+function mergeFrozen(priorSecs: Any[], newSecs: Any[]): Any[] {
+  const frozen = priorSecs
+    .map((s, i) => ({ i, s }))
+    .filter(({ s }) => !!s.frozen)
+    .map(({ i, s }) => ({ i, label: normLabel(s.label ?? s.type ?? ""), sec: { ...s, frozen: true } }));
+  const out = [...newSecs];
+  for (const f of frozen) {
+    const pos = out.findIndex((s) => normLabel(s.label ?? s.type ?? "") === f.label);
+    if (pos >= 0) out[pos] = f.sec;
+    else out.splice(Math.min(f.i, out.length), 0, f.sec);
+  }
+  return out;
+}
+function chordsText(secs: Any[]): string {
+  return secs.map((s) => `${s.label ?? "Section"}: ${(s.chords ?? []).map((c: Any) => (typeof c === "string" ? c : c.name)).join(" ")}`).join("\n");
+}
+function structureText(d: Any): string {
+  return [
+    `**KEY:** ${d.key.root} ${d.key.mode}`, `**TEMPO:** ${d.bpm} BPM`, "", "**SECTION MAP**", "",
+    ...d.sections.map((s: Any, i: number) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`),
+  ].join("\n");
+}
+/** Write resolved sections into a song's Chords + Structure stages. */
+function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
+  if (!Array.isArray(sections) || !sections.length) throw new Error("nothing to export — the composition has no sections");
+  const song = db.songs.find((v: Any) => v.id === songId);
+  if (!song) throw new Error("song not found");
+  const stageOf = (t: string) => db.stages.find((s: Any) => s.song_id === songId && s.type === t);
+  const chordsStage = stageOf("chords"), structureStage = stageOf("structure");
+  if (!chordsStage || !structureStage) throw new Error("song has no chords/structure stage");
+  const push = (stage: Any, kind: string, content: string) => {
+    const ver = (currentArtifact(stage.id)?.version ?? 0) + 1;
+    db.artifacts.push({ id: uid(), song_id: songId, stage_id: stage.id, kind, content, version: ver, approved: false, created_at: now() });
+    stage.status = "done"; stage.updated_at = now();
+  };
+  // Chords: the export, with prior frozen sections spliced back verbatim
+  let priorC: Any | null = null;
+  try { priorC = JSON.parse(currentArtifact(chordsStage.id)?.content ?? "")?.data ?? null; } catch {}
+  const priorCSecs: Any[] = Array.isArray(priorC?.sections) ? priorC.sections : [];
+  const skipped = priorCSecs.filter((s) => !!s.frozen).map((s) => s.label ?? s.type ?? "");
+  const newCSecs = sections.map((s) => ({ label: s.label, chords: (s.chords ?? []).map((c: Any) => ({ name: c.name, beats: Math.max(1, Number(c.beats) || 4) })) }));
+  const cData = { sections: mergeFrozen(priorCSecs, newCSecs) };
+  push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cData.sections), data: cData }));
+  // Structure: back-fill labels/order; bars/role/type (+ 🔒) preserved on match
+  let priorS: Any | null = null;
+  try { priorS = JSON.parse(currentArtifact(structureStage.id)?.content ?? "")?.data ?? null; } catch {}
+  const priorSSecs: Any[] = Array.isArray(priorS?.sections) ? priorS.sections : [];
+  const newSSecs = sections.map((p) => {
+    const old = priorSSecs.find((s) => normLabel(s.label ?? s.type ?? "") === normLabel(p.label));
+    return old
+      ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? Math.max(1, Number(p.bars) || 8)), role: old.role ?? "", ...(old.frozen ? { frozen: true } : {}) }
+      : { type: "", label: p.label, bars: Math.max(1, Number(p.bars) || 8), role: "" };
+  });
+  const sData = {
+    key: { root: priorS?.key?.root ?? song.key_root, mode: priorS?.key?.mode ?? song.key_mode },
+    bpm: priorS?.bpm ?? song.bpm, keyNote: priorS?.keyNote ?? "", tempoNote: priorS?.tempoNote ?? "",
+    sections: mergeFrozen(priorSSecs, newSSecs),
+  };
+  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData), data: sData }));
+  return skipped;
+}
+
 export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
   const r = (x: any) => { save(db); return x as T; };
   switch (cmd) {
@@ -396,6 +462,23 @@ export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
       STAGE_ORDER.forEach((type, ordinal) =>
         db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
       importLyricsIntoSong(id, a.text ?? "");
+      return r(v);
+    }
+    // Composer export (composition → song): resolved sections in, 🔒 respected
+    case "export_composition_to_song": {
+      const skipped = exportSectionsIntoSong(a.songId, JSON.parse(a.sectionsJson ?? "[]"));
+      return r({ ok: true, song_id: a.songId, skipped_frozen: skipped });
+    }
+    case "create_song_from_composition": {
+      const sections = JSON.parse(a.sectionsJson ?? "[]");
+      if (!Array.isArray(sections) || !sections.length) throw new Error("nothing to export — the composition has no sections");
+      const id = uid();
+      const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+        current_stage: "concept", key_root: a.keyRoot || "A", key_mode: a.keyMode || "minor", bpm: Number(a.bpm) || 120, voicings: "{}", created_at: now(), updated_at: now() };
+      db.songs.unshift(v);
+      STAGE_ORDER.forEach((type, ordinal) =>
+        db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
+      exportSectionsIntoSong(id, sections);
       return r(v);
     }
     case "self_check_stage": return r(currentArtifact(a.stageId)); // mock: no-op refine

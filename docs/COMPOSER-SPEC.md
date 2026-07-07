@@ -25,7 +25,21 @@ across sessions / context resets. If a future session is unsure what the Compose
   `useSpanDrag`, `laneLayout`, `BeatRuler`, playhead, `buildSchedule`). Blank `/composer` (no param) is
   unchanged — defaults to the 8-bar sketch. Builder: `lib/music/compose/compositionFromSong.ts` (pure;
   reuses the theory engine for degree resolution + named-chord MIDI, and `ArrangementBuilder.deriveSections`
-  for lyric/chord alignment). Export-back-to-song is still NOT STARTED.
+  for lyric/chord alignment). Export-back-to-song shipped later — see Phase 5 below.
+- **Phase 5 (export back to song) — ✅ DONE (2026-07-07).** The loop is now **bidirectional**:
+  an **⤴ Export** button next to Save/Open opens a dialog with the resolved sections preview and
+  two destinations — **update the linked song** (overwrite the Chords stage's sections + back-fill
+  Structure the way `import_lyrics` does; 🔒 frozen chord/structure sections are listed in the
+  dialog and SKIPPED — kept byte-identical via `merge_frozen_sections`, re-inserted if dropped)
+  or **create a new song** (preset/title inputs mirroring `create_song_from_lyrics`; key/bpm from
+  the composition; lyrics stay empty). Degree→absolute mapping is a pure frontend fn
+  (`lib/music/compose/compositionToSong.ts`: `ChordSpan.name` wins, else the diatonic triad/seventh
+  for the degree in the key via the theory engine's own labels; ticks→beats, sections grouped —
+  a sketch with no sections becomes one "Sketch" section). The backend takes RESOLVED sections
+  JSON and stays theory-free: `agent::export_composition_to_song` / `agent::create_song_from_composition`
+  (+ matching Tauri commands) render text with the existing `chords_editor_text` /
+  `structure_editor_text` renderers, save through the normal artifact conventions, and mark both
+  stages done. Covered by four core tests incl. the frozen-skip and the sketch round-trip cases.
 - **Phase 3 (persistence) — ✅ DONE (2026-07-07).** Compositions survive app restarts. libSQL
   `composition` table (`CompositionRow { id, name, song_id: Option, data: the Composition JSON blob,
   created_at, updated_at }`, ts-rs exported, + a light `CompositionMeta` for listings) with CRUD in
@@ -128,8 +142,12 @@ The Composer is a flexible song-structuring hub, bidirectional with the song's c
    degrees in the song's key), so the user can then sketch melody + bass over them.
 2. **Create a new song directly in the Composer** — start a blank composition with no song attached,
    for free-form idea structuring (then optionally turn it into / attach it to a song).
+   **✅ DONE (2026-07-07)** — ⤴ Export → "Create a new song" works for any composition, blank
+   sketches included (preset/title inputs; key/bpm from the composition; see Phase 5 above).
 3. **Export a composition FROM the Composer back into a song** (final feature) — push the composer's
    chords (and structure) into a song's Chords stage / a new song, so a sketch becomes a real song.
+   **✅ DONE (2026-07-07)** — ⤴ Export → "Update the linked song" overwrites Chords + back-fills
+   Structure (🔒 frozen sections skipped + surfaced, never silently overwritten; see Phase 5 above).
 4. **Save & reopen compositions** — persist each Composition (libSQL `composition` table) with a name;
    list/open/delete them later. (music-kb does this via Strapi; Songsmith uses libSQL + mcp-shim tools.)
    **✅ Shipped with Phase 3 (2026-07-07)** — see the status entry above.
@@ -183,13 +201,17 @@ editing surface; the sheet below is the readable view.
   Same build replaced the per-tick lane button grids with CSS-gradient gridlines + one pointer hit
   surface per lane (audit Tier-2 #12).
 
-## Queued: prominent "Open in Composer" on song completion (user, 2026-07-07)
+## Queued: prominent "Open in Composer" on song completion (user, 2026-07-07) — ✅ DONE (2026-07-07)
 The header "🎹 Open in Composer" button exists (always visible). ADD, after the current queue
 (paste-lyrics → Phase 3 persistence → export-back-to-song): when a song is **marked done**, surface
 the Composer path prominently — a clear CTA in the done state of the song workspace (e.g. next to
 the "Reopen" control / in the done confirmation moment) and on done songs' Library rows, so opening
 the finished song on the full timeline is the natural next step. Small UI affordance; no new
 backend.
+- **Shipped 2026-07-07:** when `song.status === "done"` the header "🎹 Open in Composer" button
+  becomes **primary-accented** (with a done-specific tooltip), and done songs' Library rows get a
+  small **🎹** affordance that opens `/composer?song=<id>` (row click still opens the song). No new
+  backend; visual-tested (`song-done-cta.png` + a Library-row assertion in `scripts/visual_test.py`).
 
 ## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and

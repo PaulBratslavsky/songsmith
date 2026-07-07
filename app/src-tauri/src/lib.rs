@@ -131,6 +131,25 @@ async fn create_song_from_lyrics(state: State<'_, AppState>, style_preset_id: St
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     agent::create_song_from_lyrics(&state.conn, &settings, &style_preset_id, &title, &text).await.map_err(e2s)
 }
+
+// ---- Composer export (composition → song) -----------------------------------
+
+/// Export a composition's RESOLVED sections (label/bars/chords{name,beats} —
+/// the frontend already mapped degrees to absolute names) into the source
+/// song's Chords + Structure stages. 🔒 frozen sections are skipped and
+/// preserved; returns `{ ok, skipped_frozen }`.
+#[tauri::command]
+async fn export_composition_to_song(state: State<'_, AppState>, song_id: String, sections_json: String) -> R<serde_json::Value> {
+    agent::export_composition_to_song(&state.conn, &song_id, &sections_json).await.map_err(e2s)
+}
+
+/// New song from a composition: mirrors the create flow's preset/title inputs,
+/// carries the composition's key/bpm, populates Structure + Chords from the
+/// resolved sections. Lyrics stay empty.
+#[tauri::command]
+async fn create_song_from_composition(state: State<'_, AppState>, style_preset_id: String, title: String, key_root: String, key_mode: String, bpm: i64, sections_json: String) -> R<Song> {
+    agent::create_song_from_composition(&state.conn, &style_preset_id, &title, &key_root, &key_mode, bpm, &sections_json).await.map_err(e2s)
+}
 #[tauri::command]
 async fn get_stage(state: State<'_, AppState>, id: String) -> R<Option<StageDetail>> {
     db::get_stage_detail(&state.conn, &id).await.map_err(e2s)
@@ -1375,6 +1394,8 @@ pub fn run() {
             parse_pasted_lyrics,
             import_lyrics,
             create_song_from_lyrics,
+            export_composition_to_song,
+            create_song_from_composition,
             self_check_stage,
             refine_field,
             delete_song,

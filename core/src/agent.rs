@@ -1172,6 +1172,196 @@ pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, sty
     db::get_song(conn, &song.id).await?.ok_or_else(|| anyhow!("song not found after import"))
 }
 
+// ---- Composer export (composition → song) ----------------------------------
+//
+// The Composer's export-back-to-song (COMPOSER-SPEC.md #2/#3). The FRONTEND
+// resolves scale degrees to absolute chord names (lib/music/compose/
+// compositionToSong.ts — the theory engine lives there), so the backend takes
+// fully RESOLVED sections and stays theory-free: it validates the shape,
+// respects 🔒 frozen sections, renders text with the existing per-stage
+// renderers, and saves through the normal artifact conventions.
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ResolvedChord {
+    pub name: String,
+    #[serde(default = "default_beats")]
+    pub beats: i64,
+}
+fn default_beats() -> i64 {
+    4
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ResolvedSection {
+    pub label: String,
+    #[serde(default = "default_bars")]
+    pub bars: i64,
+    #[serde(default)]
+    pub chords: Vec<ResolvedChord>,
+}
+fn default_bars() -> i64 {
+    8
+}
+
+fn parse_resolved_sections(sections_json: &str) -> Result<Vec<ResolvedSection>> {
+    let sections: Vec<ResolvedSection> = serde_json::from_str(sections_json)
+        .map_err(|e| anyhow!("could not read the exported sections JSON: {e}"))?;
+    if sections.is_empty() {
+        return Err(anyhow!("nothing to export — the composition has no sections"));
+    }
+    Ok(sections)
+}
+
+/// The Chords-stage `data` for a set of resolved sections.
+fn chords_data_from_resolved(sections: &[ResolvedSection]) -> Value {
+    json!({
+        "sections": sections.iter().map(|s| json!({
+            "label": s.label,
+            "chords": s.chords.iter().map(|c| json!({ "name": c.name, "beats": c.beats.max(1) })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>()
+    })
+}
+
+/// The Structure-stage `data` for resolved sections, back-filled against the
+/// prior structure exactly like `apply_parsed_lyrics`: labels/order come from
+/// the export; `type`/`bars`/`role` (and a 🔒 lock) survive where a label
+/// matches; NEW sections take the exported bar count (the Composer knows it,
+/// unlike a lyric paste).
+fn structure_data_from_resolved(
+    sections: &[ResolvedSection],
+    prior_data: &Value,
+    song: &Song,
+) -> Value {
+    let prior_secs: Vec<Value> = prior_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let new_secs: Vec<Value> = sections
+        .iter()
+        .map(|p| {
+            let old = prior_secs.iter().find(|s| norm_label(&section_label("structure", s)) == norm_label(&p.label));
+            match old {
+                Some(old) => {
+                    let mut o = json!({
+                        "type": old.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+                        "label": p.label,
+                        "bars": old.get("bars").and_then(|b| b.as_i64()).unwrap_or(p.bars.max(1)),
+                        "role": old.get("role").and_then(|v| v.as_str()).unwrap_or(""),
+                    });
+                    if old.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false) {
+                        o["frozen"] = json!(true);
+                    }
+                    o
+                }
+                None => json!({ "type": "", "label": p.label, "bars": p.bars.max(1), "role": "" }),
+            }
+        })
+        .collect();
+    json!({
+        "key": {
+            "root": prior_data.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or(&song.key_root),
+            "mode": prior_data.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or(&song.key_mode),
+        },
+        "bpm": prior_data.get("bpm").and_then(|v| v.as_i64()).unwrap_or(song.bpm),
+        "keyNote": prior_data.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "sections": new_secs,
+    })
+}
+
+/// The `data` of a stage's current artifact (Null when there is none).
+async fn current_stage_data(conn: &Connection, stage_id: &str) -> Result<Value> {
+    Ok(match db::current_artifact(conn, stage_id).await? {
+        Some(a) => serde_json::from_str::<Value>(&a.content)
+            .ok()
+            .and_then(|v| v.get("data").cloned())
+            .unwrap_or(Value::Null),
+        None => Value::Null,
+    })
+}
+
+/// Frozen section labels in a stage's `data` (for the skip report).
+fn frozen_labels(stage_type: &str, data: &Value) -> Vec<String> {
+    let (arr_key, _) = section_keys(stage_type);
+    data.get(arr_key)
+        .and_then(|v| v.as_array())
+        .map(|secs| {
+            secs.iter()
+                .filter(|s| s.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false))
+                .map(|s| section_label(stage_type, s))
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Export a composition into its source song (destination 1): overwrite the
+/// Chords stage's sections and back-fill Structure like `import_lyrics`.
+/// Exporting is the USER's action, but 🔒 FROZEN sections are still respected
+/// deterministically: `merge_frozen_sections` keeps every frozen chord/
+/// structure section byte-identical (and re-inserts dropped ones) — the
+/// export only lands on unlocked sections. Returns
+/// `{ ok, skipped_frozen: [labels] }` so the UI can report what was kept.
+pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sections_json: &str) -> Result<Value> {
+    let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let sections = parse_resolved_sections(sections_json)?;
+    let stages = db::list_stages(conn, &song.id).await?;
+    let chords_stage = stages.iter().find(|s| s.r#type == "chords").ok_or_else(|| anyhow!("song has no chords stage"))?;
+    let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
+
+    // Chords: the export, with prior frozen sections spliced back verbatim.
+    let prior_chords = current_stage_data(conn, &chords_stage.id).await?;
+    let skipped = frozen_labels("chords", &prior_chords);
+    let merged_chords = merge_frozen_sections("chords", &prior_chords, &chords_data_from_resolved(&sections));
+    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&merged_chords), "data": merged_chords }).to_string();
+    db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
+    db::set_stage_status(conn, &chords_stage.id, "done").await?;
+
+    // Structure: back-fill (labels/order from the export; bars/role/type/🔒
+    // preserved on label match), then the same frozen guard re-inserts any
+    // locked section the export dropped.
+    let prior_structure = current_stage_data(conn, &structure_stage.id).await?;
+    let new_structure = structure_data_from_resolved(&sections, &prior_structure, &song);
+    let merged_structure = merge_frozen_sections("structure", &prior_structure, &new_structure);
+    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&merged_structure), "data": merged_structure }).to_string();
+    db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
+    db::set_stage_status(conn, &structure_stage.id, "done").await?;
+
+    Ok(json!({ "ok": true, "song_id": song.id, "skipped_frozen": skipped }))
+}
+
+/// Create a NEW song from a composition (destination 2 — works for blank
+/// sketches too): mirrors `create_song_from_lyrics`'s preset/title inputs,
+/// carries the composition's key/bpm onto the song, and populates Structure +
+/// Chords from the resolved sections. Lyrics stay empty (melody/bass live in
+/// the saved composition, not in a stage).
+pub async fn create_song_from_composition(
+    conn: &Connection,
+    style_preset_id: &str,
+    title: &str,
+    key_root: &str,
+    key_mode: &str,
+    bpm: i64,
+    sections_json: &str,
+) -> Result<Song> {
+    // validate BEFORE creating, so a bad export never leaves an empty song
+    let sections = parse_resolved_sections(sections_json)?;
+    let song = db::create_song(conn, style_preset_id, title).await?;
+    let song = db::update_song_key(conn, &song.id, key_root, key_mode, bpm).await?;
+    let stages = db::list_stages(conn, &song.id).await?;
+    let chords_stage = stages.iter().find(|s| s.r#type == "chords").ok_or_else(|| anyhow!("song has no chords stage"))?;
+    let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
+
+    let chords_data = chords_data_from_resolved(&sections);
+    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data }).to_string();
+    db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
+    db::set_stage_status(conn, &chords_stage.id, "done").await?;
+
+    let structure_data = structure_data_from_resolved(&sections, &Value::Null, &song);
+    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data }).to_string();
+    db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
+    db::set_stage_status(conn, &structure_stage.id, "done").await?;
+
+    db::get_song(conn, &song.id).await?.ok_or_else(|| anyhow!("song not found after export"))
+}
+
 /// Extract the first JSON object from model output (fenced or bare).
 pub fn extract_json(text: &str) -> Option<Value> {
     if let Some(start) = text.find("```json") {
@@ -1718,5 +1908,179 @@ mod tests {
         db::seed_skills(&conn).await.unwrap();
         let active = db::get_active_skill_for_stage(&conn, "chords").await.unwrap().unwrap();
         assert_eq!(active.id, user.id, "user skill must outrank the builtin after reseed");
+    }
+
+    // ---- Composer export (composition → song) --------------------------------
+
+    /// (a) Export into an existing song: the Chords stage takes the exported
+    /// sections EXCEPT the 🔒 frozen one, which is skipped and preserved
+    /// byte-identical; Structure is back-filled to the exported labels/order
+    /// with bars/role preserved on label match; both stages land "done"; the
+    /// skipped labels are reported.
+    #[tokio::test]
+    async fn export_composition_updates_song_skipping_frozen_chords() {
+        let (_db, conn) = mem_conn().await;
+        let (song, chords_stage, _prior, prior_frozen) = frozen_chords_fixture(&conn).await;
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+
+        // prior Structure: Verse 1 carries bars/role to preserve on label match
+        let s_data = json!({ "key": {"root":"A","mode":"minor"}, "bpm": 120, "keyNote": "", "tempoNote": "", "sections": [
+            { "type": "verse", "label": "Verse 1", "bars": 16, "role": "story" }
+        ]});
+        let s_content = json!({ "kind": "structure", "text": structure_editor_text(&s_data), "data": s_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await.unwrap();
+
+        // the Composer exports resolved sections that rewrite EVERYTHING —
+        // including the frozen Verse 1 (which must be skipped)
+        let resolved = json!([
+            { "label": "Verse 1", "bars": 8, "chords": [{"name":"Dm","beats":4},{"name":"Bb","beats":4}] },
+            { "label": "Chorus", "bars": 8, "chords": [{"name":"G","beats":4},{"name":"Em","beats":4}] },
+            { "label": "Bridge", "bars": 4, "chords": [{"name":"F","beats":2},{"name":"G","beats":2}] }
+        ])
+        .to_string();
+        let out = export_composition_to_song(&conn, &song.id, &resolved).await.unwrap();
+        assert_eq!(out["skipped_frozen"], json!(["Verse 1"]), "the frozen section is surfaced as skipped");
+
+        // Chords: frozen Verse 1 byte-identical; Chorus/Bridge take the export
+        let cur = db::current_artifact(&conn, &chords_stage.id).await.unwrap().unwrap();
+        let cv = serde_json::from_str::<Value>(&cur.content).unwrap();
+        let secs = cv["data"]["sections"].as_array().unwrap();
+        let labels: Vec<&str> = secs.iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"]);
+        let verse = secs.iter().find(|s| s["label"] == "Verse 1").unwrap();
+        assert_eq!(*verse, prior_frozen, "frozen chords section must survive the export byte-identical");
+        assert_eq!(verse["frozen"], json!(true));
+        let chorus = secs.iter().find(|s| s["label"] == "Chorus").unwrap();
+        assert_eq!(chorus["chords"][0]["name"], "G");
+        assert_eq!(chorus["chords"][0]["beats"], json!(4));
+        // text is the chords editor's own rendering of the merged data
+        let text = cv["text"].as_str().unwrap();
+        assert!(text.contains("Verse 1: Am F"), "rendered text keeps the frozen chords, got: {text}");
+        assert!(text.contains("Chorus: G Em"), "rendered text has the exported chorus, got: {text}");
+        assert!(text.contains("Bridge: F G"), "rendered text has the new bridge, got: {text}");
+
+        // Structure: exported labels/order; bars/role/type preserved on match;
+        // new sections take the exported bar counts
+        let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
+        let sv = serde_json::from_str::<Value>(&st.content).unwrap();
+        let ssecs = sv["data"]["sections"].as_array().unwrap();
+        let slabels: Vec<&str> = ssecs.iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(slabels, ["Verse 1", "Chorus", "Bridge"]);
+        assert_eq!(ssecs[0]["bars"], json!(16), "matched section keeps its bars");
+        assert_eq!(ssecs[0]["role"], json!("story"));
+        assert_eq!(ssecs[0]["type"], json!("verse"));
+        assert_eq!(ssecs[1]["bars"], json!(8), "new section takes the exported bars");
+        assert_eq!(ssecs[2]["bars"], json!(4));
+        // both stages marked done
+        assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
+        assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
+    }
+
+    /// (b) A frozen STRUCTURE section dropped by the export is re-inserted
+    /// verbatim (skip-and-preserve applies to structure too).
+    #[tokio::test]
+    async fn export_composition_preserves_dropped_frozen_structure_section() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+
+        let s_data = json!({ "key": {"root":"A","mode":"minor"}, "bpm": 120, "keyNote": "", "tempoNote": "", "sections": [
+            { "type": "intro", "label": "Intro", "bars": 4, "role": "set the scene", "frozen": true },
+            { "label": "Verse 1", "bars": 8, "role": "" }
+        ]});
+        let s_content = json!({ "kind": "structure", "text": structure_editor_text(&s_data), "data": s_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await.unwrap();
+        let frozen_intro = s_data["sections"][0].clone();
+
+        // the export has no Intro at all
+        let resolved = json!([
+            { "label": "Verse 1", "bars": 8, "chords": [{"name":"Am","beats":4}] }
+        ])
+        .to_string();
+        export_composition_to_song(&conn, &song.id, &resolved).await.unwrap();
+
+        let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
+        let sv = serde_json::from_str::<Value>(&st.content).unwrap();
+        let ssecs = sv["data"]["sections"].as_array().unwrap();
+        assert_eq!(ssecs.len(), 2);
+        assert_eq!(ssecs[0], frozen_intro, "dropped frozen structure section re-inserted verbatim at its index");
+        assert_eq!(ssecs[1]["label"], "Verse 1");
+    }
+
+    /// (c) Create a NEW song from a composition: stages populated, key/bpm
+    /// carried from the composition, lyrics left empty. The resolved JSON here
+    /// is exactly what compositionToSong.ts produces for a C-major blank
+    /// sketch with degree chords 1–5–6–4 (one "Sketch" section) — the Rust
+    /// half of the degree→name round-trip contract.
+    #[tokio::test]
+    async fn sketch_resolved_sections_round_trip_into_new_song() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+
+        // compositionToSong.ts: C major, degrees 1,5,6,4 (one bar each) →
+        // one "Sketch" section, chords C G Am F @ 4 beats, bars = 8.
+        let resolved = json!([
+            { "label": "Sketch", "bars": 8, "chords": [
+                {"name":"C","beats":4},{"name":"G","beats":4},{"name":"Am","beats":4},{"name":"F","beats":4}
+            ]}
+        ])
+        .to_string();
+        let song = create_song_from_composition(&conn, &preset.id, "Neon idea", "C", "major", 112, &resolved).await.unwrap();
+        assert_eq!(song.title, "Neon idea");
+        assert_eq!(song.key_root, "C", "key root carried from the composition");
+        assert_eq!(song.key_mode, "major");
+        assert_eq!(song.bpm, 112, "bpm carried from the composition");
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+        let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").unwrap();
+
+        let cur = db::current_artifact(&conn, &chords_stage.id).await.unwrap().unwrap();
+        let cv = serde_json::from_str::<Value>(&cur.content).unwrap();
+        assert_eq!(cv["data"]["sections"][0]["label"], "Sketch");
+        let names: Vec<&str> = cv["data"]["sections"][0]["chords"].as_array().unwrap()
+            .iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["C", "G", "Am", "F"], "degree 1/5/6/4 in C major resolve to C G Am F");
+        assert_eq!(cv["text"].as_str().unwrap(), "Sketch: C G Am F");
+
+        let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
+        let sv = serde_json::from_str::<Value>(&st.content).unwrap();
+        assert_eq!(sv["data"]["key"]["root"], "C");
+        assert_eq!(sv["data"]["bpm"], json!(112));
+        assert_eq!(sv["data"]["sections"][0]["label"], "Sketch");
+        assert_eq!(sv["data"]["sections"][0]["bars"], json!(8));
+
+        assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
+        assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
+        // lyrics stay empty/pending — melody/bass live in the composition
+        assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "pending");
+        assert!(db::current_artifact(&conn, &lyrics_stage.id).await.unwrap().is_none());
+    }
+
+    /// (d) Invalid/empty export payloads never create a song or touch stages.
+    #[tokio::test]
+    async fn export_rejects_bad_sections_json() {
+        let (_db, conn) = mem_conn().await;
+        let (song, chords_stage, prior_content, _f) = frozen_chords_fixture(&conn).await;
+
+        assert!(export_composition_to_song(&conn, &song.id, "not json").await.is_err());
+        assert!(export_composition_to_song(&conn, &song.id, "[]").await.is_err());
+        let cur = db::current_artifact(&conn, &chords_stage.id).await.unwrap().unwrap();
+        assert_eq!(cur.content, prior_content, "a rejected export leaves the chords artifact untouched");
+
+        let preset_id = song.style_preset_id.clone();
+        let songs_before = db::list_songs(&conn).await.unwrap().len();
+        assert!(create_song_from_composition(&conn, &preset_id, "X", "C", "major", 100, "[]").await.is_err());
+        assert_eq!(db::list_songs(&conn).await.unwrap().len(), songs_before, "no empty song is created on a bad export");
     }
 }

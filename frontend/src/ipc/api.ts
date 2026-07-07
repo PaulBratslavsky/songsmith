@@ -91,6 +91,8 @@ export type LoginSubmitResult = { success: boolean; message: string };
 /** Pasted-lyrics parse result (words verbatim; `used_claude` = the fallback segmented unlabeled text). */
 export type ParsedLyricSection = { label: string; lines: string[] };
 export type ParsedLyrics = { sections: ParsedLyricSection[]; used_claude: boolean };
+/** Composer export-to-song outcome — `skipped_frozen` lists the 🔒 section labels kept as-is. */
+export type ExportResult = { ok: boolean; song_id: string; skipped_frozen: string[] };
 
 export const api = {
   // style presets
@@ -115,6 +117,12 @@ export const api = {
   importLyrics: (songId: string, text: string) => call<void>("import_lyrics", { songId, text }),
   createSongFromLyrics: (stylePresetId: string, title: string, text: string) =>
     call<Song>("create_song_from_lyrics", { stylePresetId, title, text }),
+  // Composer export (composition → song). `sectionsJson` is the RESOLVED
+  // sections array from lib/music/compose/compositionToSong.ts.
+  exportCompositionToSong: (songId: string, sectionsJson: string) =>
+    call<ExportResult>("export_composition_to_song", { songId, sectionsJson }),
+  createSongFromComposition: (stylePresetId: string, title: string, keyRoot: string, keyMode: string, bpm: number, sectionsJson: string) =>
+    call<Song>("create_song_from_composition", { stylePresetId, title, keyRoot, keyMode, bpm, sectionsJson }),
   refineField: (stageLabel: string, fieldLabel: string, current: string, instruction: string) =>
     call<string>("refine_field", { stageLabel, fieldLabel, current, instruction }),
   deleteSong: (id: string) => call<void>("delete_song", { id }),
