@@ -75,9 +75,8 @@ where
             serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned())
         });
 
-        let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
         let system = build_system_prompt(&skill, &preset, &song);
-        let mut user = build_user_prompt(&stage.r#type, &prior, user_input.as_deref());
+        let mut user = stage_user_prompt(conn, &stage, user_input.as_deref()).await?;
         if let Some(pd) = &prior_data {
             if let Some(block) = frozen_prompt_block(&stage.r#type, pd) {
                 user.push_str("\n\n");
@@ -123,6 +122,10 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
 
     let run = async {
         let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
+        // Reverse context (Feature B2 #1) — empty for a normal forward song, so
+        // this prompt stays byte-identical when no later artifacts exist.
+        let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
+        let later_block = if later.is_empty() { String::new() } else { format!("{LATER_STAGES_BANNER}\n\n{later}\n\n") };
         let system = build_system_prompt(&skill, &preset, &song);
         let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
 1. TITLE/HOOK: does the song's title (from the Concept) actually land as the chorus hook line? If not, work it in so the chorus sings the title. ONLY if the song clearly found a stronger, more specific hook, build the chorus around that instead and keep it consistent across every chorus.\n\
@@ -131,7 +134,7 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
 4. Preserve the inline [chord] tags and the section labels exactly.\n\
 Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
         let mut user = format!(
-            "Prior stages (context):\n\n{prior}\n\n---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
+            "Prior stages (context):\n\n{prior}\n\n{later_block}---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
             stage_label(&stage.r#type)
         );
         // frozen sections are FINAL even through a self-test/revise pass
@@ -202,6 +205,26 @@ where
     })
 }
 
+/// A stage artifact's context body. Prefer rendering the structured `data` over
+/// trusting the stored `text`: Claude-originated saves historically wrote
+/// commentary into `text` while the real content lived in `data` — feeding a
+/// changelog to downstream stages (e.g. the Generation Prompt saw "v4 —
+/// reconciled labels…" instead of the lyrics). render(data) is the ground
+/// truth when it exists.
+fn artifact_context_body(stage_type: &str, content: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(content).ok();
+    parsed
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| render_stage_text(stage_type, d))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| content.to_string())
+}
+
 async fn gather_prior_context(conn: &Connection, song_id: &str, ordinal: i64) -> Result<String> {
     let stages = db::list_stages(conn, song_id).await?;
     let mut blocks = Vec::new();
@@ -211,26 +234,41 @@ async fn gather_prior_context(conn: &Connection, song_id: &str, ordinal: i64) ->
         // content. Saving an edit creates a new (unapproved) revision, and the user
         // expects that to be what downstream sees.
         if let Some(art) = db::current_artifact(conn, &s.id).await? {
-            let parsed = serde_json::from_str::<Value>(&art.content).ok();
-            // Prefer rendering the structured `data` over trusting the stored `text`:
-            // Claude-originated saves historically wrote commentary into `text` while
-            // the real content lived in `data` — feeding a changelog to downstream
-            // stages (e.g. the Generation Prompt saw "v4 — reconciled labels…" instead
-            // of the lyrics). render(data) is the ground truth when it exists.
-            let body = parsed
-                .as_ref()
-                .and_then(|v| v.get("data"))
-                .and_then(|d| render_stage_text(&s.r#type, d))
-                .or_else(|| {
-                    parsed
-                        .as_ref()
-                        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
-                })
-                .unwrap_or(art.content.clone());
-            blocks.push(format!("### {} output\n{}", stage_label(&s.r#type), body));
+            blocks.push(format!("### {} output\n{}", stage_label(&s.r#type), artifact_context_body(&s.r#type, &art.content)));
         }
     }
     Ok(blocks.join("\n\n"))
+}
+
+/// Reverse context (spec Feature B2 #1): already-written LATER stages (ordinal
+/// > current, non-empty content) — a lyrics-first import fills Lyrics/Structure
+/// before Concept ever runs, and without this the pipeline is forward-only and
+/// Concept INVENTS an unrelated song. Empty for a normal forward song, so
+/// prompts stay byte-identical when no later artifacts exist.
+async fn gather_later_context(conn: &Connection, song_id: &str, ordinal: i64) -> Result<String> {
+    let stages = db::list_stages(conn, song_id).await?;
+    let mut blocks = Vec::new();
+    for s in stages.into_iter().filter(|s| s.ordinal > ordinal) {
+        if let Some(art) = db::current_artifact(conn, &s.id).await? {
+            let body = artifact_context_body(&s.r#type, &art.content);
+            if !body.trim().is_empty() {
+                blocks.push(format!("### {} output\n{}", stage_label(&s.r#type), body));
+            }
+        }
+    }
+    Ok(blocks.join("\n\n"))
+}
+
+/// The banner over reverse (later-stage) context in stage prompts.
+const LATER_STAGES_BANNER: &str = "ALREADY-WRITTEN LATER STAGES (this song was imported lyrics-first) — DERIVE this stage FROM them; stay consistent; do not contradict or invent a different song.";
+
+/// The user prompt for a stage run: earlier-stage context, reverse (later-
+/// stage) context when it exists, and the producer's seed. Factored out of
+/// `run_stage` so tests can assert the exact prompt without a Claude call.
+pub(crate) async fn stage_user_prompt(conn: &Connection, stage: &Stage, user_input: Option<&str>) -> Result<String> {
+    let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
+    let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
+    Ok(build_user_prompt(&stage.r#type, &prior, &later, user_input))
 }
 
 fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> String {
@@ -254,11 +292,17 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
     )
 }
 
-fn build_user_prompt(stage_type: &str, prior: &str, user_input: Option<&str>) -> String {
+fn build_user_prompt(stage_type: &str, prior: &str, later: &str, user_input: Option<&str>) -> String {
     let mut p = String::new();
     if !prior.is_empty() {
         p.push_str("Approved outputs from earlier stages (carry these forward):\n\n");
         p.push_str(prior);
+        p.push_str("\n\n");
+    }
+    if !later.is_empty() {
+        p.push_str(LATER_STAGES_BANNER);
+        p.push_str("\n\n");
+        p.push_str(later);
         p.push_str("\n\n");
     }
     if let Some(input) = user_input {
@@ -488,6 +532,113 @@ fn split_labeled_lyrics(text: &str) -> Option<Vec<ParsedSection>> {
     Some(sections)
 }
 
+// ---- Inline [chord] tags (spec Feature B2 #2/#3) -----------------------------
+//
+// Rust mirror of frontend/src/lib/music/chordpro.ts's tag handling, scoped to
+// what the paste-import needs: extract the inline `[C]word` tags a lyric line
+// carries so the import can back-fill the Chords stage and infer the key.
+// Names are preserved exactly as authored (no auto-sharpening — Bb is often the
+// musically-correct spelling).
+
+/// Split a chord tag into (root, quality) — `"D#m"` → `("D#", "m")` — or None
+/// when the bracketed text is not chord-shaped (annotations like "[x2]" or
+/// "[whispered]" must never become chords or vote on the key).
+fn parse_chord_tag(name: &str) -> Option<(&str, &str)> {
+    let b = name.as_bytes();
+    if b.is_empty() || !(b'A'..=b'G').contains(&b[0]) {
+        return None;
+    }
+    let mut i = 1;
+    if b.len() > i && (b[i] == b'#' || b[i] == b'b') {
+        i += 1;
+    }
+    let quality = &name[i..];
+    if quality.contains(char::is_whitespace) {
+        return None; // "[Bridge out]" is a direction, not a chord
+    }
+    let chord_shaped = quality.is_empty()
+        || quality.starts_with('m') // m, m7, min, maj7 …
+        || quality.starts_with("dim")
+        || quality.starts_with("aug")
+        || quality.starts_with("sus")
+        || quality.starts_with("add")
+        || quality.starts_with('(')
+        || quality.starts_with('/')
+        || quality.starts_with('+')
+        || quality.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if chord_shaped { Some((&name[..i], quality)) } else { None }
+}
+
+/// A lyric line's inline chord tags, in order (chord-shaped tags only).
+fn line_chord_tags(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else { break };
+        let name = after[..close].trim();
+        if !name.is_empty() && parse_chord_tag(name).is_some() {
+            out.push(name.to_string());
+        }
+        rest = &after[close + 1..];
+    }
+    out
+}
+
+/// A section's chord-tag sequence collapsed to ONE progression pass when it
+/// repeats exactly (Bb C Dm C Bb C Dm C → Bb C Dm C), else the full sequence.
+/// The Chords stage semantically holds the PROGRESSION — the Composer's v3
+/// layout re-expands it from the lyric placements.
+fn collapse_progression(seq: &[String]) -> Vec<String> {
+    let n = seq.len();
+    for d in 1..=n {
+        if n % d == 0 && (d..n).all(|i| seq[i] == seq[i % d]) {
+            return seq[..d].to_vec();
+        }
+    }
+    seq.to_vec()
+}
+
+/// Infer the song key from the paste's chord tags (spec Feature B2 #3): tonic
+/// = the most frequent chord root (ties → the earliest-seen root, i.e. the
+/// first tag's), minor when that tonic's tags are predominantly minor
+/// (quality starts with 'm' but not "maj"). None when no chord tags exist.
+fn infer_key_from_tags(tags: &[String]) -> Option<(String, String)> {
+    let mut order: Vec<&str> = Vec::new(); // roots in first-seen order
+    let mut stats: std::collections::HashMap<&str, (usize, usize)> = std::collections::HashMap::new(); // root → (total, minor)
+    for t in tags {
+        let Some((root, quality)) = parse_chord_tag(t) else { continue };
+        let e = stats.entry(root).or_insert_with(|| {
+            order.push(root);
+            (0, 0)
+        });
+        e.0 += 1;
+        if quality.starts_with('m') && !quality.starts_with("maj") {
+            e.1 += 1;
+        }
+    }
+    let mut best: Option<&str> = None;
+    for r in &order {
+        if best.is_none_or(|b| stats[r].0 > stats[b].0) {
+            best = Some(r); // strict > keeps the FIRST root on ties
+        }
+    }
+    let root = best?;
+    let (total, minor) = stats[root];
+    let mode = if minor * 2 > total { "minor" } else { "major" };
+    Some((root.to_string(), mode.to_string()))
+}
+
+/// Per-section chord-tag sequences for a parsed paste (untagged sections are
+/// empty; the outer Vec always matches `parsed.sections` 1:1).
+fn section_chord_tags(parsed: &ParsedLyrics) -> Vec<Vec<String>> {
+    parsed
+        .sections
+        .iter()
+        .map(|s| s.lines.iter().flat_map(|l| line_chord_tags(l)).collect())
+        .collect()
+}
+
 /// The no-segmentation fallback: everything as ONE section, words verbatim.
 fn single_section(text: &str) -> Vec<ParsedSection> {
     let lines = trim_blank_edges(text.lines().map(|l| l.trim_end_matches('\r').to_string()).collect());
@@ -625,6 +776,28 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
     let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
+
+    // Chords back-fill from inline [chord] tags (spec Feature B2 #2): when the
+    // paste carries ChordPro tags, the Chords stage gets each section's tag
+    // sequence — collapsed to one progression pass when it repeats exactly —
+    // as {name, beats: 4}. Untagged sections get an empty chords list; a paste
+    // with NO tags anywhere leaves the Chords stage untouched (today's
+    // behavior). Like the lyrics replace above, pasting is the user's
+    // deliberate action, so it replaces the whole Chords artifact.
+    let tag_seqs = section_chord_tags(parsed);
+    if tag_seqs.iter().any(|t| !t.is_empty()) {
+        if let Some(chords_stage) = stages.iter().find(|s| s.r#type == "chords") {
+            let chords_data = json!({
+                "sections": parsed.sections.iter().zip(&tag_seqs).map(|(p, tags)| json!({
+                    "label": p.label,
+                    "chords": collapse_progression(tags).iter().map(|n| json!({ "name": n, "beats": 4 })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>()
+            });
+            let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data }).to_string();
+            db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
+            db::set_stage_status(conn, &chords_stage.id, "done").await?;
+        }
+    }
     Ok(())
 }
 
@@ -636,7 +809,9 @@ fn ensure_has_words(parsed: &ParsedLyrics) -> Result<()> {
 }
 
 /// Import pasted lyrics into an existing song (entry point 1): parse, replace
-/// the Lyrics artifact, back-fill Structure. Returns the parse for callers.
+/// the Lyrics artifact, back-fill Structure (and Chords when the paste carries
+/// inline [chord] tags). The song's key is left alone — only
+/// `create_song_from_lyrics` infers it. Returns the parse for callers.
 pub async fn import_lyrics(conn: &Connection, settings: &Settings, song_id: &str, text: &str) -> Result<ParsedLyrics> {
     let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let parsed = parse_pasted_lyrics(settings, text).await?;
@@ -647,12 +822,22 @@ pub async fn import_lyrics(conn: &Connection, settings: &Settings, song_id: &str
 
 /// New song from pasted lyrics (entry point 2): mirror the create flow's inputs
 /// (preset + working title), then run the same import. Concept stays blank —
-/// the user adds it and runs Chords next; key/BPM keep the create defaults.
+/// the user adds it next. When the paste carries inline [chord] tags the song
+/// key is INFERRED from them (spec Feature B2 #3 — a [D#m]-heavy paste makes a
+/// D#-minor song, not the preset's default); BPM keeps the preset seeding.
+/// No tags → key keeps the preset seeding too. (`import_lyrics` into an
+/// existing song never touches the key — the user may have set it on purpose.)
 pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, style_preset_id: &str, title: &str, text: &str) -> Result<Song> {
     // parse (and validate) BEFORE creating, so a bad paste never leaves an empty song
     let parsed = parse_pasted_lyrics(settings, text).await?;
     ensure_has_words(&parsed)?;
     let song = db::create_song(conn, style_preset_id, title).await?;
+    // key inference BEFORE apply, so the Structure back-fill renders the inferred key
+    let all_tags: Vec<String> = section_chord_tags(&parsed).into_iter().flatten().collect();
+    let song = match infer_key_from_tags(&all_tags) {
+        Some((root, mode)) => db::update_song_key(conn, &song.id, &root, &mode, song.bpm).await?,
+        None => song,
+    };
     apply_parsed_lyrics(conn, &song, &parsed).await?;
     db::get_song(conn, &song.id).await?.ok_or_else(|| anyhow!("song not found after import"))
 }
@@ -1554,5 +1739,219 @@ mod tests {
         let text = v["text"].as_str().unwrap();
         assert!(text.contains("[Am] kneel…"), "guarded save must rebuild text from data, got: {text}");
         assert!(!text.contains("commentary"), "commentary must not survive as text, got: {text}");
+    }
+
+    // ---- Feature B2: lyrics-first flow completion ----------------------------
+
+    /// (1) Reverse context: after a lyrics-first import, the Concept run's
+    /// prompt carries the already-written later stages under the banner, with
+    /// the pasted lyrics rendered in.
+    #[tokio::test]
+    async fn stage_prompt_carries_later_stages_after_lyrics_import() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let text = "[Verse 1]\nCity lights are calling me home\n\n[Chorus]\nWe run until the morning finds us";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Imported", text).await.unwrap();
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
+        let prompt = stage_user_prompt(&conn, concept, None).await.unwrap();
+
+        assert!(prompt.contains(LATER_STAGES_BANNER), "prompt must carry the reverse-context banner, got: {prompt}");
+        assert!(prompt.contains("### Lyrics output"), "prompt must carry the Lyrics stage block, got: {prompt}");
+        assert!(prompt.contains("City lights are calling me home"), "prompt must carry the pasted words, got: {prompt}");
+        assert!(prompt.contains("### Structure output"), "prompt must carry the back-filled Structure, got: {prompt}");
+        // and the banner comes BEFORE the later-stage blocks
+        assert!(prompt.find(LATER_STAGES_BANNER).unwrap() < prompt.find("### Lyrics output").unwrap());
+    }
+
+    /// (1c — user-requested) The NO-CHORDS paste, end to end: a tagless import
+    /// leaves the Chords stage empty/pending, and running the CHORDS stage then
+    /// sees the imported lyrics via reverse context — so generated chords derive
+    /// from the words instead of being invented blind.
+    #[tokio::test]
+    async fn chords_prompt_derives_from_tagless_imported_lyrics() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let text = "[Verse 1]\nMidnight, the room gone quiet\n\n[Chorus]\nPull me under, make me clean";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Tagless", text).await.unwrap();
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        // the tagless import must NOT have back-filled chords
+        assert!(db::current_artifact(&conn, &chords.id).await.unwrap().is_none(), "tagless paste must leave Chords empty");
+        assert_eq!(chords.status, "pending");
+
+        // running the Chords stage sees the pasted words as later-stage context
+        let prompt = stage_user_prompt(&conn, chords, None).await.unwrap();
+        assert!(prompt.contains(LATER_STAGES_BANNER), "chords prompt must carry the reverse-context banner");
+        assert!(prompt.contains("Pull me under, make me clean"), "chords prompt must carry the imported lyrics, got: {prompt}");
+        // Structure (ordinal < chords) still arrives as normal prior context
+        assert!(prompt.contains("### Structure output"));
+    }
+
+    /// (1b) A normal forward song's prompt is byte-identical to today: no later
+    /// artifacts → no banner, exactly the legacy prompt.
+    #[tokio::test]
+    async fn stage_prompt_unchanged_for_forward_song() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Forward Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
+
+        let prompt = stage_user_prompt(&conn, concept, Some("a song about rain")).await.unwrap();
+        // byte-identical to the pre-B2 prompt builder (empty later block)
+        assert_eq!(prompt, build_user_prompt("concept", "", "", Some("a song about rain")));
+        assert!(!prompt.contains("ALREADY-WRITTEN LATER STAGES"));
+    }
+
+    /// (2 — pure) Progression collapse: exact repeats fold to one pass; partial
+    /// repeats keep the full sequence.
+    #[test]
+    fn collapse_progression_folds_exact_repeats_only() {
+        let seq = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(collapse_progression(&seq(&["Bb", "C", "Dm", "C", "Bb", "C", "Dm", "C"])), seq(&["Bb", "C", "Dm", "C"]));
+        assert_eq!(collapse_progression(&seq(&["Bb", "C", "Dm", "C", "Bb"])), seq(&["Bb", "C", "Dm", "C", "Bb"]), "a partial repeat is NOT collapsed");
+        assert_eq!(collapse_progression(&seq(&["Am", "Am", "Am"])), seq(&["Am"]));
+        assert!(collapse_progression(&[]).is_empty());
+    }
+
+    /// (2/3 — pure) Tag parsing keeps chords and rejects directions; key
+    /// inference picks the most frequent root and its predominant mode.
+    #[test]
+    fn chord_tags_and_key_inference() {
+        assert_eq!(line_chord_tags("[D#m]City lights are [C#]calling [B]home"), ["D#m", "C#", "B"]);
+        assert_eq!(line_chord_tags("[x2] sing it [whispered]again"), Vec::<String>::new(), "non-chord tags are not chords");
+        assert_eq!(line_chord_tags("[Am(add9)]kneel at the [Bb]altar"), ["Am(add9)", "Bb"]);
+
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // [D#m]-heavy → D# minor
+        assert_eq!(infer_key_from_tags(&tags(&["D#m", "C#", "B", "D#m", "D#m"])), Some(("D#".into(), "minor".into())));
+        // major tonic
+        assert_eq!(infer_key_from_tags(&tags(&["C", "F", "G", "C"])), Some(("C".into(), "major".into())));
+        // maj7 does not count as minor
+        assert_eq!(infer_key_from_tags(&tags(&["Cmaj7", "Cmaj7", "Am"])), Some(("C".into(), "major".into())));
+        // frequency tie → the first tag's root
+        assert_eq!(infer_key_from_tags(&tags(&["Em", "D", "Em", "D"])), Some(("E".into(), "minor".into())));
+        assert_eq!(infer_key_from_tags(&[]), None);
+    }
+
+    /// (2/3) The user's real-shaped paste: [D#m]/[C#]/[B] verse tags plus a
+    /// chorus whose progression repeats exactly → Chords back-filled per
+    /// section (chorus collapsed to one pass, untagged Bridge empty, stage
+    /// done) and the song key inferred as D# minor with the BPM untouched.
+    #[tokio::test]
+    async fn create_song_from_lyrics_backfills_chords_and_infers_key() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+
+        let text = "[Verse 1]\n\
+                    [D#m]City lights are [C#]calling me [B]home\n\
+                    [D#m]Every [D#m]street I know by [D#m]heart\n\n\
+                    [Chorus]\n\
+                    [D#m]Run [C#]far, [B]run [C#]now\n\
+                    [D#m]Run [C#]far, [B]run [C#]now\n\n\
+                    [Bridge]\n\
+                    No chords marked here at all";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "D# Song", text).await.unwrap();
+
+        // key inferred from the tags: D# is the most frequent root, all its tags minor
+        assert_eq!(song.key_root, "D#", "tonic = most frequent tag root");
+        assert_eq!(song.key_mode, "minor", "[D#m]-heavy → minor");
+        assert_eq!(song.bpm, 120, "BPM keeps the preset seeding");
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        let cur = db::current_artifact(&conn, &chords_stage.id).await.unwrap().unwrap();
+        let cv = serde_json::from_str::<Value>(&cur.content).unwrap();
+        let secs = cv["data"]["sections"].as_array().unwrap();
+        let labels: Vec<&str> = secs.iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"]);
+
+        let names = |s: &Value| s["chords"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // verse: no exact repetition → the full tag sequence, in order
+        assert_eq!(names(&secs[0]), ["D#m", "C#", "B", "D#m", "D#m", "D#m"]);
+        // chorus: the two identical lines collapse to ONE progression pass
+        assert_eq!(names(&secs[1]), ["D#m", "C#", "B", "C#"], "repeated chorus progression collapses to one pass");
+        // untagged bridge → empty chords list
+        assert!(names(&secs[2]).is_empty(), "untagged section gets an empty chords list");
+        // every back-filled chord defaults to 4 beats
+        assert!(secs[0]["chords"].as_array().unwrap().iter().all(|c| c["beats"] == json!(4)));
+        // rendered with the chords renderer + stage marked done
+        assert!(cv["text"].as_str().unwrap().contains("Chorus: D#m C# B C#"), "text rendered by the chords renderer");
+        assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
+
+        // the Structure back-fill renders the INFERRED key, not the preset default
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+        let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
+        let sv = serde_json::from_str::<Value>(&st.content).unwrap();
+        assert_eq!(sv["data"]["key"]["root"], "D#");
+        assert_eq!(sv["data"]["key"]["mode"], "minor");
+    }
+
+    /// (2/3b) A paste with NO tags anywhere keeps today's behavior exactly:
+    /// Chords untouched (no artifact, still pending) and the preset-seeded key.
+    #[tokio::test]
+    async fn create_song_from_lyrics_without_tags_leaves_chords_and_key_alone() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "F minor, 140 BPM".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+
+        let text = "[Verse 1]\nPlain words with no chord tags\n\n[Chorus]\nStill nothing marked";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Plain", text).await.unwrap();
+        assert_eq!(song.key_root, "F", "key keeps the preset seeding");
+        assert_eq!(song.key_mode, "minor");
+        assert_eq!(song.bpm, 140);
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        assert!(db::current_artifact(&conn, &chords_stage.id).await.unwrap().is_none(), "no tags → Chords untouched");
+        assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "pending");
+    }
+
+    /// (3b) `import_lyrics` into an existing song back-fills Chords from tags
+    /// but leaves the song's key alone — the user may have set it on purpose.
+    #[tokio::test]
+    async fn import_lyrics_backfills_chords_but_keeps_song_key() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Existing").await.unwrap();
+
+        let text = "[Verse 1]\n[D#m]City [C#]lights [B]home";
+        import_lyrics(&conn, &settings, &song.id, text).await.unwrap();
+
+        let after = db::get_song(&conn, &song.id).await.unwrap().unwrap();
+        assert_eq!(after.key_root, song.key_root, "import into an existing song never touches the key");
+        assert_eq!(after.key_mode, song.key_mode);
+
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        let cur = db::current_artifact(&conn, &chords_stage.id).await.unwrap().unwrap();
+        let cv = serde_json::from_str::<Value>(&cur.content).unwrap();
+        assert_eq!(cv["data"]["sections"][0]["chords"][0]["name"], "D#m");
+        assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
     }
 }

@@ -255,6 +255,55 @@ function parsePastedLyrics(text: string): { sections: { label: string; lines: st
   return { sections, used_claude: false };
 }
 const normLabel = (s: string) => s.trim().toLowerCase().split(/\s+/).join(" ");
+
+// ---- Feature B2: chords back-fill + key inference from inline [chord] tags --
+// Mirrors core/src/agent.rs (parse_chord_tag / line_chord_tags /
+// collapse_progression / infer_key_from_tags).
+
+/** Split a chord tag into root+quality, or null when it isn't chord-shaped. */
+function parseChordTag(name: string): { root: string; quality: string } | null {
+  const m = name.match(/^([A-G][#b]?)(\S*)$/);
+  if (!m) return null;
+  const quality = m[2];
+  const ok = quality === "" || /^(m|dim|aug|sus|add|[0-9(/+])/.test(quality);
+  return ok ? { root: m[1], quality } : null;
+}
+/** A lyric line's inline chord tags, in order (chord-shaped tags only). */
+function lineChordTags(line: string): string[] {
+  const tags: string[] = [];
+  const re = /\[([^\]]+)\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line))) {
+    const name = m[1].trim();
+    if (name && parseChordTag(name)) tags.push(name);
+  }
+  return tags;
+}
+/** Collapse a tag sequence to ONE progression pass when it repeats exactly. */
+function collapseProgression(seq: string[]): string[] {
+  for (let d = 1; d <= seq.length; d++) {
+    if (seq.length % d === 0 && seq.every((x, i) => x === seq[i % d])) return seq.slice(0, d);
+  }
+  return seq;
+}
+/** Infer the key from the paste's tags: tonic = most frequent root (ties →
+ *  first-seen), minor when the tonic's tags are predominantly minor. */
+function inferKeyFromTags(tags: string[]): { root: string; mode: string } | null {
+  const stats = new Map<string, { total: number; minor: number }>(); // insertion order = first-seen
+  for (const t of tags) {
+    const p = parseChordTag(t);
+    if (!p) continue;
+    const s = stats.get(p.root) ?? { total: 0, minor: 0 };
+    s.total += 1;
+    if (/^m/.test(p.quality) && !/^maj/.test(p.quality)) s.minor += 1;
+    stats.set(p.root, s);
+  }
+  let best: string | null = null;
+  for (const [root, s] of stats) if (best === null || s.total > stats.get(best)!.total) best = root; // strict > keeps the first on ties
+  if (best === null) return null;
+  const s = stats.get(best)!;
+  return { root: best, mode: s.minor * 2 > s.total ? "minor" : "major" };
+}
 /** Replace the Lyrics artifact + back-fill Structure to the pasted sections (labels/order). */
 function importLyricsIntoSong(songId: string, text: string) {
   const parsed = parsePastedLyrics(text);
@@ -292,6 +341,20 @@ function importLyricsIntoSong(songId: string, text: string) {
     ...sections.map((s, i) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`),
   ].join("\n");
   push(structureStage, "structure", JSON.stringify({ kind: "structure", text: sText, data: sData }));
+  // Chords back-fill from inline [chord] tags (Feature B2 #2) — mirrors agent.rs:
+  // per section, the tag sequence collapsed to one progression pass, beats 4;
+  // untagged sections empty; no tags anywhere → Chords untouched.
+  const tagSeqs = parsed.sections.map((s) => s.lines.flatMap(lineChordTags));
+  if (tagSeqs.some((t) => t.length)) {
+    const chordsStage = stageOf("chords");
+    if (chordsStage) {
+      const cSecs = parsed.sections.map((p, i) => ({
+        label: p.label,
+        chords: collapseProgression(tagSeqs[i]).map((name) => ({ name, beats: 4 })),
+      }));
+      push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cSecs), data: { sections: cSecs } }));
+    }
+  }
 }
 
 // ---- Composer export (composition → song) — mirrors core/src/agent.rs -------
@@ -504,6 +567,11 @@ const handlers: MockHandlers = {
     db.songs.unshift(v);
     STAGE_ORDER.forEach((type, ordinal) =>
       db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
+    // Key inference from inline [chord] tags (Feature B2 #3) — create-only;
+    // BPM keeps the preset seeding. Set BEFORE the import so the Structure
+    // back-fill renders the inferred key. (import_lyrics never touches key.)
+    const key = inferKeyFromTags(parsePastedLyrics(a.text ?? "").sections.flatMap((s) => s.lines.flatMap(lineChordTags)));
+    if (key) { v.key_root = key.root; v.key_mode = key.mode; }
     importLyricsIntoSong(id, a.text ?? "");
     return toSong(v);
   },

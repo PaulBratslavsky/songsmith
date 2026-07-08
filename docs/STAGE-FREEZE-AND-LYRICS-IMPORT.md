@@ -96,6 +96,31 @@ fallback, Structure back-fill preserving bars/role, create-from-lyrics e2e); scr
 
 ---
 
+## Feature B2 — lyrics-first flow completion (user test-drive, 2026-07-07) — REQUIRED ✅ DONE
+Found: create-from-lyrics lands on Concept, and generating Concept INVENTS an unrelated song —
+the pipeline is forward-only (`gather_prior_context` = earlier stages only), so Concept never sees
+the imported lyrics. And the import ignores inline ChordPro tags: Chords stage left empty, key/BPM
+taken from the preset instead of the tags (user pasted [D#m]… and got an A-minor song).
+1. ✅ **Reverse context:** `run_stage` also gathers ALREADY-WRITTEN LATER stages (ordinal > current,
+   artifact exists) into the prompt under a clear banner: "This song already has finished later
+   stages (imported) — DERIVE this stage FROM them; stay consistent; do not contradict or invent a
+   different song." Applies to every stage (Concept run after lyric import derives the concept OF
+   the pasted song). Forward cascade behavior unchanged when no later artifacts exist.
+   *(Shipped: `gather_later_context` + `stage_user_prompt` in agent.rs; also wired into
+   `self_check_stage`. Prompts are byte-identical when no later artifacts exist.)*
+2. ✅ **Chords back-fill from tags:** when pasted lyrics carry inline [chord] tags, import_lyrics /
+   create_song_from_lyrics ALSO populate the Chords stage per section (unique tag sequence in
+   order, beats default 4; untagged sections empty), marked done. No tags → unchanged.
+   *(Shipped in `apply_parsed_lyrics`: each section's tag sequence, collapsed to one progression
+   pass when it repeats exactly — Bb C Dm C Bb C Dm C → Bb C Dm C; rendered via the chords
+   renderer. Non-chord tags like "[x2]" are ignored. Mock parity in ipc/mockApi.ts.)*
+3. ✅ **Key inference from tags:** when tags exist, infer the song key (most frequent root; minor if
+   the tonic tag is minor — [D#m]… → D# minor) and set key_root/key_mode; BPM keeps preset seeding.
+   No tags → preset seeding as shipped.
+   *(Shipped: `infer_key_from_tags` — ties go to the first-seen root; minor when the tonic's tags
+   are predominantly minor. Applied on `create_song_from_lyrics` only; `import_lyrics` into an
+   existing song leaves the key alone, per the accepted simplification.)*
+
 ## Build order
 1. **Feature A (Freeze)** first — it makes regeneration safe (the active pain). Backend `run_stage`
    merge + `frozen` flag + lock UI across the four editors.
