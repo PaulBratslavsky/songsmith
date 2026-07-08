@@ -56,14 +56,14 @@ export function PromptEditor({
     <div className="col" style={{ gap: 12 }}>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-          <label style={{ margin: 0 }}>Style prompt <span className="faint">(one line — genre, mood, instrumentation, vocal, mix, key, tempo · no chords)</span></label>
+          <label style={{ margin: 0 }}>Style prompt <span className="faint">→ paste into the generator's STYLE box (genre, mood, instrumentation, vocal, mix, key, tempo · no chords)</span></label>
           <FieldChat stageLabel="Generation Prompt" fieldLabel="style prompt" current={d.stylePrompt} onResult={(v) => set({ stylePrompt: v })} />
         </div>
         <textarea value={d.stylePrompt} onChange={(e) => set({ stylePrompt: e.target.value })} style={{ width: "100%", minHeight: 50 }} />
       </div>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-          <label style={{ margin: 0 }}>Tagged lyrics <span className="faint">(pulled from the Lyrics stage — [Section] + inline [Chord] tags)</span></label>
+          <label style={{ margin: 0 }}>Tagged lyrics <span className="faint">→ paste into the generator's LYRICS box ([Section] + inline [Chord] tags, from the Lyrics stage)</span></label>
           <div className="row" style={{ gap: 6, alignItems: "center" }}>
             {lyr && <button className={"sm" + (lyricsDiffer ? " primary" : " ghost")} title="replace with the exact lyrics from the Lyrics stage" onClick={pullFromLyrics}>↺ Pull from Lyrics</button>}
             <FieldChat stageLabel="Generation Prompt" fieldLabel="tagged lyrics" current={d.taggedLyrics} onResult={(v) => set({ taggedLyrics: v })} />
@@ -78,7 +78,7 @@ export function PromptEditor({
       </div>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-          <label style={{ margin: 0 }}>Notes <span className="faint">(key, tempo, energy, structure cues)</span></label>
+          <label style={{ margin: 0 }}>Notes <span className="faint">for YOU, not the generator — key/tempo/energy arc reference while producing</span></label>
           <FieldChat stageLabel="Generation Prompt" fieldLabel="notes" current={d.notes} onResult={(v) => set({ notes: v })} />
         </div>
         <textarea value={d.notes} onChange={(e) => set({ notes: e.target.value })} style={{ width: "100%", minHeight: 50 }} />
