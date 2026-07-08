@@ -95,6 +95,7 @@ where
 
         let text = call_claude(settings, &system, &user, &on_token, cancel.as_ref()).await?;
         let content = build_merged_content(&stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str()))?;
+        let content = enforce_song_key_tempo(&song, &stage.r#type, &content);
 
         let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
         Ok::<RunOutcome, anyhow::Error>(RunOutcome { artifact, raw_output: text })
@@ -164,6 +165,7 @@ Return ONLY the revised result as the single fenced ```json block your skill spe
 
         let text = call_claude(settings, &system, &user, &|_| {}, None).await?;
         let content = build_merged_content(&stage.r#type, &text, Some(&current.content))?;
+        let content = enforce_song_key_tempo(&song, &stage.r#type, &content);
         let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
         Ok::<Artifact, anyhow::Error>(artifact)
     };
@@ -339,7 +341,7 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
          Recurring themes: {themes}\n\
          Current song key/tempo: {root} {mode}, {bpm} BPM\n\
          -----------------------------------------------------------------------\n\
-         Honor the style and themes above. Never name real artists to imitate or quote their lyrics.",
+         PRECEDENCE — the preset vs the song: the preset defines the SOUND (genre, mood, instrumentation, tempo feel, vocal). Its 'Recurring themes' are project defaults ONLY — wherever they conflict with THE SONG's title or the producer's intent below, THE SONG WINS. Do not import scenarios, settings, or props from the preset themes (e.g. driving, cities, roads) into a song whose brief says otherwise. Never name real artists to imitate or quote their lyrics.",
         instructions = skill.instructions,
         name = preset.name, genre = preset.genre, mood = preset.mood, influences = preset.influences,
         ktf = preset.key_tempo_feel, vr = preset.vocal_range, themes = preset.themes,
@@ -367,6 +369,27 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
         ));
     }
     p
+}
+
+/// The SONG owns key/tempo (header pickers, preset-seeded) — stages never do.
+/// A structure regeneration used to overwrite the user's picked key/BPM with the
+/// skill's own choice (user-reported: pickers said F# minor / 100, the regen
+/// reset them to A minor / 138). Deterministic guarantee, freeze-style: splice
+/// the song's current key/bpm into any structure artifact before save and
+/// re-render its text. Skills may only SUGGEST changes in prose notes.
+fn enforce_song_key_tempo(song: &Song, stage_type: &str, content: &str) -> String {
+    if stage_type != "structure" {
+        return content.to_string();
+    }
+    let Ok(mut v) = serde_json::from_str::<Value>(content) else { return content.to_string() };
+    let Some(data) = v.get_mut("data").filter(|d| d.is_object()) else { return content.to_string() };
+    data["key"] = json!({ "root": song.key_root, "mode": song.key_mode });
+    data["bpm"] = json!(song.bpm);
+    let data_owned = data.clone();
+    if let Some(text) = render_stage_text(stage_type, &data_owned) {
+        v["text"] = json!(text);
+    }
+    v.to_string()
 }
 
 fn build_user_prompt(stage_type: &str, prior: &str, later: &str, tech_brief: &str, user_input: Option<&str>, regenerating: bool) -> String {
@@ -1911,6 +1934,42 @@ mod tests {
         let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
         let cprompt = stage_user_prompt(&conn, concept, None).await.unwrap();
         assert!(cprompt.contains(LATER_STAGES_BANNER), "empty stage keeps the derive banner");
+    }
+
+    /// The SONG owns key/tempo: a structure regeneration whose model output
+    /// carries a different key/BPM gets the song's current values spliced back
+    /// (user-reported: pickers said F# minor / 100, regen reset to A minor / 138).
+    #[tokio::test]
+    async fn structure_regen_cannot_override_song_key_tempo() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Key Test").await.unwrap();
+        db::update_song_key(&conn, &song.id, "F#", "minor", 100).await.unwrap();
+        let song = db::get_song(&conn, &song.id).await.unwrap().unwrap();
+
+        // the model proposed its own key/tempo (A minor / 138)
+        let model_out = json!({
+            "kind": "structure",
+            "text": "whatever the model rendered",
+            "data": { "key": {"root": "A", "mode": "minor"}, "bpm": 138,
+                       "keyNote": "A minor carries...", "tempoNote": "138 BPM phonk...",
+                       "sections": [{"type": "verse", "label": "Verse 1", "bars": 8, "role": "open"}] }
+        }).to_string();
+
+        let enforced = enforce_song_key_tempo(&song, "structure", &model_out);
+        let v: Value = serde_json::from_str(&enforced).unwrap();
+        assert_eq!(v["data"]["key"]["root"], "F#", "song key root wins");
+        assert_eq!(v["data"]["key"]["mode"], "minor");
+        assert_eq!(v["data"]["bpm"], 100, "song bpm wins");
+        let text = v["text"].as_str().unwrap();
+        assert!(text.contains("F#") && text.contains("100"), "re-rendered text reflects the song's key/tempo, got: {text}");
+        // notes stay as prose (suggestions allowed there)
+        assert_eq!(v["data"]["keyNote"], "A minor carries...");
+        // non-structure stages pass through untouched
+        assert_eq!(enforce_song_key_tempo(&song, "lyrics", &model_out), model_out);
     }
 
     /// Advance stops at a done-but-STALE stage (user-reported: after generating
