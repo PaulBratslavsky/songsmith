@@ -128,9 +128,29 @@ pub async fn approve_stage(conn: &Connection, stage_id: &str) -> Result<Value> {
     Ok(json!({ "ok": true, "stage_id": stage_id }))
 }
 
+/// Advance to the first stage that NEEDS ATTENTION: pending/in-progress, or
+/// done-but-STALE (an earlier stage has a newer artifact — same rule the
+/// checklist's ⚠ uses, `staleStageIds` in StageChecklist.tsx). Without the
+/// stale check, a lyrics-first import skipped the ⚠-flagged Structure stage:
+/// the UI warned "out of date" while advance hopped straight past it.
 pub async fn advance_song(conn: &Connection, song_id: &str) -> Result<Value> {
-    let stages = db::list_stages(conn, song_id).await?;
-    let next = stages.iter().find(|s| s.status != "done");
+    let stages = db::list_stages(conn, song_id).await?; // ordered by ordinal
+    let mut newest_upstream: Option<String> = None;
+    let mut next: Option<&crate::models::Stage> = None;
+    for s in &stages {
+        let stale = match (&s.artifact_at, &newest_upstream) {
+            (Some(at), Some(up)) => at < up,
+            _ => false,
+        };
+        if next.is_none() && (s.status != "done" || stale) {
+            next = Some(s);
+        }
+        if let Some(at) = &s.artifact_at {
+            if newest_upstream.as_deref().map(|up| at.as_str() > up).unwrap_or(true) {
+                newest_upstream = Some(at.clone());
+            }
+        }
+    }
     if let Some(s) = next {
         db::set_song_current_stage(conn, song_id, &s.r#type).await?;
         Ok(json!({ "current_stage": s.r#type }))

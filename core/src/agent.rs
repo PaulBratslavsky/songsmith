@@ -1798,6 +1798,36 @@ mod tests {
         assert!(prompt.contains("### Structure output"));
     }
 
+    /// Advance stops at a done-but-STALE stage (user-reported: after generating
+    /// Concept on an imported song, advance skipped the ⚠-flagged Structure
+    /// straight to Chords — the UI warned "out of date" while advance hopped it).
+    #[tokio::test]
+    async fn advance_stops_at_stale_backfilled_stage() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let text = "[Verse 1]\nMidnight, the room gone quiet\n\n[Chorus]\nPull me under, make me clean";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Imported", text).await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
+
+        // simulate generating + approving Concept AFTER the import: its artifact
+        // is now newer than the back-filled Structure/Lyrics ones
+        db::save_artifact(&conn, &song.id, Some(&concept.id), "concept",
+            &json!({ "kind": "concept", "text": "A drowning-sacrament song.", "data": null }).to_string(),
+        ).await.unwrap();
+        db::set_stage_status(&conn, &concept.id, "done").await.unwrap();
+
+        let out = crate::tools::advance_song(&conn, &song.id).await.unwrap();
+        assert_eq!(
+            out["current_stage"], "structure",
+            "advance must stop at the stale back-filled Structure, not skip to a pending later stage; got: {out}"
+        );
+    }
+
     /// (1b) A normal forward song's prompt is byte-identical to today: no later
     /// artifacts → no banner, exactly the legacy prompt.
     #[tokio::test]

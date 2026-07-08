@@ -196,7 +196,21 @@ function activeSkill(stageType: string) {
 }
 function advance(songId: string) {
   const stages = db.stages.filter((s: Any) => s.song_id === songId).sort((a: Any, b: Any) => a.ordinal - b.ordinal);
-  const next = stages.find((s: Any) => s.status !== "done") ?? stages[stages.length - 1];
+  // First stage needing ATTENTION: not done, or done-but-STALE (an earlier
+  // stage has a newer artifact) — mirrors core tools::advance_song.
+  const artifactAt = (st: Any) => {
+    const revs = db.artifacts.filter((x: Any) => x.stage_id === st.id).sort((x: Any, y: Any) => y.version - x.version);
+    return revs[0]?.created_at ?? null;
+  };
+  let newestUpstream: string | null = null;
+  let next: Any | null = null;
+  for (const st of stages) {
+    const at = artifactAt(st);
+    const stale = !!at && !!newestUpstream && at < newestUpstream;
+    if (!next && (st.status !== "done" || stale)) next = st;
+    if (at && (!newestUpstream || at > newestUpstream)) newestUpstream = at;
+  }
+  next = next ?? stages[stages.length - 1];
   const v = db.songs.find((x: Any) => x.id === songId);
   if (v && next) { v.current_stage = next.type; v.updated_at = now(); }
   return { current_stage: next?.type };
