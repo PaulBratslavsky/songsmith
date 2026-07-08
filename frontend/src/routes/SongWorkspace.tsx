@@ -292,17 +292,49 @@ export function SongWorkspace() {
           ].filter(Boolean)} />
         ) : showStyle ? (
           <>
-            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            {/* Mirrors core/src/agent.rs::build_system_prompt — the EFFECTIVE context every stage
+                receives: THE SONG (the brief) outranks the preset's themes on story; the preset
+                owns the SOUND; lyric exemplars go to the lyrics stage only. */}
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
               <h3 style={{ margin: 0 }}>Style context</h3>
               <button className="sm ghost" title="close" onClick={() => setShowStyle(false)}>✕</button>
             </div>
-            <div className="col" style={{ gap: 10 }}>
-              {[["Genre", preset.genre], ["Mood", preset.mood], ["Influences", preset.influences], ["Key / tempo", preset.key_tempo_feel], ["Vocal range", preset.vocal_range], ["Themes", preset.themes]].map(([k, val]) => (
-                <div key={k}><label>{k}</label><div className="faint">{val || "—"}</div></div>
-              ))}
+            <p className="faint" style={{ fontSize: 11, marginBottom: 12 }}>what every stage actually receives, in precedence order</p>
+
+            <h3 style={{ color: "var(--accent)", marginBottom: 4 }}>The song — the brief</h3>
+            <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>outranks everything below on story — no stage may drift from it</p>
+            <div className="col" style={{ gap: 10, marginBottom: 14 }}>
+              <div><label style={{ margin: 0 }}>Title</label><div className="faint">{v.title || "—"}</div></div>
+              <div>
+                <label style={{ margin: 0 }}>🎯 Intent</label>
+                <div className="faint">{v.intent.trim() || "none stated — stages honor the title's plain meaning"}</div>
+              </div>
+              <div><label style={{ margin: 0 }}>Key / tempo (song fields)</label><div className="faint">{v.key_root} {v.key_mode} · {String(v.bpm)} BPM</div></div>
             </div>
+
+            <h3 style={{ marginBottom: 4 }}>Style preset — the sound</h3>
+            <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>{preset.name} — genre, mood, instrumentation, tempo feel, vocal</p>
+            <div className="col" style={{ gap: 10, marginBottom: 14 }}>
+              {[["Genre", preset.genre], ["Mood", preset.mood], ["Influences", preset.influences], ["Key / tempo feel", preset.key_tempo_feel], ["Vocal range", preset.vocal_range]].map(([k, val]) => (
+                <div key={k}><label style={{ margin: 0 }}>{k}</label><div className="faint">{val || "—"}</div></div>
+              ))}
+              <div>
+                <label style={{ margin: 0 }}>Themes</label>
+                <div className="faint">{preset.themes || "—"}</div>
+                <div style={{ fontSize: 11, fontStyle: "italic", color: "var(--warn)" }}>defaults only — the song's title/intent win on conflict</div>
+              </div>
+            </div>
+
+            {preset.lyric_exemplars.trim() && (
+              <>
+                <h3 style={{ marginBottom: 4 }}>Lyric exemplars</h3>
+                <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>lyrics stage only — voice calibration, never copied</p>
+                <pre className="faint" style={{ whiteSpace: "pre-wrap", margin: "0 0 14px", fontSize: 12 }}>{preset.lyric_exemplars.trim()}</pre>
+              </>
+            )}
+
             <hr />
-            <p className="faint">Approved outputs from earlier stages carry forward as context to the stage you run. Click a field's 💬 to refine it inline.</p>
+            <p className="faint">Approved outputs from earlier stages carry forward as context to the stage you run. The Lyrics stage also receives a computed technical brief (bars / chords / tempo budgets). Click a field's 💬 to refine it inline.</p>
           </>
         ) : null}
       </aside>
