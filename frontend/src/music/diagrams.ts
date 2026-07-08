@@ -3,6 +3,7 @@
 
 import { NOTE_NAMES } from "./theory";
 import { guitarFretsByName, chordPcsByName, voicedMidisByName, type GuitarShape } from "./engineAdapter";
+import { extractTags, hasTags, stripTags } from "../lib/music/chordpro";
 
 const INK = "#e8e6e0";
 const LINE = "#5f666c";
@@ -173,8 +174,7 @@ export function playAlongSvg(o: { title: string; subtitle: string; instrument: "
   // ---- unique chords across the song (prefer the ones tagged over the lyrics)
   const uniq: string[] = [];
   for (const sec of o.sections) {
-    const tags: string[] = [];
-    for (const line of sec.lyrics) { const re = /\[([^\]]+)\]/g; let m: RegExpExecArray | null; while ((m = re.exec(line))) tags.push(m[1]); }
+    const tags = sec.lyrics.flatMap(extractTags);
     for (const c of (tags.length ? tags : sec.chords)) if (c && !uniq.includes(c)) uniq.push(c);
   }
 
@@ -205,9 +205,9 @@ export function playAlongSvg(o: { title: string; subtitle: string; instrument: "
   // ---- two-column chord-over-lyric body, font sized so the longest line fits a column
   const gutter = 26;
   const colW = (PAGE_W - 2 * margin - gutter) / 2;
-  const hasWords = (l: string) => l.replace(/\[[^\]]+\]/g, "").replace(/\([^)]*\)/g, "").replace(/[^A-Za-z]/g, "").length > 0;
+  const hasWords = (l: string) => stripTags(l).replace(/\([^)]*\)/g, "").replace(/[^A-Za-z]/g, "").length > 0;
   let maxChars = 0;
-  for (const sec of o.sections) for (const line of sec.lyrics) if (hasWords(line)) maxChars = Math.max(maxChars, line.replace(/\[[^\]]+\]/g, "").length);
+  for (const sec of o.sections) for (const line of sec.lyrics) if (hasWords(line)) maxChars = Math.max(maxChars, stripTags(line).length);
   const charW = Math.max(4.2, Math.min(7.0, (colW - 6) / Math.max(maxChars, 30)));
   const fs = +(charW / 0.585).toFixed(1);
   const chFs = Math.max(8, fs - 1);
@@ -222,7 +222,7 @@ export function playAlongSvg(o: { title: string; subtitle: string; instrument: "
     const sung = sec.lyrics.filter(hasWords);
     if (!sung.length && sec.chords.length) { lines.push({ type: "bar", text: "| " + sec.chords.join(" | ") + " |" }); h += lyrH; }
     for (const line of sung) {
-      if (/\[[^\]]+\]/.test(line)) {
+      if (hasTags(line)) {
         let plain = "", last = 0; const marks: { c: string; pos: number }[] = [];
         const re = /\[([^\]]+)\]/g; let mm: RegExpExecArray | null;
         while ((mm = re.exec(line))) { plain += line.slice(last, mm.index); marks.push({ c: mm[1], pos: plain.length }); last = mm.index + mm[0].length; }

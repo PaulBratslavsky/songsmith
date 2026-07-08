@@ -1,19 +1,18 @@
-// Progression Composer (the NEW visual builder) — top-level. Owns the
-// Composition and assembles the Hookpad-style stacked layout: transport,
-// chord palette, then a shared 8-bar timeline with a melody piano-roll,
-// the draggable chord lane, and a bass piano-roll. Span/note mutations go
-// through the pure helpers in spans.ts; this component only wires state to
-// UI.
+// Sketchpad — the visual Composer surface behind the /composer route (the
+// user-facing title stays "Composer"). Owns the Composition and assembles
+// the Hookpad-style stacked layout: transport, chord palette, then a shared
+// timeline with a melody piano-roll, the draggable chord lane, and a bass
+// piano-roll. Span/note mutations go through the pure helpers in spans.ts;
+// this component only wires state to UI.
 //
 // Time is in ticks (sixteenth resolution). A duration picker sets the
 // length of newly-placed chords and notes; everything is draggable and
 // resizable afterwards.
 //
-// NOTE: this is distinct from the chord-section editor in
-// components/Composer.tsx and the /builder Chord Builder. Compositions
-// persist in the libSQL `composition` table (Phase 3): Save serializes the
-// reducer state through CompositionSchema; the library panel reopens rows
-// via parseStoredComposition + the load action (which reidentifies spans).
+// Compositions persist in the libSQL `composition` table (Phase 3): Save
+// serializes the reducer state through CompositionSchema; the library panel
+// reopens rows via parseStoredComposition + the load action (which
+// reidentifies spans).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../ipc/api';
@@ -82,7 +81,7 @@ function demoComposition(id: string): Composition {
   return c;
 }
 
-export function Composer({
+export function Sketchpad({
   initialRoot = 'C',
   initial,
   songId = null,

@@ -48,7 +48,8 @@ import { normalizePitchClass } from '../theory/notes';
 import type { PitchClass, ScaleType } from '../types';
 import { PITCH_CLASSES } from '../types';
 import { deriveSections } from '../../../components/ArrangementBuilder';
-import { parseChordProLine } from '../../../components/LyricsEditor';
+import { parseLine } from '../chordpro';
+import type { ArtifactChord, ChordsData, LyricsData } from '../../artifacts';
 
 const uid = (() => {
   let n = 0;
@@ -91,18 +92,10 @@ export function degreeForChordName(
   return (Math.min(best, 6) + 1) as Degree;
 }
 
-type RawChord = { name: string; beats: number };
-
-/** Read a chords-stage section's chords as {name, beats}, tolerating
- *  both the {name,beats} object shape and a plain string array. */
-function readChords(sec: any): RawChord[] {
-  const arr = Array.isArray(sec?.chords) ? sec.chords : [];
-  return arr
-    .map((c: any) => ({
-      name: typeof c === 'string' ? c : (c?.name ?? ''),
-      beats: typeof c === 'object' && c?.beats ? Number(c.beats) : 4,
-    }))
-    .filter((c: RawChord) => c.name);
+/** A chords-stage section's playable chords (already normalized to
+ *  {name, beats} by lib/artifacts); entries without a name are skipped. */
+function readChords(sec: { chords: ArtifactChord[] }): ArtifactChord[] {
+  return sec.chords.filter((c) => c.name);
 }
 
 /**
@@ -120,14 +113,14 @@ function readChords(sec: any): RawChord[] {
 export function compositionFromSong(
   keyRoot: string,
   keyMode: string,
-  chordsData: any,
-  lyricsData: any,
+  chordsData: ChordsData | null,
+  lyricsData: LyricsData | null,
   opts: { id?: string; name?: string; bpm?: number } = {},
 ): Composition {
   const root: PitchClass = normalizePitchClass(keyRoot) ?? 'C';
   const mode: KeyMode = keyMode === 'major' ? 'major' : 'minor';
 
-  const cSecs: any[] = Array.isArray(chordsData?.sections) ? chordsData.sections : [];
+  const cSecs = chordsData?.sections ?? [];
 
   // Section label → lyric lines, from the Sheet-preview's own alignment
   // (deriveSections), so the Composer lyric sheet matches the Sheet. Each
@@ -137,7 +130,7 @@ export function compositionFromSong(
   const lyricLinesByLabel = new Map<string, LyricWord[][]>();
   for (const d of derived) {
     const lines = d.lyrics
-      .map((l) => parseChordProLine(l).filter((w) => w.text || w.chord))
+      .map((l) => parseLine(l).filter((w) => w.text || w.chord))
       .filter((words) => words.some((w) => w.text.trim().length > 0));
     lyricLinesByLabel.set(d.label, lines);
   }
@@ -159,7 +152,7 @@ export function compositionFromSong(
   };
 
   for (const sec of cSecs) {
-    const label: string = sec.label || sec.type || 'Section';
+    const label: string = sec.label || 'Section';
     const raw = readChords(sec);
     const lines = lyricLinesByLabel.get(label) ?? [];
 
@@ -288,6 +281,25 @@ export function compositionFromSong(
           ? sectionStart + Math.round((i * sectionLength) / lines.length)
           : (chordStarts[i] ?? sectionStart);
       pushLine(anchor, words);
+    });
+  }
+
+  // ---- Lyric-only sections (they exist in the Lyrics stage but the Chords
+  // stage — the section spine — never got them, e.g. a Bridge written only
+  // in the lyrics). BACKLOG decision (2026-07-07): INCLUDE them — a section
+  // band with NO chord spans, one bar per lyric line (min one bar), the
+  // lines anchored evenly across it. Playback simply has no chords there;
+  // the sheet still shows the section chip and its (chordless) lines.
+  const chordLabels = new Set(cSecs.map((sec) => sec.label || 'Section'));
+  for (const d of derived) {
+    if (chordLabels.has(d.label)) continue;
+    const lines = lyricLinesByLabel.get(d.label) ?? [];
+    const sectionStart = tick;
+    const lengthTicks = Math.max(1, lines.length) * TICKS_PER_BAR;
+    sections.push({ id: uid('sec'), name: d.label, startTick: sectionStart, lengthTicks });
+    tick += lengthTicks;
+    lines.forEach((words, i) => {
+      pushLine(sectionStart + Math.round((i * lengthTicks) / lines.length), words);
     });
   }
 

@@ -2,81 +2,29 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type ParsedLyrics } from "../ipc/api";
 import { FieldChat } from "./FieldChat";
+import { parseArtifact, type ChordsData } from "../lib/artifacts";
+import {
+  parseLine as parseChordProLine,
+  toLine as lineToChordPro,
+  spreadChords as autoPlaceSection,
+  type Word,
+} from "../lib/music/chordpro";
 
-// ChordPro model: a lyric line is a sequence of words, each optionally carrying
-// a chord that lands on its first syllable. Stored back as inline "[C]word" text
-// so the chord is anchored to the word and stays aligned when lyrics are edited.
-type Word = { text: string; chord?: string };
+/** @deprecated compat re-export — import from lib/music/chordpro instead. */
+export { parseLine as parseChordProLine } from "../lib/music/chordpro";
+
+// ChordPro model (see lib/music/chordpro): a lyric line is a sequence of words,
+// each optionally carrying a chord that lands on its first syllable. Stored
+// back as inline "[C]word" text so the chord stays anchored to its word.
 type Section = { label: string; lines: Word[][]; frozen?: boolean };
-
-// Preserve chord names exactly as authored — do NOT auto-sharpen. Flats are often
-// the musically-correct spelling (e.g. Bb = bII Neapolitan in A minor), and the
-// AI's qualities (Am(add9), "Bb (ghost)") carry intent. Mangling them also caused
-// false "doesn't match Lyrics" warnings in the Generation Prompt.
-const TOKEN_RE = /\[([^\]]+)\]|(\S+)/g;
-/** Parse a ChordPro line ("[Dm]The dashboard [Bb]glows") into words+chords.
- *  Exported: compositionFromSong reuses it to thread word-level chord
- *  anchors into the Composer's lyric sheet (same parse, no duplication). */
-export function parseChordProLine(s: string): Word[] {
-  const words: Word[] = [];
-  let pending: string | undefined;
-  let m: RegExpExecArray | null;
-  TOKEN_RE.lastIndex = 0;
-  while ((m = TOKEN_RE.exec(s))) {
-    if (m[1] != null) pending = m[1].trim();
-    else { words.push({ text: m[2], chord: pending }); pending = undefined; }
-  }
-  if (pending) words.push({ text: "", chord: pending }); // trailing chord, no word
-  return words;
-}
-/** Serialise words back to a ChordPro line. */
-function lineToChordPro(words: Word[]): string {
-  return words.map((w) => (w.chord ? `[${w.chord}]` : "") + w.text).join(" ").trim();
-}
-
-/** Spread a section's chord progression across its lyric lines as a first draft:
- *  chords are split across non-empty lines proportionally, then dropped on
- *  evenly-spaced words within each line. Mutates the lines in place. */
-function autoPlaceSection(lines: Word[][], progression: string[]): void {
-  for (const line of lines) for (const w of line) w.chord = undefined; // start clean
-  if (!progression.length) return;
-  const neIdx = lines.map((l, i) => (l.some((w) => w.text) ? i : -1)).filter((i) => i >= 0);
-  const neCount = neIdx.length;
-  if (!neCount) return;
-  const perLine: string[][] = Array.from({ length: neCount }, () => []);
-  progression.forEach((name, j) => { perLine[Math.min(neCount - 1, Math.floor((j * neCount) / progression.length))].push(name); });
-  neIdx.forEach((li, k) => {
-    const line = lines[li];
-    const my = perLine[k];
-    const wordIdx = line.map((w, i) => (w.text ? i : -1)).filter((i) => i >= 0);
-    if (!wordIdx.length) return;
-    my.forEach((name, m) => {
-      const at = wordIdx[my.length === 1 ? 0 : Math.min(wordIdx.length - 1, Math.round((m * (wordIdx.length - 1)) / (my.length - 1)))];
-      line[at].chord = name;
-    });
-  });
-}
-
-function parse(content: string): { text: string; data: any } {
-  try {
-    const v = JSON.parse(content);
-    if (v && typeof v === "object" && "text" in v) return { text: v.text ?? "", data: v.data ?? null };
-    return { text: content, data: v };
-  } catch {
-    return { text: content, data: null };
-  }
-}
 
 /** The words this stage holds, keyed by section label (parsed from inline ChordPro). */
 function wordsByLabel(content: string): Record<string, Word[][]> {
-  const { text, data } = parse(content);
+  const { text, data } = parseArtifact("lyrics", content);
   const out: Record<string, Word[][]> = {};
-  const secs = data?.sections;
-  if (Array.isArray(secs) && secs.length) {
-    for (const s of secs) {
-      const label = s.label || s.type || "Section";
-      const raw: string[] = Array.isArray(s.lines) ? s.lines : typeof s.text === "string" ? s.text.split("\n") : [];
-      out[label] = raw.map(parseChordProLine);
+  if (data?.sections.length) {
+    for (const s of data.sections) {
+      out[s.label || "Section"] = s.lines.map(parseChordProLine);
     }
   } else if (text) {
     out["Lyrics"] = text.split("\n").map(parseChordProLine);
@@ -85,11 +33,11 @@ function wordsByLabel(content: string): Record<string, Word[][]> {
 }
 
 /** Each section's chord progression (from the Chords stage), keyed by label. */
-function progressionsByLabel(chordsData: any): Record<string, string[]> {
+function progressionsByLabel(chordsData: ChordsData | null | undefined): Record<string, string[]> {
   const map: Record<string, string[]> = {};
   for (const s of chordsData?.sections ?? []) {
-    const lbl = s.label || s.type; if (!lbl) continue;
-    map[lbl] = (s.chords ?? []).map((c: any) => (typeof c === "string" ? c : c?.name)).filter(Boolean);
+    if (!s.label) continue;
+    map[s.label] = s.chords.map((c) => c.name).filter(Boolean);
   }
   return map;
 }
@@ -101,16 +49,15 @@ function progressionsByLabel(chordsData: any): Record<string, string[]> {
  *  matches the export — without needing a manual "auto-place + save". */
 /** Which of this stage's own sections are frozen (locked), keyed by label. */
 function frozenByLabel(content: string): Record<string, boolean> {
-  const { data } = parse(content);
+  const { data } = parseArtifact("lyrics", content);
   const out: Record<string, boolean> = {};
   for (const s of data?.sections ?? []) {
-    const label = s.label || s.type || "Section";
-    if (s.frozen === true) out[label] = true;
+    if (s.frozen === true) out[s.label || "Section"] = true;
   }
   return out;
 }
 
-function buildSections(content: string, chordsData: any): Section[] {
+function buildSections(content: string, chordsData: ChordsData | null | undefined): Section[] {
   const byLabel = wordsByLabel(content);
   const frozen = frozenByLabel(content);
   const prog = progressionsByLabel(chordsData);
@@ -123,7 +70,7 @@ function buildSections(content: string, chordsData: any): Section[] {
     out.push({ label, lines, ...(frozen[label] ? { frozen: true } : {}) });
   };
   for (const cs of chordsData?.sections ?? []) {
-    const label = cs.label || cs.type;
+    const label = cs.label;
     if (!label || seen.has(label)) continue;
     seen.add(label);
     add(label, byLabel[label] ?? []);
@@ -225,7 +172,7 @@ export function LyricsEditor({
 }: {
   songId: string; stageId: string; kind: string; artifactId: string; content: string; onChanged: () => void;
   /** the Chords stage data — drives each section's chord palette */
-  chordsData?: any;
+  chordsData?: ChordsData | null;
 }) {
   const [sections, setSections] = useState<Section[]>(() => buildSections(content, chordsData));
   const [dirty, setDirty] = useState(false);
@@ -237,16 +184,9 @@ export function LyricsEditor({
   const hasFrozen = useMemo(() => Object.keys(frozenByLabel(content)).length > 0, [content]);
 
   // per-section chord palette from the Chords stage (label-matched), plus all-song fallback
-  const paletteBySection = useMemo(() => {
-    const map: Record<string, string[]> = {};
-    for (const s of chordsData?.sections ?? []) {
-      const lbl = s.label || s.type; if (!lbl) continue;
-      map[lbl] = (s.chords ?? []).map((c: any) => (typeof c === "string" ? c : c?.name)).filter(Boolean);
-    }
-    return map;
-  }, [chordsData]);
+  const paletteBySection = useMemo(() => progressionsByLabel(chordsData), [chordsData]);
   // rebuild the spine when a new revision loads or the Chords stage's sections change
-  const chordsSig = useMemo(() => (chordsData?.sections ?? []).map((s: any) => `${s.label || s.type}:${(s.chords ?? []).length}`).join("|"), [chordsData]);
+  const chordsSig = useMemo(() => (chordsData?.sections ?? []).map((s) => `${s.label}:${s.chords.length}`).join("|"), [chordsData]);
   useEffect(() => { if (!dirty) setSections(buildSections(content, chordsData)); }, [artifactId, chordsSig]); // eslint-disable-line react-hooks/exhaustive-deps
   const allChords = useMemo(() => {
     const set: string[] = [];
@@ -362,7 +302,7 @@ export function LyricsEditor({
             />
           ) : (
             <>
-              <div className="row cp-palette" style={{ gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
+              <div className="row" style={{ gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
                 {paletteFor(sec.label).map((c) => (
                   <button key={c} className={"sm" + (sel === c ? " primary" : "")} onClick={() => setSel((p) => (p === c ? "" : c))}>{c}</button>
                 ))}

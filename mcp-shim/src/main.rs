@@ -6,12 +6,17 @@
 //! registry over MCP's JSON-RPC stdio transport — so Claude drives exactly the
 //! same tools the UI and the in-app agent loop do.
 //!
+//! Concurrency: every `tools/call` is dispatched on its own task, so a long
+//! `run_stage` never blocks `ping`/`tools/list`/other calls (responses may
+//! return out of order — valid JSON-RPC, matched by id). All stdout writes go
+//! through ONE writer task fed by a channel, so response lines never interleave.
+//!
 //! The DB path comes from `SONGSMITH_DB` (the app writes this into the MCP
 //! config it generates), falling back to the default app-data location.
 
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
 use song_core::{db, tools};
+use tokio::io::AsyncBufReadExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,12 +26,24 @@ async fn main() -> anyhow::Result<()> {
     // for the lock instead of surfacing "database is locked" as raw tool errors
     let conn = db::connect(&database).await?;
 
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    // The single stdout writer: every response is one full JSON line, written
+    // and flushed by this task alone — concurrent tool tasks can't interleave.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let writer = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        while let Some(resp) = rx.blocking_recv() {
+            let Ok(line) = serde_json::to_string(&resp) else { continue };
+            if writeln!(out, "{line}").is_err() {
+                break; // client hung up
+            }
+            let _ = out.flush();
+        }
+    });
 
-    for line in stdin.lock().lines() {
-        let line = line?;
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
@@ -39,41 +56,54 @@ async fn main() -> anyhow::Result<()> {
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
         // Notifications (no id) get no response.
-        let response = match method {
-            "initialize" => Some(reply(id, json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "songsmith-studio", "version": "0.1.0" }
-            }))),
+        match method {
+            "initialize" => {
+                let _ = tx.send(reply(id, json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "songsmith-studio", "version": "0.1.0" }
+                })));
+            }
             "tools/list" => {
                 let list: Vec<Value> = tools::registry().iter().map(|t| json!({
                     "name": t.name,
                     "description": t.description,
                     "inputSchema": t.input_schema,
                 })).collect();
-                Some(reply(id, json!({ "tools": list })))
+                let _ = tx.send(reply(id, json!({ "tools": list })));
             }
+            // Each call runs on its own task so a long run_stage can't block
+            // the loop; the response channel serializes the actual writes.
             "tools/call" => {
-                let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let settings = db::get_settings(&conn).await.unwrap_or_default();
-                match tools::dispatch(&conn, &settings, name, &args).await {
-                    Ok(result) => Some(reply(id, json!({
-                        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
-                    }))),
-                    Err(e) => Some(error(id, -32000, &e.to_string())),
-                }
+                let conn = conn.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                    let settings = db::get_settings(&conn).await.unwrap_or_default();
+                    let resp = match tools::dispatch(&conn, &settings, &name, &args).await {
+                        Ok(result) => reply(id, json!({
+                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+                        })),
+                        Err(e) => error(id, -32000, &e.to_string()),
+                    };
+                    let _ = tx.send(resp);
+                });
             }
-            "ping" => Some(reply(id, json!({}))),
-            _ if id.is_some() => Some(error(id, -32601, "method not found")),
-            _ => None,
-        };
-
-        if let Some(resp) = response {
-            writeln!(out, "{}", serde_json::to_string(&resp)?)?;
-            out.flush()?;
+            "ping" => {
+                let _ = tx.send(reply(id, json!({})));
+            }
+            _ if id.is_some() => {
+                let _ = tx.send(error(id, -32601, "method not found"));
+            }
+            _ => {}
         }
     }
+
+    // stdin closed: drop our sender; in-flight tool tasks keep their clones, so
+    // the writer drains every remaining response before exiting.
+    drop(tx);
+    let _ = writer.await;
     Ok(())
 }
 

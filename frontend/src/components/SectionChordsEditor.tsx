@@ -9,6 +9,7 @@ import { isValidName, chordMidisByName, chordPcsByName, voicedMidisByName, voice
 import { pianoVoicedSvg } from "../music/diagrams";
 import { playChord, playSequence } from "../music/synth";
 import { ImportProgression } from "./ImportProgression";
+import type { ChordsData } from "../lib/artifacts";
 
 const INV_LABELS = ["root", "1st inv", "2nd inv", "3rd inv", "4th inv"];
 
@@ -42,19 +43,14 @@ function Sortable({ id, children }: { id: string; children: (handle: Record<stri
 
 const uid = () => Math.random().toString(36).slice(2, 8);
 
-function fromData(data: any): Section[] {
-  const secs = data?.sections;
-  if (!Array.isArray(secs)) return [];
-  return secs.map((s: any) => ({
+function fromData(data: ChordsData | null): Section[] {
+  if (!data) return [];
+  return data.sections.map((s) => ({
     id: uid(),
-    label: s.label || s.type || "Section",
+    label: s.label || "Section",
     feel: s.feel,
     frozen: s.frozen === true,
-    chords: (Array.isArray(s.chords) ? s.chords : []).map((c: any) => ({
-      id: uid(),
-      name: typeof c === "string" ? c : c?.name ?? "",
-      beats: typeof c === "object" && c?.beats ? c.beats : 4,
-    })),
+    chords: s.chords.map((c) => ({ id: uid(), name: c.name, beats: c.beats })),
   }));
 }
 function toData(sections: Section[]) {
@@ -62,11 +58,14 @@ function toData(sections: Section[]) {
   return { sections: sections.map((s) => ({ label: s.label, feel: s.feel, ...(s.frozen ? { frozen: true } : {}), chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })) })) };
 }
 
-export function Composer({
+/** Per-section chord editor for the CHORDS STAGE (labels, chords+beats,
+ *  🔒 freeze, drag-reorder, key check) — distinct from the visual timeline
+ *  Sketchpad (components/compose/Sketchpad.tsx) behind the /composer route. */
+export function SectionChordsEditor({
   songId, stageId, kind, artifactId, keyRoot, keyMode, initialData, onChanged,
 }: {
   songId: string; stageId: string; kind: string; artifactId: string;
-  keyRoot: string; keyMode: string; initialData: any; onChanged: () => void;
+  keyRoot: string; keyMode: string; initialData: ChordsData | null; onChanged: () => void;
 }) {
   const [sections, setSections] = useState<Section[]>(() => fromData(initialData));
   const [selected, setSelected] = useState<{ s: number; c: number } | null>(null);

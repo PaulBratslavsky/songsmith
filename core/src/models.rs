@@ -112,7 +112,6 @@ pub struct Skill {
 pub struct Settings {
     pub claude_model: String,
     pub claude_bin: String,
-    pub mcp_token: String,
     /// JSON for an extra MCP server (e.g. Ableton) merged into the chat config —
     /// `{"command":"uvx","args":["ableton-mcp"]}` or `{"url":"http://..."}`. Empty = off.
     pub ableton_mcp: String,
@@ -127,7 +126,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { claude_model: String::new(), claude_bin: String::new(), mcp_token: String::new(), ableton_mcp: String::new(), music_folder: String::new(), analyzer_cmd: String::new() }
+        Settings { claude_model: String::new(), claude_bin: String::new(), ableton_mcp: String::new(), music_folder: String::new(), analyzer_cmd: String::new() }
     }
 }
 

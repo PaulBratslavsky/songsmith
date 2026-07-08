@@ -6,8 +6,8 @@ type Msg = { role: "user" | "assistant"; text: string; tools: string[] };
 
 /**
  * Chat with Claude (your Claude Code subscription) running headless with this
- * app's MCP server attached — so Claude can read and update the production
- * workflow (presets, videos, stages, artifacts) as you talk. This is the
+ * app's MCP server attached — so Claude can read and update the songwriting
+ * workflow (style presets, songs, stages, artifacts) as you talk. This is the
  * harness: Claude is the engine, the app is the cockpit.
  */
 export function ChatPanel({ songId }: { songId?: string }) {
@@ -129,8 +129,8 @@ export function ChatPanel({ songId }: { songId?: string }) {
       <div className="chat-log" ref={scrollRef}>
         {messages.length === 0 && (
           <div className="empty">
-            Ask Claude to drive your workflow — e.g. “list my videos”, “start the Idea stage for the
-            Coding channel”, or “draft the Holy Trifecta and save it”.
+            Ask Claude to drive your songwriting — e.g. “list my songs”, “run the Concept stage for
+            Night Drive”, or “rewrite the chorus with a darker image and save it”.
           </div>
         )}
         {messages.map((m, i) => (

@@ -2,16 +2,12 @@ import { useMemo } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../ipc/api";
-import { Composer } from "../components/compose/Composer";
+import { Sketchpad } from "../components/compose/Sketchpad";
 import { compositionFromSong } from "../lib/music/compose/compositionFromSong";
 import type { Composition } from "../lib/music/compose/types";
 import type { PitchClass } from "../lib/music/types";
 import { normalizePitchClass } from "../lib/music/theory/notes";
-
-function dataOf(content: string | undefined | null): any {
-  if (!content) return null;
-  try { return JSON.parse(content)?.data ?? null; } catch { return null; }
-}
+import { parseArtifact } from "../lib/artifacts";
 
 /** Read the `?song=<id>` search param (no route schema needed). */
 function useSongParam(): string | null {
@@ -55,9 +51,9 @@ function useSongComposition(songId: string | null): {
   const comp = useMemo<Composition | null>(() => {
     if (!songId || !song.data || !stagesSettled) return null;
     const v = song.data.song;
-    const cd = dataOf(chords.data?.artifact?.content);
-    const ld = dataOf(lyrics.data?.artifact?.content);
-    if (!cd?.sections?.length) return null;
+    const cd = parseArtifact("chords", chords.data?.artifact?.content).data;
+    const ld = parseArtifact("lyrics", lyrics.data?.artifact?.content).data;
+    if (!cd?.sections.length) return null;
     return compositionFromSong(v.key_root, v.key_mode, cd, ld, {
       id: `song-${songId}`,
       name: v.title || "Imported song",
@@ -100,7 +96,7 @@ export function ComposerRoute() {
           This song has no chords yet — run the <b>Chords</b> stage first, then open it in the Composer.
         </div>
       ) : (
-        <Composer key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} />
+        <Sketchpad key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} />
       )}
     </div>
   );

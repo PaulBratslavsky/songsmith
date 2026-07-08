@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { FieldChat } from "./FieldChat";
+import { stripTags } from "../lib/music/chordpro";
 
 export type PromptData = { stylePrompt: string; taggedLyrics: string; notes: string };
 
@@ -26,7 +27,7 @@ export function promptToMarkdown(d: PromptData): string {
 
 // compare the WORDS that get sung — ignore chord-tag spelling/quality differences
 // (Bb vs A#, Am vs Am(add9)) so only a real lyric-text mismatch warns.
-const wordsOnly = (s: string) => s.replace(/\[[^\]]*\]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+const wordsOnly = (s: string) => stripTags(s).replace(/\s+/g, " ").trim().toLowerCase();
 
 export function PromptEditor({
   songId, stageId, kind, content, onChanged, lyricsTagged,

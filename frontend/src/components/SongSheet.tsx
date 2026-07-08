@@ -6,13 +6,10 @@ import { pitchClassOf } from "../music/theory";
 import { playAlongSvg, downloadPng, pngBytes, diagramSvgShape, pianoVoicedSvg } from "../music/diagrams";
 import { guitarCountByName, guitarFretsByName, chordSizeByName, voicedMidisByName } from "../music/engineAdapter";
 import { deriveSections } from "./ArrangementBuilder";
+import { parseArtifact } from "../lib/artifacts";
+import { extractTags } from "../lib/music/chordpro";
 
 const INV_LABELS = ["root", "1st inv", "2nd inv", "3rd inv", "4th inv"];
-
-function dataOf(content: string | undefined): any {
-  if (!content) return null;
-  try { return JSON.parse(content)?.data ?? null; } catch { return null; }
-}
 
 function parseVoicings(json: string): Record<string, number> {
   try { return JSON.parse(json || "{}"); } catch { return {}; }
@@ -35,7 +32,10 @@ export function SongSheet({
 
   // section model derived from the editable Chords + Lyrics artifacts (Builder tab)
   const sections = useMemo(
-    () => deriveSections(dataOf(chords.data?.artifact?.content), dataOf(lyrics.data?.artifact?.content)),
+    () => deriveSections(
+      parseArtifact("chords", chords.data?.artifact?.content).data,
+      parseArtifact("lyrics", lyrics.data?.artifact?.content).data,
+    ),
     [chords.data, lyrics.data],
   );
 
@@ -43,8 +43,7 @@ export function SongSheet({
   const uniqueChords = useMemo(() => {
     const set: string[] = [];
     for (const sec of sections) {
-      const tags: string[] = [];
-      for (const line of sec.lyrics) { const re = /\[([^\]]+)\]/g; let m: RegExpExecArray | null; while ((m = re.exec(line))) tags.push(m[1]); }
+      const tags = sec.lyrics.flatMap(extractTags);
       for (const c of (tags.length ? tags : sec.chords)) if (c && !set.includes(c)) set.push(c);
     }
     return set;

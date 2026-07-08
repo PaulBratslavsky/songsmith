@@ -4,67 +4,36 @@ import { api } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
 import { pitchClassOf } from "../music/theory";
 import { playAlongSvg } from "../music/diagrams";
-import { Composer } from "./Composer";
+import { SectionChordsEditor } from "./SectionChordsEditor";
 import { LyricsEditor } from "./LyricsEditor";
-
-function dataOf(content: string | undefined): any {
-  if (!content) return null;
-  try { return JSON.parse(content)?.data ?? null; } catch { return null; }
-}
-
-/** Insert [chord] tags before evenly-spaced words of a line (in order). */
-function placeChordsOnLine(text: string, names: string[]): string {
-  if (!names.length) return text;
-  const toks = text.split(/(\s+)/);
-  const wordIdx: number[] = [];
-  toks.forEach((t, i) => { if (t.trim()) wordIdx.push(i); });
-  if (!wordIdx.length) return `${names.map((n) => `[${n}]`).join("")}${text}`;
-  const atWord: Record<number, string[]> = {};
-  names.forEach((name, k) => {
-    const w = wordIdx[names.length === 1 ? 0 : Math.min(wordIdx.length - 1, Math.round((k * (wordIdx.length - 1)) / (names.length - 1)))];
-    (atWord[w] ??= []).push(name);
-  });
-  return toks.map((t, i) => (atWord[i] ? atWord[i].map((n) => `[${n}]`).join("") + t : t)).join("");
-}
+import { parseArtifact, type ChordsData, type LyricsData } from "../lib/artifacts";
+import { hasTags, parseLine, spreadChords, toLine } from "../lib/music/chordpro";
 
 /** Build the sheet's sections from the (editable) Chords + Lyrics artifacts.
  *  The section's chord sequence is spread across its lyric lines (proportionally),
  *  with multiple chords per line placed over evenly-spaced words when needed. */
-export function deriveSections(chordsData: any, lyricsData: any): { label: string; chords: string[]; lyrics: string[] }[] {
-  const cSecs: any[] = chordsData?.sections ?? [];
-  const lSecs: any[] = lyricsData?.sections ?? [];
+export function deriveSections(chordsData: ChordsData | null, lyricsData: LyricsData | null): { label: string; chords: string[]; lyrics: string[] }[] {
+  const cSecs = chordsData?.sections ?? [];
+  const lSecs = lyricsData?.sections ?? [];
   const labels: string[] = [];
-  [...cSecs, ...lSecs].forEach((s) => { const l = s.label || s.type; if (l && !labels.includes(l)) labels.push(l); });
+  [...cSecs, ...lSecs].forEach((s) => { const l = s.label; if (l && !labels.includes(l)) labels.push(l); });
   return labels.map((label) => {
-    const c = cSecs.find((s) => (s.label || s.type) === label);
-    const l = lSecs.find((s) => (s.label || s.type) === label);
-    const names: string[] = Array.isArray(c?.chords)
-      ? c.chords.map((ch: any) => (typeof ch === "string" ? ch : ch?.name ?? "")).filter(Boolean)
-      : [];
-    const lines: string[] = Array.isArray(l?.lines) ? l.lines : typeof l?.text === "string" ? l.text.split("\n") : [];
+    const c = cSecs.find((s) => s.label === label);
+    const l = lSecs.find((s) => s.label === label);
+    const names: string[] = c ? c.chords.map((ch) => ch.name).filter(Boolean) : [];
+    const lines: string[] = l?.lines ?? [];
 
     // ChordPro: if the lyrics already carry inline [chord] tags, they hold the
     // exact, user-placed positions — render them as-is (no lossy spreading).
-    if (lines.some((x) => /\[[^\]]+\]/.test(x))) {
+    if (lines.some(hasTags)) {
       return { label, chords: names, lyrics: lines };
     }
+    if (!names.length) return { label, chords: names, lyrics: lines };
 
-    // legacy fallback: assign each chord to a lyric line proportionally, then place within the line
-    const neCount = lines.filter((x) => x.trim()).length;
-    const perLine: string[][] = Array.from({ length: Math.max(1, neCount) }, () => []);
-    if (names.length && neCount) {
-      names.forEach((name, j) => {
-        const li = Math.min(neCount - 1, Math.floor((j * neCount) / names.length));
-        perLine[li].push(name);
-      });
-    }
-    let neIdx = 0;
-    const tagged = lines.map((line) => {
-      if (!line.trim()) return line;
-      const my = perLine[neIdx] ?? []; neIdx++;
-      return names.length ? placeChordsOnLine(line, my) : line;
-    });
-    return { label, chords: names, lyrics: tagged };
+    // legacy fallback: the ONE auto-place (same spread the Lyrics editor's ⚡ uses)
+    const words = lines.map(parseLine);
+    spreadChords(words, names);
+    return { label, chords: names, lyrics: words.map(toLine) };
   });
 }
 
@@ -84,8 +53,8 @@ export function ArrangementBuilder({
     qc.invalidateQueries({ queryKey: ["song", songId] });
   };
 
-  const cd = dataOf(chords.data?.artifact?.content);
-  const ld = dataOf(lyrics.data?.artifact?.content);
+  const cd = parseArtifact("chords", chords.data?.artifact?.content).data;
+  const ld = parseArtifact("lyrics", lyrics.data?.artifact?.content).data;
   const preview = useMemo(
     () => playAlongSvg({ title, subtitle, instrument: "guitar", rootPc: pitchClassOf(keyRoot) ?? 0, mode: keyMode === "major" ? "major" : "minor", sections: deriveSections(cd, ld) }),
     [cd, ld, title, subtitle, keyRoot, keyMode],
@@ -101,7 +70,7 @@ export function ArrangementBuilder({
             <h3 style={{ marginBottom: 6 }}>Chords</h3>
             <p className="faint" style={{ margin: "0 0 8px" }}>Edit per section to match what Suno produced. One chord lands on the start of each lyric line.</p>
             {cArt ? (
-              <Composer songId={songId} stageId={chordsStage!.id} kind={cArt.kind} artifactId={cArt.id} keyRoot={keyRoot} keyMode={keyMode} initialData={cd} onChanged={invalidate} />
+              <SectionChordsEditor songId={songId} stageId={chordsStage!.id} kind={cArt.kind} artifactId={cArt.id} keyRoot={keyRoot} keyMode={keyMode} initialData={cd} onChanged={invalidate} />
             ) : <div className="banner">Run the <b>Chords</b> stage in Workspace first.</div>}
           </div>
           <div>

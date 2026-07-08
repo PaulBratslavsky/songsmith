@@ -1,13 +1,20 @@
 # Backlog (small queued items — canonical, committed)
 
-- **Seed new songs' key/BPM from the style preset** (user, 2026-07-07 — approved "yes"): a new song
-  under a preset currently gets default key/BPM; the preset's `key_tempo_feel` is prose-only. Parse a
-  key + BPM out of `key_tempo_feel` (or add structured fields to StylePreset) and use them as the new
-  song's defaults, so e.g. "Sinister Memphis Phonk" (F minor, ~135–145) doesn't silently produce
-  A-minor/120 songs. Song-level fields keep overriding the preset after creation.
-- **Bridge sections that exist only in the lyrics don't appear on the Composer timeline**
-  (pre-existing; noted during sheet v3). The Chords stage is the section spine — decide whether
-  lyric-only sections should get a chordless band on the timeline.
-- **Remaining audit Tier-2** (docs/AUDIT-2026-07-06.md): CommandMap api/mock parity, zod artifact
-  schemas, prompt consolidation (refine_field lacks song context), move Ableton/MIDI logic into core,
-  agent.rs module split, serial MCP shim, dead code/rename hygiene (Tier-3).
+- ✅ DONE (2026-07-07, Rust backlog batch) **Seed new songs' key/BPM from the style preset** (user,
+  2026-07-07 — approved "yes"): `core/src/db.rs` now has a pure `parse_key_tempo(feel)` (first
+  explicit key mention wins; BPM ranges → rounded midpoint) and `db::create_song` seeds
+  key_root/key_mode/bpm from the preset's `key_tempo_feel` when parseable (all creators inherit it;
+  composition/reference imports still override with their explicit key right after). Mock parity in
+  `frontend/src/ipc/mockApi.ts` (`parseKeyTempo`). Unit tests: `parse_key_tempo_real_world_strings`,
+  `create_song_seeds_key_bpm_from_preset_feel`. Song-level fields keep overriding after creation.
+- ✅ DONE (2026-07-07, frontend backlog batch) **Bridge sections that exist only in the lyrics
+  don't appear on the Composer timeline** (pre-existing; noted during sheet v3). Decision: INCLUDE
+  them — `compositionFromSong` now appends a chordless section band for each lyric-only section
+  (length = max(1 bar, one bar per lyric line), lines anchored evenly across it; no chord spans, so
+  playback is simply silent there). The lyric sheet shows its chip + chordless lines as before.
+- **Remaining audit Tier-2** (docs/AUDIT-2026-07-06.md): prompt consolidation (refine_field lacks
+  song context). Done 2026-07-07 (Rust backlog batch): move Ableton/MIDI logic into core (#10),
+  agent.rs module split (#11), serial MCP shim + dead token deleted (#13). Done 2026-07-07
+  (frontend backlog batch): CommandMap api/mock parity (#7), zod artifact schemas in
+  `lib/artifacts.ts` (#8), Composer/Builder rename (#14), frontend dead-code sweep (#15), ChordPro
+  consolidation into `lib/music/chordpro.ts` (#16, partial) — see the audit annotations.

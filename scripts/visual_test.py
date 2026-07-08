@@ -103,7 +103,7 @@ def main():
 
             pg.click("text=Library"); pg.wait_for_timeout(300)
             pg.click("text=Cyber Dreams"); pg.wait_for_timeout(500)
-            pg.click("text=Builder / manage"); pg.wait_for_timeout(700)
+            pg.click("text=Arrange"); pg.wait_for_timeout(700)
             pg.screenshot(path=f"{OUT}/builder-manage.png", full_page=True)
 
             # workspace: stage nav now lives in the sidebar (.song-nav), editor full-width

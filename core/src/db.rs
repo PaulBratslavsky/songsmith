@@ -225,6 +225,116 @@ pub async fn update_preset(conn: &Connection, id: &str, p: StyleInput) -> Result
 
 // ---- Songs & stages --------------------------------------------------------
 
+/// Parse a key (root + mode) and a BPM out of a style preset's free-prose
+/// `key_tempo_feel`, so new songs can seed from the preset instead of always
+/// defaulting to A minor / 120. Pure and best-effort:
+/// - key: the FIRST explicit key mention wins — an uppercase note letter
+///   (optional #/b/♯/♭) immediately followed by a major/maj/minor/min word
+///   ("F minor", "A min", "Dark minor key (F minor / …)" → F minor). The
+///   uppercase requirement keeps "in a minor key" from reading as A minor.
+/// - BPM: the number (or range midpoint, rounded) right before a "BPM" word —
+///   "~135–145 BPM" → 140, "120 BPM" → 120. Values outside 20–300 are ignored.
+/// Empty/unparseable prose returns (None, None).
+pub fn parse_key_tempo(feel: &str) -> (Option<(String, String)>, Option<i64>) {
+    (parse_feel_key(feel), parse_feel_bpm(feel))
+}
+
+fn parse_feel_key(feel: &str) -> Option<(String, String)> {
+    let chars: Vec<char> = feel.chars().collect();
+    let n = chars.len();
+    for i in 0..n {
+        let c = chars[i];
+        if !('A'..='G').contains(&c) {
+            continue;
+        }
+        // word boundary before the note letter ("(F minor" yes, "THE major" no)
+        if i > 0 && chars[i - 1].is_alphanumeric() {
+            continue;
+        }
+        let mut root = c.to_string();
+        let mut j = i + 1;
+        if j < n && matches!(chars[j], '#' | 'b' | '♯' | '♭') {
+            root.push(match chars[j] {
+                '♯' => '#',
+                '♭' => 'b',
+                other => other,
+            });
+            j += 1;
+        }
+        // the mode word must follow directly (whitespace/hyphen allowed: "F-minor")
+        while j < n && (chars[j].is_whitespace() || chars[j] == '-') {
+            j += 1;
+        }
+        let start = j;
+        while j < n && chars[j].is_alphabetic() {
+            j += 1;
+        }
+        let word: String = chars[start..j].iter().collect::<String>().to_lowercase();
+        match word.as_str() {
+            "major" | "maj" => return Some((root, "major".into())),
+            "minor" | "min" => return Some((root, "minor".into())),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_feel_bpm(feel: &str) -> Option<i64> {
+    let lower = feel.to_lowercase();
+    let mut search = 0;
+    while let Some(pos) = lower[search..].find("bpm") {
+        let at = search + pos;
+        // "bpm" as its own word
+        let before_ok = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+        let after_ok = at + 3 >= lower.len() || !lower.as_bytes()[at + 3].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            if let Some(v) = bpm_number_before(&lower[..at]) {
+                return Some(v);
+            }
+        }
+        search = at + 3;
+    }
+    None
+}
+
+/// The trailing `N` or `N–M` (rounded midpoint) right before a "BPM" word.
+fn bpm_number_before(prefix: &str) -> Option<i64> {
+    let chars: Vec<char> = prefix.chars().collect();
+    let mut i = chars.len();
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    let end2 = i;
+    while i > 0 && chars[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    let n2: f64 = chars[i..end2].iter().collect::<String>().parse().ok()?;
+    // optional range: "135–145" / "135-145" / "135 — 145"
+    let mut j = i;
+    while j > 0 && chars[j - 1].is_whitespace() {
+        j -= 1;
+    }
+    let mut n1: Option<f64> = None;
+    if j > 0 && matches!(chars[j - 1], '-' | '–' | '—' | '−') {
+        j -= 1;
+        while j > 0 && chars[j - 1].is_whitespace() {
+            j -= 1;
+        }
+        let end1 = j;
+        while j > 0 && chars[j - 1].is_ascii_digit() {
+            j -= 1;
+        }
+        if j < end1 {
+            n1 = chars[j..end1].iter().collect::<String>().parse().ok();
+        }
+    }
+    let v = match n1 {
+        Some(a) => ((a + n2) / 2.0).round() as i64,
+        None => n2.round() as i64,
+    };
+    (20..=300).contains(&v).then_some(v)
+}
+
 const SONG_COLS: &str =
     "id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at, voicings";
 fn map_song(r: &libsql::Row) -> Song {
@@ -247,12 +357,23 @@ fn map_stage(r: &libsql::Row) -> Stage {
 pub async fn create_song(conn: &Connection, preset_id: &str, title: &str) -> Result<Song> {
     let id = new_id();
     let ts = now();
+    // Seed key/BPM from the preset's `key_tempo_feel` prose when parseable —
+    // a "Sinister Memphis Phonk" (F minor, ~135–145) preset shouldn't silently
+    // produce A-minor/120 songs. Song-level fields keep overriding afterwards
+    // (update_song_key), and explicit-key creators (composition import,
+    // reference import) overwrite these defaults right after creation.
+    let (key, bpm) = match get_preset(conn, preset_id).await? {
+        Some(p) => parse_key_tempo(&p.key_tempo_feel),
+        None => (None, None),
+    };
+    let (key_root, key_mode) = key.unwrap_or_else(|| ("A".into(), "minor".into()));
+    let bpm = bpm.unwrap_or(120);
     // song + its stage spec land atomically — no half-created songs
     let tx = conn.transaction().await?;
     tx.execute(
         "INSERT INTO song (id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'in_progress', 'concept', 'A', 'minor', 120, ?4, ?4)",
-        params![id.clone(), preset_id, title, ts.clone()],
+         VALUES (?1, ?2, ?3, 'in_progress', 'concept', ?4, ?5, ?6, ?7, ?7)",
+        params![id.clone(), preset_id, title, key_root, key_mode, bpm, ts.clone()],
     ).await?;
     for (ordinal, stage_type) in STAGE_ORDER.iter().enumerate() {
         tx.execute(
@@ -601,7 +722,6 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
         match s(&r, 0).as_str() {
             "claude_model" => st.claude_model = s(&r, 1),
             "claude_bin" => st.claude_bin = s(&r, 1),
-            "mcp_token" => st.mcp_token = s(&r, 1),
             "ableton_mcp" => st.ableton_mcp = s(&r, 1),
             "music_folder" => st.music_folder = s(&r, 1),
             "analyzer_cmd" => st.analyzer_cmd = s(&r, 1),
@@ -613,7 +733,7 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
 pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
     // one transaction: settings change as a unit, never a half-applied mix
     let tx = conn.transaction().await?;
-    for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("mcp_token", &st.mcp_token), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd)] {
+    for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd)] {
         tx.execute(
             "INSERT INTO setting (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2",
             params![k, v.as_str()],
@@ -622,17 +742,6 @@ pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
-pub async fn ensure_mcp_token(conn: &Connection) -> Result<String> {
-    let st = get_settings(conn).await?;
-    if !st.mcp_token.is_empty() { return Ok(st.mcp_token); }
-    let token = new_id().replace('-', "");
-    conn.execute(
-        "INSERT INTO setting (key, value) VALUES ('mcp_token', ?1) ON CONFLICT(key) DO UPDATE SET value=?1",
-        params![token.clone()],
-    ).await?;
-    Ok(token)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +754,52 @@ mod tests {
         let conn = db.connect().unwrap();
         migrate(&conn).await.unwrap();
         (db, conn)
+    }
+
+    // ---- Preset key/BPM seeding (BACKLOG: seed new songs from the preset) ----
+
+    /// The brief's real-world strings: first explicit key mention wins, BPM
+    /// ranges take the rounded midpoint, unparseable prose yields None.
+    #[test]
+    fn parse_key_tempo_real_world_strings() {
+        assert_eq!(
+            parse_key_tempo("Dark minor key (F minor / cowbell-friendly), ~135–145 BPM with a half-time trap feel"),
+            (Some(("F".into(), "minor".into())), Some(140)),
+        );
+        assert_eq!(
+            parse_key_tempo("60–75 BPM half-time crawl in minor keys (A minor, D minor), swung trap hi-hats"),
+            (Some(("A".into(), "minor".into())), Some(68)),
+            "the first key LISTED wins; the midpoint of 60–75 rounds to 68",
+        );
+        assert_eq!(parse_key_tempo("A minor, ~120 BPM"), (Some(("A".into(), "minor".into())), Some(120)));
+        assert_eq!(parse_key_tempo("A min"), (Some(("A".into(), "minor".into())), None));
+        assert_eq!(parse_key_tempo("F# major at 98 BPM"), (Some(("F#".into(), "major".into())), Some(98)));
+        assert_eq!(parse_key_tempo(""), (None, None));
+        assert_eq!(parse_key_tempo("dreamy, slow, cinematic"), (None, None));
+        // "in a minor key" is English, not A minor; nonsense BPMs are ignored
+        assert_eq!(parse_key_tempo("in a minor key, 9000 BPM"), (None, None));
+    }
+
+    /// New songs seed key/BPM from the preset's prose; unparseable prose keeps
+    /// the old A-minor/120 defaults.
+    #[tokio::test]
+    async fn create_song_seeds_key_bpm_from_preset_feel() {
+        let (_db, conn) = mem_conn().await;
+        let phonk = create_preset(&conn, StyleInput {
+            name: "Sinister Memphis Phonk".into(), genre: "phonk".into(), mood: String::new(),
+            influences: String::new(),
+            key_tempo_feel: "Dark minor key (F minor / cowbell-friendly), ~135–145 BPM with a half-time trap feel".into(),
+            vocal_range: String::new(), themes: String::new(),
+        }).await.unwrap();
+        let song = create_song(&conn, &phonk.id, "Seeded").await.unwrap();
+        assert_eq!((song.key_root.as_str(), song.key_mode.as_str(), song.bpm), ("F", "minor", 140));
+
+        let vague = create_preset(&conn, StyleInput {
+            name: "Vibes".into(), genre: String::new(), mood: String::new(), influences: String::new(),
+            key_tempo_feel: "dreamy and slow".into(), vocal_range: String::new(), themes: String::new(),
+        }).await.unwrap();
+        let song = create_song(&conn, &vague.id, "Default").await.unwrap();
+        assert_eq!((song.key_root.as_str(), song.key_mode.as_str(), song.bpm), ("A", "minor", 120));
     }
 
     /// The stored blob comes back byte-for-byte (the Composer round-trips

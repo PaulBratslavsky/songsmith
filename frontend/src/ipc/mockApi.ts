@@ -1,7 +1,8 @@
 // In-memory mock of the Rust tool registry, for running the UI in a plain
 // browser (no Tauri). Every registry command must exist here (mock-parity).
 
-import { STAGE_ORDER } from "./api";
+import { STAGE_ORDER, type CommandArgs, type CommandMap, type CommandResult } from "./api";
+import type { Artifact, CompositionMeta, Song, Stage } from "./generated";
 
 type Any = Record<string, any>;
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -145,13 +146,41 @@ function seed(): Any {
     ],
     skills, progressions: [], renders: [],
     compositions: [{ id: uid(), name: "Neon idea", song_id: null, data: JSON.stringify(seedComposition), created_at: ts, updated_at: ts }],
-    settings: { claude_model: "", claude_bin: "", mcp_token: "mock-token", ableton_mcp: "", music_folder: "", analyzer_cmd: "" },
+    settings: { claude_model: "", claude_bin: "", ableton_mcp: "", music_folder: "", analyzer_cmd: "" },
     // mock claude.ai subscription auth — starts signed in so the card looks real
     auth: { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" },
   };
 }
 
 let db = load();
+
+// Mirror of core/src/db.rs `parse_key_tempo`: seed a new song's key/BPM from the
+// preset's prose `key_tempo_feel`. First explicit key mention wins (uppercase
+// note + major/maj/minor/min word, so "in a minor key" never reads as A minor);
+// "~135–145 BPM" → rounded midpoint; unparseable → the A-minor/120 defaults.
+function parseKeyTempo(feel: string): { root: string; mode: string; bpm: number } {
+  const f = feel ?? "";
+  let root = "A", mode = "minor", bpm = 120;
+  const keyRe = /(?:^|[^A-Za-z0-9])([A-G][#b♯♭]?)[\s-]*([A-Za-z]+)/g;
+  for (let m = keyRe.exec(f); m; m = keyRe.exec(f)) {
+    const w = m[2].toLowerCase();
+    if (w === "major" || w === "maj" || w === "minor" || w === "min") {
+      root = m[1].replace("♯", "#").replace("♭", "b");
+      mode = w.startsWith("maj") ? "major" : "minor";
+      break;
+    }
+  }
+  const range = /(\d+)\s*[-–—−]\s*(\d+)\s*bpm\b/i.exec(f);
+  const single = /(\d+)\s*bpm\b/i.exec(f);
+  const v = range ? Math.round((Number(range[1]) + Number(range[2])) / 2) : single ? Number(single[1]) : NaN;
+  if (v >= 20 && v <= 300) bpm = v;
+  return { root, mode, bpm };
+}
+function presetKeyTempo(presetId: string): { root: string; mode: string; bpm: number } {
+  const preset = db.presets.find((p: Any) => p.id === presetId);
+  return parseKeyTempo(preset?.key_tempo_feel ?? "");
+}
+
 const KINDS: Record<string, string> = {
   concept: "concept", structure: "structure", chords: "chords", lyric_spec: "lyric_spec", lyrics: "lyrics", prompt: "generation_prompt",
 };
@@ -331,200 +360,215 @@ function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
   return skipped;
 }
 
-export async function mockCall<T>(cmd: string, a: Any): Promise<T> {
-  const r = (x: any) => { save(db); return x as T; };
-  switch (cmd) {
-    case "list_style_presets": return r(db.presets);
-    case "get_style_preset": return r(db.presets.find((p: Any) => p.id === a.id) ?? null);
-    case "create_style_preset": { const p = { id: uid(), ...a.input, created_at: now(), updated_at: now() }; db.presets.push(p); return r(p); }
-    case "update_style_preset": { const p = db.presets.find((x: Any) => x.id === a.id); Object.assign(p, a.input, { updated_at: now() }); return r(p); }
-    case "generate_style_preset":
-      return r({ name: a.name, genre: "(mock) genre", mood: "moody", influences: "describe the sound",
-        key_tempo_feel: "A minor, 120 BPM", vocal_range: "mid", themes: `themes for ${a.name}` });
-    case "create_song": {
-      const id = uid();
-      const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
-        current_stage: "concept", key_root: "A", key_mode: "minor", bpm: 120, voicings: "{}", created_at: now(), updated_at: now() };
-      db.songs.unshift(v);
-      STAGE_ORDER.forEach((type, ordinal) =>
-        db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
-      return r(v);
+// The generated types carry i64 fields as `bigint` (Artifact.version,
+// Song.bpm, Stage.ordinal). The mock stores plain numbers internally
+// (localStorage is JSON), so convert at the reply boundary — the mock emits
+// exactly what the generated types promise.
+function toArtifact(art: Any): Artifact;
+function toArtifact(art: Any | null): Artifact | null;
+function toArtifact(art: Any | null) {
+  return art ? ({ ...art, version: BigInt(art.version) } as Artifact) : null;
+}
+const toSong = (v: Any): Song => ({ ...v, bpm: BigInt(v.bpm) } as Song);
+const toStage = (s: Any): Stage => ({ ...s, ordinal: BigInt(s.ordinal) } as Stage);
+
+/** One handler per CommandMap command — a missing or mistyped handler is a
+ *  COMPILE error (audit Tier-2 #7: api/mock parity by construction). */
+type MockHandlers = {
+  [C in keyof CommandMap]: (a: CommandArgs<C>) => CommandResult<C> | Promise<CommandResult<C>>;
+};
+
+const handlers: MockHandlers = {
+  list_style_presets: () => db.presets,
+  get_style_preset: (a) => db.presets.find((p: Any) => p.id === a.id) ?? null,
+  create_style_preset: (a) => { const p = { id: uid(), ...a.input, created_at: now(), updated_at: now() }; db.presets.push(p); return p; },
+  update_style_preset: (a) => { const p = db.presets.find((x: Any) => x.id === a.id); Object.assign(p, a.input, { updated_at: now() }); return p; },
+  generate_style_preset: (a) => ({ name: a.name, genre: "(mock) genre", mood: "moody", influences: "describe the sound",
+    key_tempo_feel: "A minor, 120 BPM", vocal_range: "mid", themes: `themes for ${a.name}` }),
+  create_song: (a) => {
+    const id = uid();
+    const kt = presetKeyTempo(a.stylePresetId); // seed key/BPM from the preset's prose
+    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+      current_stage: "concept", key_root: kt.root, key_mode: kt.mode, bpm: kt.bpm, voicings: "{}", created_at: now(), updated_at: now() };
+    db.songs.unshift(v);
+    STAGE_ORDER.forEach((type, ordinal) =>
+      db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
+    return toSong(v);
+  },
+  list_songs: () => db.songs.map(toSong),
+  get_song: (a) => {
+    const song = db.songs.find((v: Any) => v.id === a.id);
+    if (!song) return null;
+    const preset = db.presets.find((p: Any) => p.id === song.style_preset_id);
+    const stages = db.stages.filter((s: Any) => s.song_id === a.id).sort((x: Any, y: Any) => x.ordinal - y.ordinal).map(withArtifactAt).map(toStage);
+    return { song: toSong(song), preset, stages };
+  },
+  update_song_status: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.status = a.status; v.updated_at = now(); return toSong(v); },
+  update_song_title: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.title = a.title; v.updated_at = now(); return toSong(v); },
+  update_song_key: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.key_root = a.root; v.key_mode = a.mode; v.bpm = a.bpm; v.updated_at = now(); return toSong(v); },
+  update_song_voicings: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.voicings = a.voicings; v.updated_at = now(); return toSong(v); },
+  refine_field: (a) => `(mock) ${a.fieldLabel}: ${a.instruction}`,
+  delete_song: (a) => {
+    db.songs = db.songs.filter((v: Any) => v.id !== a.id);
+    const sids = db.stages.filter((s: Any) => s.song_id === a.id).map((s: Any) => s.id);
+    db.stages = db.stages.filter((s: Any) => s.song_id !== a.id);
+    db.artifacts = db.artifacts.filter((ar: Any) => !sids.includes(ar.stage_id));
+  },
+  get_stage: (a) => {
+    const stage = db.stages.find((s: Any) => s.id === a.id);
+    if (!stage) return null;
+    return { stage: toStage(withArtifactAt(stage)), artifact: toArtifact(currentArtifact(a.id)), skill: activeSkill(stage.type) };
+  },
+  run_stage: (a) => {
+    const stage = db.stages.find((s: Any) => s.id === a.stageId);
+    stage.status = "in_progress";
+    const kind = KINDS[stage.type] ?? "artifact";
+    const text = `# ${kind} (mock)\n\nSimulated ${stage.type} for this song. Run in the Tauri app with Claude for real output.\n` +
+      (a.userInput ? `\nYour seed:\n${a.userInput}\n` : "");
+    const ver = (currentArtifact(a.stageId)?.version ?? 0) + 1;
+    const art = { id: uid(), song_id: stage.song_id, stage_id: a.stageId, kind,
+      content: JSON.stringify({ kind, text, data: null }), version: ver, approved: false, created_at: now() };
+    db.artifacts.push(art);
+    return toArtifact(art);
+  },
+  cancel_stage: () => undefined, // mock runs finish instantly — nothing to cancel
+  approve_stage: (a) => {
+    const stage = db.stages.find((s: Any) => s.id === a.stageId);
+    const art = currentArtifact(a.stageId);
+    if (art) art.approved = true;
+    stage.status = "done";
+    advance(stage.song_id);
+    return { ok: true };
+  },
+  advance_stage: (a) => advance(a.songId),
+  get_artifact: (a) => toArtifact(db.artifacts.find((x: Any) => x.id === a.id) ?? null),
+  save_artifact: (a) => {
+    const ver = (currentArtifact(a.stageId ?? "")?.version ?? 0) + 1;
+    const art = { id: uid(), song_id: a.songId, stage_id: a.stageId ?? null, kind: a.kind, content: a.content, version: ver, approved: false, created_at: now() };
+    db.artifacts.push(art);
+    return toArtifact(art);
+  },
+  list_artifact_revisions: (a) =>
+    db.artifacts.filter((x: Any) => x.stage_id === a.stageId).sort((x: Any, y: Any) => y.version - x.version).map(toArtifact),
+  revert_artifact: (a) => {
+    const src = db.artifacts.find((x: Any) => x.id === a.artifactId);
+    const ver = (currentArtifact(src.stage_id)?.version ?? 0) + 1;
+    const art = { ...src, id: uid(), version: ver, approved: false, created_at: now() };
+    db.artifacts.push(art);
+    return toArtifact(art);
+  },
+  list_skills: () => db.skills,
+  get_skill: (a) => db.skills.find((s: Any) => s.id === a.id) ?? null,
+  create_skill: (a) => { const s = { id: uid(), ...a.input, source: "user", enabled: true, created_at: now(), updated_at: now() }; db.skills.push(s); return s; },
+  update_skill: (a) => { const s = db.skills.find((x: Any) => x.id === a.id); Object.assign(s, a.input, { updated_at: now() }); return s; },
+  set_skill_enabled: (a) => { const s = db.skills.find((x: Any) => x.id === a.id); s.enabled = a.enabled; return s; },
+  list_progressions: () => db.progressions,
+  save_progression: (a) => { const p = { id: uid(), name: a.name, chords: a.chords, created_at: now() }; db.progressions.unshift(p); return p; },
+  delete_progression: (a) => { db.progressions = db.progressions.filter((x: Any) => x.id !== a.id); },
+  // saved compositions (`db.compositions ??= []` back-fills mock DBs seeded before Phase 3)
+  list_compositions: () => {
+    db.compositions ??= [];
+    // light listing (no data blob), newest first — mirrors db.rs
+    return [...db.compositions]
+      .sort((x: Any, y: Any) => (y.updated_at > x.updated_at ? 1 : -1))
+      .map(({ data, ...meta }: Any) => meta as CompositionMeta);
+  },
+  get_composition: (a) => { db.compositions ??= []; return db.compositions.find((c: Any) => c.id === a.id) ?? null; },
+  save_composition: (a) => {
+    db.compositions ??= [];
+    JSON.parse(a.data); // reject garbage, like the core does
+    if (a.id) {
+      const c = db.compositions.find((x: Any) => x.id === a.id);
+      if (!c) throw new Error("composition not found");
+      Object.assign(c, { name: a.name, song_id: a.songId ?? null, data: a.data, updated_at: now() });
+      return c;
     }
-    case "list_songs": return r(db.songs);
-    case "get_song": {
-      const song = db.songs.find((v: Any) => v.id === a.id);
-      if (!song) return r(null);
-      const preset = db.presets.find((p: Any) => p.id === song.style_preset_id);
-      const stages = db.stages.filter((s: Any) => s.song_id === a.id).sort((x: Any, y: Any) => x.ordinal - y.ordinal).map(withArtifactAt);
-      return r({ song, preset, stages });
-    }
-    case "update_song_status": { const v = db.songs.find((x: Any) => x.id === a.id); v.status = a.status; v.updated_at = now(); return r(v); }
-    case "update_song_title": { const v = db.songs.find((x: Any) => x.id === a.id); v.title = a.title; v.updated_at = now(); return r(v); }
-    case "update_song_key": { const v = db.songs.find((x: Any) => x.id === a.id); v.key_root = a.root; v.key_mode = a.mode; v.bpm = a.bpm; v.updated_at = now(); return r(v); }
-    case "update_song_voicings": { const v = db.songs.find((x: Any) => x.id === a.id); v.voicings = a.voicings; v.updated_at = now(); return r(v); }
-    case "refine_field": return r(`(mock) ${a.fieldLabel}: ${a.instruction}`);
-    case "delete_song": {
-      db.songs = db.songs.filter((v: Any) => v.id !== a.id);
-      const sids = db.stages.filter((s: Any) => s.song_id === a.id).map((s: Any) => s.id);
-      db.stages = db.stages.filter((s: Any) => s.song_id !== a.id);
-      db.artifacts = db.artifacts.filter((ar: Any) => !sids.includes(ar.stage_id));
-      return r(undefined);
-    }
-    case "get_stage": {
-      const stage = db.stages.find((s: Any) => s.id === a.id);
-      if (!stage) return r(null);
-      return r({ stage: withArtifactAt(stage), artifact: currentArtifact(a.id), skill: activeSkill(stage.type) });
-    }
-    case "run_stage": {
-      const stage = db.stages.find((s: Any) => s.id === a.stageId);
-      stage.status = "in_progress";
-      const kind = KINDS[stage.type] ?? "artifact";
-      const text = `# ${kind} (mock)\n\nSimulated ${stage.type} for this song. Run in the Tauri app with Claude for real output.\n` +
-        (a.userInput ? `\nYour seed:\n${a.userInput}\n` : "");
-      const ver = (currentArtifact(a.stageId)?.version ?? 0) + 1;
-      const art = { id: uid(), song_id: stage.song_id, stage_id: a.stageId, kind,
-        content: JSON.stringify({ kind, text, data: null }), version: ver, approved: false, created_at: now() };
-      db.artifacts.push(art);
-      return r(art);
-    }
-    case "cancel_stage": return r(undefined); // mock runs finish instantly — nothing to cancel
-    case "approve_stage": {
-      const stage = db.stages.find((s: Any) => s.id === a.stageId);
-      const art = currentArtifact(a.stageId);
-      if (art) art.approved = true;
-      stage.status = "done";
-      advance(stage.song_id);
-      return r({ ok: true });
-    }
-    case "advance_stage": return r(advance(a.songId));
-    case "get_artifact": return r(db.artifacts.find((x: Any) => x.id === a.id) ?? null);
-    case "save_artifact": {
-      const ver = (currentArtifact(a.stageId)?.version ?? 0) + 1;
-      const art = { id: uid(), song_id: a.songId, stage_id: a.stageId ?? null, kind: a.kind, content: a.content, version: ver, approved: false, created_at: now() };
-      db.artifacts.push(art);
-      return r(art);
-    }
-    case "list_artifact_revisions":
-      return r(db.artifacts.filter((x: Any) => x.stage_id === a.stageId).sort((x: Any, y: Any) => y.version - x.version));
-    case "revert_artifact": {
-      const src = db.artifacts.find((x: Any) => x.id === a.artifactId);
-      const ver = (currentArtifact(src.stage_id)?.version ?? 0) + 1;
-      const art = { ...src, id: uid(), version: ver, approved: false, created_at: now() };
-      db.artifacts.push(art);
-      return r(art);
-    }
-    case "list_skills": return r(db.skills);
-    case "get_skill": return r(db.skills.find((s: Any) => s.id === a.id) ?? null);
-    case "create_skill": { const s = { id: uid(), ...a.input, source: "user", enabled: true, created_at: now(), updated_at: now() }; db.skills.push(s); return r(s); }
-    case "update_skill": { const s = db.skills.find((x: Any) => x.id === a.id); Object.assign(s, a.input, { updated_at: now() }); return r(s); }
-    case "set_skill_enabled": { const s = db.skills.find((x: Any) => x.id === a.id); s.enabled = a.enabled; return r(s); }
-    case "list_progressions": return r(db.progressions);
-    case "save_progression": { const p = { id: uid(), name: a.name, chords: a.chords, created_at: now() }; db.progressions.unshift(p); return r(p); }
-    case "delete_progression": db.progressions = db.progressions.filter((x: Any) => x.id !== a.id); return r(undefined);
-    // saved compositions (`db.compositions ??= []` back-fills mock DBs seeded before Phase 3)
-    case "list_compositions": {
-      db.compositions ??= [];
-      // light listing (no data blob), newest first — mirrors db.rs
-      return r([...db.compositions]
-        .sort((x: Any, y: Any) => (y.updated_at > x.updated_at ? 1 : -1))
-        .map(({ data, ...meta }: Any) => meta));
-    }
-    case "get_composition": { db.compositions ??= []; return r(db.compositions.find((c: Any) => c.id === a.id) ?? null); }
-    case "save_composition": {
-      db.compositions ??= [];
-      JSON.parse(a.data); // reject garbage, like the core does
-      if (a.id) {
-        const c = db.compositions.find((x: Any) => x.id === a.id);
-        if (!c) throw new Error("composition not found");
-        Object.assign(c, { name: a.name, song_id: a.songId ?? null, data: a.data, updated_at: now() });
-        return r(c);
-      }
-      const c = { id: uid(), name: a.name, song_id: a.songId ?? null, data: a.data, created_at: now(), updated_at: now() };
-      db.compositions.unshift(c);
-      return r(c);
-    }
-    case "delete_composition": db.compositions = (db.compositions ?? []).filter((x: Any) => x.id !== a.id); return r(undefined);
-    case "list_renders": return r(db.renders.filter((x: Any) => x.song_id === a.songId));
-    case "add_render": { const x = { id: uid(), song_id: a.songId, label: a.label || "Render", file_path: a.filePath, source: a.source || "", notes: a.notes || "", is_pick: false, created_at: now() }; db.renders.unshift(x); return r(x); }
-    case "set_render_pick": { const x = db.renders.find((y: Any) => y.id === a.id); if (a.isPick) db.renders.filter((y: Any) => y.song_id === x.song_id).forEach((y: Any) => (y.is_pick = false)); if (x) x.is_pick = a.isPick; return r(undefined); }
-    case "delete_render": db.renders = db.renders.filter((x: Any) => x.id !== a.id); return r(undefined);
-    case "analyze_reference": return r({
-      duration_sec: 80, tempo_bpm: 95.7, key: { root: "E", mode: "minor", confidence: 0.66 },
-      section_count: 3, note: "(mock) raw perception output",
-      bar_chords: ["Am", "F", "C", "E", "Am", "F", "C", "E"].map((chord, i) => ({ bar: i + 1, time: i * 2, chord })),
-      sections: [{ start_sec: 0, end_sec: 32, approx_bars: 8, chords: ["Am", "F", "C", "E"] }],
-    });
-    case "import_reference": return r(db.songs[0]?.id ?? null); // mock: just open the demo song
-    // paste-lyrics import (words verbatim; mock = deterministic header split only)
-    case "parse_pasted_lyrics": return r(parsePastedLyrics(a.text ?? ""));
-    case "import_lyrics": { importLyricsIntoSong(a.songId, a.text ?? ""); return r(undefined); }
-    case "create_song_from_lyrics": {
-      const id = uid();
-      const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
-        current_stage: "concept", key_root: "A", key_mode: "minor", bpm: 120, voicings: "{}", created_at: now(), updated_at: now() };
-      db.songs.unshift(v);
-      STAGE_ORDER.forEach((type, ordinal) =>
-        db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
-      importLyricsIntoSong(id, a.text ?? "");
-      return r(v);
-    }
-    // Composer export (composition → song): resolved sections in, 🔒 respected
-    case "export_composition_to_song": {
-      const skipped = exportSectionsIntoSong(a.songId, JSON.parse(a.sectionsJson ?? "[]"));
-      return r({ ok: true, song_id: a.songId, skipped_frozen: skipped });
-    }
-    case "create_song_from_composition": {
-      const sections = JSON.parse(a.sectionsJson ?? "[]");
-      if (!Array.isArray(sections) || !sections.length) throw new Error("nothing to export — the composition has no sections");
-      const id = uid();
-      const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
-        current_stage: "concept", key_root: a.keyRoot || "A", key_mode: a.keyMode || "minor", bpm: Number(a.bpm) || 120, voicings: "{}", created_at: now(), updated_at: now() };
-      db.songs.unshift(v);
-      STAGE_ORDER.forEach((type, ordinal) =>
-        db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
-      exportSectionsIntoSong(id, sections);
-      return r(v);
-    }
-    case "self_check_stage": return r(currentArtifact(a.stageId)); // mock: no-op refine
-    case "get_settings": return r(db.settings);
-    case "set_settings": db.settings = a.settings; return r(db.settings);
-    case "list_tools": return r(MOCK_TOOLS);
-    case "mcp_config": return r({ db_path: "(browser mock)", token: "mock-token", command_hint: "Run the Tauri app for a real MCP config." });
-    case "claude_status": return r({ found: false, version: null, model: db.settings.claude_model, bin: "" });
-    case "claude_auth_status": {
-      if (!db.auth) db.auth = { logged_in: false, account: null, subscription: null };
-      const li = !!db.auth.logged_in;
-      return r({
-        found: true, bin: "/opt/homebrew/bin/claude",
-        logged_in: li, account: db.auth.account ?? null, subscription: db.auth.subscription ?? null,
-        api_key_set: false,
-        connectors_hint: li
-          ? "Signed in on your subscription with no API key set — your connectors load automatically."
-          : "Sign in with your claude.ai account to use your subscription. Keep ANTHROPIC_API_KEY unset so your connectors load.",
-        connectors_url: "https://claude.ai/settings/connectors",
-      });
-    }
-    case "claude_login":
-      return r({ url: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock",
-        instructions: "(mock) Finish signing in in the browser, then paste the code below and Submit." });
-    case "claude_login_submit_code":
-      db.auth = { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" };
-      return r({ success: true, message: "Signed in. Re-checking status…" });
-    case "claude_login_cancel": return r(undefined);
-    case "claude_logout":
-      db.auth = { logged_in: false, account: null, subscription: null };
-      return r(undefined);
-    case "open_url": return r(undefined);
-    case "test_claude": return r("✅ Live Claude responded: READY (mock)");
-    case "detect_ableton_mcp": return r({ found: false });
-    case "test_ableton": return r("(mock) Ableton test runs only in the desktop app.");
-    case "reset_ableton": return r("(mock) reset runs only in the desktop app.");
-    case "ableton_build": return r("(mock) Ableton build runs only in the desktop app.");
-    case "ableton_build_clips": return r("(mock) Ableton clip build runs only in the desktop app.");
-    case "ableton_build_song": return r("(mock) Ableton song stub runs only in the desktop app.");
-    case "chat_send": return r("mock-session");
-    default: throw new Error(`mock: unknown command '${cmd}'`);
-  }
+    const c = { id: uid(), name: a.name, song_id: a.songId ?? null, data: a.data, created_at: now(), updated_at: now() };
+    db.compositions.unshift(c);
+    return c;
+  },
+  delete_composition: (a) => { db.compositions = (db.compositions ?? []).filter((x: Any) => x.id !== a.id); },
+  list_renders: (a) => db.renders.filter((x: Any) => x.song_id === a.songId),
+  add_render: (a) => { const x = { id: uid(), song_id: a.songId, label: a.label || "Render", file_path: a.filePath, source: a.source || "", notes: a.notes || "", is_pick: false, created_at: now() }; db.renders.unshift(x); return x; },
+  set_render_pick: (a) => { const x = db.renders.find((y: Any) => y.id === a.id); if (a.isPick) db.renders.filter((y: Any) => y.song_id === x.song_id).forEach((y: Any) => (y.is_pick = false)); if (x) x.is_pick = a.isPick; },
+  delete_render: (a) => { db.renders = db.renders.filter((x: Any) => x.id !== a.id); },
+  import_reference: () => db.songs[0]?.id ?? null, // mock: just open the demo song
+  // paste-lyrics import (words verbatim; mock = deterministic header split only)
+  parse_pasted_lyrics: (a) => parsePastedLyrics(a.text ?? ""),
+  import_lyrics: (a) => { importLyricsIntoSong(a.songId, a.text ?? ""); },
+  create_song_from_lyrics: (a) => {
+    const id = uid();
+    const kt = presetKeyTempo(a.stylePresetId); // seed key/BPM from the preset's prose
+    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+      current_stage: "concept", key_root: kt.root, key_mode: kt.mode, bpm: kt.bpm, voicings: "{}", created_at: now(), updated_at: now() };
+    db.songs.unshift(v);
+    STAGE_ORDER.forEach((type, ordinal) =>
+      db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
+    importLyricsIntoSong(id, a.text ?? "");
+    return toSong(v);
+  },
+  // Composer export (composition → song): resolved sections in, 🔒 respected
+  export_composition_to_song: (a) => {
+    const skipped = exportSectionsIntoSong(a.songId, JSON.parse(a.sectionsJson ?? "[]"));
+    return { ok: true, song_id: a.songId, skipped_frozen: skipped };
+  },
+  create_song_from_composition: (a) => {
+    const sections = JSON.parse(a.sectionsJson ?? "[]");
+    if (!Array.isArray(sections) || !sections.length) throw new Error("nothing to export — the composition has no sections");
+    const id = uid();
+    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+      current_stage: "concept", key_root: a.keyRoot || "A", key_mode: a.keyMode || "minor", bpm: Number(a.bpm) || 120, voicings: "{}", created_at: now(), updated_at: now() };
+    db.songs.unshift(v);
+    STAGE_ORDER.forEach((type, ordinal) =>
+      db.stages.push({ id: uid(), song_id: id, type, ordinal, status: "pending", skill_id: null, created_at: now(), updated_at: now() }));
+    exportSectionsIntoSong(id, sections);
+    return toSong(v);
+  },
+  self_check_stage: (a) => toArtifact(currentArtifact(a.stageId)), // mock: no-op refine
+  get_settings: () => db.settings,
+  set_settings: (a) => { db.settings = a.settings; return db.settings; },
+  list_tools: () => MOCK_TOOLS,
+  mcp_config: () => ({ db_path: "(browser mock)", command_hint: "Run the Tauri app for a real MCP config." }),
+  claude_status: () => ({ found: false, version: null, model: db.settings.claude_model, bin: "" }),
+  claude_auth_status: () => {
+    if (!db.auth) db.auth = { logged_in: false, account: null, subscription: null };
+    const li = !!db.auth.logged_in;
+    return {
+      found: true, bin: "/opt/homebrew/bin/claude",
+      logged_in: li, account: db.auth.account ?? null, subscription: db.auth.subscription ?? null,
+      api_key_set: false,
+      connectors_hint: li
+        ? "Signed in on your subscription with no API key set — your connectors load automatically."
+        : "Sign in with your claude.ai account to use your subscription. Keep ANTHROPIC_API_KEY unset so your connectors load.",
+      connectors_url: "https://claude.ai/settings/connectors",
+    };
+  },
+  claude_login: () => ({ url: "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock",
+    instructions: "(mock) Finish signing in in the browser, then paste the code below and Submit." }),
+  claude_login_submit_code: () => {
+    db.auth = { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" };
+    return { success: true, message: "Signed in. Re-checking status…" };
+  },
+  claude_login_cancel: () => undefined,
+  claude_logout: () => { db.auth = { logged_in: false, account: null, subscription: null }; },
+  open_url: () => undefined,
+  test_claude: () => "✅ Live Claude responded: READY (mock)",
+  detect_ableton_mcp: () => ({ found: false }),
+  test_ableton: () => "(mock) Ableton test runs only in the desktop app.",
+  reset_ableton: () => "(mock) reset runs only in the desktop app.",
+  ableton_build: () => "(mock) Ableton build runs only in the desktop app.",
+  ableton_build_clips: () => "(mock) Ableton clip build runs only in the desktop app.",
+  ableton_build_song: () => "(mock) Ableton song stub runs only in the desktop app.",
+  chat_send: () => "mock-session",
+  write_png: () => { throw new Error("(mock) PNG export runs only in the desktop app."); },
+};
+
+export async function mockCall<C extends keyof CommandMap>(cmd: C, a: CommandArgs<C>): Promise<CommandResult<C>> {
+  const h = handlers[cmd] as (x: CommandArgs<C>) => CommandResult<C> | Promise<CommandResult<C>>;
+  if (!h) throw new Error(`mock: unknown command '${cmd}'`);
+  const out = await h(a);
+  save(db);
+  return out;
 }
 
 const MOCK_TOOLS = [
@@ -536,6 +580,6 @@ const MOCK_TOOLS = [
   "list_progressions","save_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
-  "analyze_reference",
+  "ableton_build_song","analyze_reference",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" }));

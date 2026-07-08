@@ -7,7 +7,7 @@ import type { Stage } from "../ipc/generated";
 import { StageChecklist, staleStageIds } from "../components/StageChecklist";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { AIRunPanel } from "../components/AIRunPanel";
-import { Composer } from "../components/Composer";
+import { SectionChordsEditor } from "../components/SectionChordsEditor";
 import { LyricsEditor } from "../components/LyricsEditor";
 import { ConceptEditor } from "../components/ConceptEditor";
 import { StructureEditor } from "../components/StructureEditor";
@@ -17,16 +17,7 @@ import { FieldDrawer, useFieldDrawer } from "../components/FieldDrawer";
 import { FinalRenders } from "../components/FinalRenders";
 import { SongSheet } from "../components/SongSheet";
 import { ArrangementBuilder } from "../components/ArrangementBuilder";
-
-function artifactData(content: string | undefined): any {
-  if (!content) return null;
-  try {
-    const v = JSON.parse(content);
-    return v?.data ?? null;
-  } catch {
-    return null;
-  }
-}
+import { parseArtifact } from "../lib/artifacts";
 
 export function SongWorkspace() {
   const { id } = useParams({ from: "/song/$id" });
@@ -66,19 +57,18 @@ export function SongWorkspace() {
   // chords-stage data feeds the Lyrics editor's per-section chord palette (ChordPro)
   const chordsStageId = song.data?.stages.find((s) => s.type === "chords")?.id;
   const chordsStage = useQuery({ queryKey: ["stage", chordsStageId], queryFn: () => api.getStage(chordsStageId!), enabled: !!chordsStageId });
-  const chordsData = artifactData(chordsStage.data?.artifact?.content);
+  const chordsData = parseArtifact("chords", chordsStage.data?.artifact?.content).data;
 
   // lyrics-stage tagged text feeds the Generation Prompt's tagged-lyrics field (verbatim).
   // build it from the lyrics data sections (robust) so it reflects the current words+chords.
   const lyricsStageId = song.data?.stages.find((s) => s.type === "lyrics")?.id;
   const lyricsStageQ = useQuery({ queryKey: ["stage", lyricsStageId], queryFn: () => api.getStage(lyricsStageId!), enabled: !!lyricsStageId });
   const lyricsTagged = (() => {
-    const ld = artifactData(lyricsStageQ.data?.artifact?.content);
-    const secs = ld?.sections;
-    if (Array.isArray(secs) && secs.length) {
-      return secs.map((s: any) => `[${s.label || s.type || "Section"}]\n${(Array.isArray(s.lines) ? s.lines : []).join("\n")}`).join("\n\n").trim();
+    const { text, data: ld } = parseArtifact("lyrics", lyricsStageQ.data?.artifact?.content);
+    if (ld?.sections.length) {
+      return ld.sections.map((s) => `[${s.label || "Section"}]\n${s.lines.join("\n")}`).join("\n\n").trim();
     }
-    try { return (JSON.parse(lyricsStageQ.data?.artifact?.content ?? "")?.text ?? "").trim(); } catch { return ""; }
+    return text.trim();
   })();
 
   const invalidate = () => {
@@ -155,7 +145,7 @@ export function SongWorkspace() {
 
       <div className="row" style={{ gap: 6, marginBottom: 12 }}>
         <button className={"sm" + (tab === "workspace" ? " primary" : "")} onClick={() => setTab("workspace")}>Workspace</button>
-        <button className={"sm" + (tab === "builder" ? " primary" : "")} onClick={() => setTab("builder")}>Builder / manage</button>
+        <button className={"sm" + (tab === "builder" ? " primary" : "")} onClick={() => setTab("builder")}>Arrange</button>
         <button className={"sm" + (tab === "sheet" ? " primary" : "")} onClick={() => setTab("sheet")}>Sheet preview</button>
         <button className={"sm" + (tab === "renders" ? " primary" : "")} onClick={() => setTab("renders")}>🎧 Renders</button>
         <div style={{ flex: 1 }} />
@@ -214,14 +204,14 @@ export function SongWorkspace() {
               onChanged={invalidate}
             />
           ) : sd?.artifact && sd.stage.type === "chords" ? (
-            <Composer
+            <SectionChordsEditor
               songId={id}
               stageId={sd.stage.id}
               kind={sd.artifact.kind}
               artifactId={sd.artifact.id}
               keyRoot={v.key_root}
               keyMode={v.key_mode}
-              initialData={artifactData(sd.artifact.content)}
+              initialData={parseArtifact("chords", sd.artifact.content).data}
               onChanged={invalidate}
             />
           ) : sd?.artifact && sd.stage.type === "lyric_spec" ? (
