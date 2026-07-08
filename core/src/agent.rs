@@ -867,12 +867,10 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
             }
         })
         .collect();
+    // The SONG owns key/tempo (docs/SONG-FACTS.md) — the back-fill no longer
+    // copies them into the artifact (legacy embedded values are dropped here,
+    // harmlessly migrating old rows); only the prose notes carry over.
     let structure_data = json!({
-        "key": {
-            "root": prior_data.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or(&song.key_root),
-            "mode": prior_data.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or(&song.key_mode),
-        },
-        "bpm": prior_data.get("bpm").and_then(|v| v.as_i64()).unwrap_or(song.bpm),
         "keyNote": prior_data.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
         "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
         "sections": new_secs,
@@ -1001,11 +999,7 @@ fn chords_data_from_resolved(sections: &[ResolvedSection]) -> Value {
 /// the export; `type`/`bars`/`role` (and a 🔒 lock) survive where a label
 /// matches; NEW sections take the exported bar count (the Composer knows it,
 /// unlike a lyric paste).
-fn structure_data_from_resolved(
-    sections: &[ResolvedSection],
-    prior_data: &Value,
-    song: &Song,
-) -> Value {
+fn structure_data_from_resolved(sections: &[ResolvedSection], prior_data: &Value) -> Value {
     let prior_secs: Vec<Value> = prior_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let new_secs: Vec<Value> = sections
         .iter()
@@ -1028,12 +1022,9 @@ fn structure_data_from_resolved(
             }
         })
         .collect();
+    // The SONG owns key/tempo (docs/SONG-FACTS.md) — no embedded copies; only
+    // the prose notes carry over (legacy embedded values migrate away here).
     json!({
-        "key": {
-            "root": prior_data.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or(&song.key_root),
-            "mode": prior_data.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or(&song.key_mode),
-        },
-        "bpm": prior_data.get("bpm").and_then(|v| v.as_i64()).unwrap_or(song.bpm),
         "keyNote": prior_data.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
         "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
         "sections": new_secs,
@@ -1077,7 +1068,7 @@ pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sectio
     // preserved on label match), then the same frozen guard re-inserts any
     // locked section the export dropped.
     let prior_structure = current_stage_data(conn, &structure_stage.id).await?;
-    let new_structure = structure_data_from_resolved(&sections, &prior_structure, &song);
+    let new_structure = structure_data_from_resolved(&sections, &prior_structure);
     let merged_structure = merge_frozen_sections("structure", &prior_structure, &new_structure);
     let s_content = json!({ "kind": "structure", "text": structure_editor_text(&merged_structure), "data": merged_structure }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
@@ -1113,7 +1104,7 @@ pub async fn create_song_from_composition(
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
-    let structure_data = structure_data_from_resolved(&sections, &Value::Null, &song);
+    let structure_data = structure_data_from_resolved(&sections, &Value::Null);
     let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
@@ -1560,6 +1551,10 @@ mod tests {
         assert_eq!(ssecs[1]["role"], json!("lift"));
         assert_eq!(ssecs[2]["bars"], json!(8), "new section gets the editor default");
         assert_eq!(ssecs[2]["role"], json!(""));
+        // song-facts contract: the back-fill drops the legacy embedded key/bpm
+        // (the SONG owns them — docs/SONG-FACTS.md); the prose notes carry over
+        assert!(sv["data"].get("key").is_none(), "back-fill must not copy the key into the artifact");
+        assert!(sv["data"].get("bpm").is_none(), "back-fill must not copy the bpm into the artifact");
         // both stages marked done
         assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "done");
         assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
@@ -1593,8 +1588,11 @@ mod tests {
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
         let labels: Vec<&str> = sv["data"]["sections"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
         assert_eq!(labels, ["Verse 1", "Chorus"]);
-        assert_eq!(sv["data"]["key"]["root"], "A"); // create-flow defaults
-        assert_eq!(sv["data"]["bpm"], json!(120));
+        // song-facts contract: the artifact carries no key/bpm — the SONG does
+        assert!(sv["data"].get("key").is_none(), "structure data must not embed the key");
+        assert!(sv["data"].get("bpm").is_none(), "structure data must not embed the bpm");
+        assert_eq!(song.key_root, "A"); // create-flow defaults live on the song
+        assert_eq!(song.bpm, 120);
         assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "done");
         assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
         // Concept stays pending — the user adds it and runs Chords next
@@ -1778,8 +1776,9 @@ mod tests {
 
         let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
-        assert_eq!(sv["data"]["key"]["root"], "C");
-        assert_eq!(sv["data"]["bpm"], json!(112));
+        // song-facts contract: key/bpm live on the SONG (asserted above), never in the artifact
+        assert!(sv["data"].get("key").is_none(), "structure data must not embed the key");
+        assert!(sv["data"].get("bpm").is_none(), "structure data must not embed the bpm");
         assert_eq!(sv["data"]["sections"][0]["label"], "Sketch");
         assert_eq!(sv["data"]["sections"][0]["bars"], json!(8));
 
@@ -2258,12 +2257,13 @@ mod tests {
         assert!(cv["text"].as_str().unwrap().contains("Chorus: D#m C# B C#"), "text rendered by the chords renderer");
         assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
 
-        // the Structure back-fill renders the INFERRED key, not the preset default
+        // the inferred key lives on the SONG only (asserted above) — the
+        // Structure back-fill carries no embedded copy (docs/SONG-FACTS.md)
         let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
         let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
-        assert_eq!(sv["data"]["key"]["root"], "D#");
-        assert_eq!(sv["data"]["key"]["mode"], "minor");
+        assert!(sv["data"].get("key").is_none(), "structure data must not embed the key");
+        assert!(sv["data"].get("bpm").is_none(), "structure data must not embed the bpm");
     }
 
     /// (2/3b) A paste with NO tags anywhere keeps today's behavior exactly:

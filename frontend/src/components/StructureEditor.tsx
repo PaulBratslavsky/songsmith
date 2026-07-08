@@ -5,17 +5,22 @@ import { NOTE_NAMES, pitchClassOf } from "../music/theory";
 import { FieldChat } from "./FieldChat";
 
 export type Section = { type?: string; label: string; bars: number; role: string; frozen?: boolean };
+/** Editor state. root/mode/bpm are SONG facts (docs/SONG-FACTS.md) — the
+ *  pickers edit them via `update_song_key`; they are NEVER persisted into the
+ *  structure artifact. Only keyNote/tempoNote/sections live in the artifact. */
 export type StructureData = { root: string; mode: string; bpm: number; keyNote: string; tempoNote: string; sections: Section[] };
 
-export function parseStructure(content: string): StructureData {
+export function parseStructure(content: string, song: { keyRoot: string; keyMode: string; bpm: number }): StructureData {
   let data: any = null, text = "";
   try { const v = JSON.parse(content); text = v?.text ?? ""; data = v?.data ?? null; } catch { text = content; }
   const km = text.match(/\*\*KEY:\*\*\s*[^\n—-]*[—-]\s*([^\n]+)/i);
   const tm = text.match(/\*\*TEMPO:\*\*\s*[^\n—-]*[—-]\s*([^\n]+)/i);
   return {
-    root: NOTE_NAMES[pitchClassOf(data?.key?.root ?? "A") ?? 0],
-    mode: data?.key?.mode ?? "minor",
-    bpm: Number(data?.bpm ?? 120),
+    // key/tempo come from the SONG — legacy artifacts' embedded data.key/bpm
+    // are tolerated but ignored (docs/SONG-FACTS.md).
+    root: NOTE_NAMES[pitchClassOf(song.keyRoot) ?? 0],
+    mode: song.keyMode === "major" ? "major" : "minor",
+    bpm: Number(song.bpm) || 120,
     keyNote: data?.keyNote ?? (km ? km[1].trim() : ""),
     tempoNote: data?.tempoNote ?? (tm ? tm[1].replace(/\([^)]*\)/g, "").trim() : ""),
     sections: Array.isArray(data?.sections)
@@ -24,24 +29,26 @@ export function parseStructure(content: string): StructureData {
   };
 }
 
+/** The saved artifact `text` — mirror of core render.rs `structure_editor_text`
+ *  for the NEW data shape: no KEY/TEMPO fact lines (the song owns those); the
+ *  prose notes stand alone. */
 export function structureToMarkdown(d: StructureData): string {
-  const out: string[] = [
-    `**KEY:** ${d.root} ${d.mode}${d.keyNote ? ` — ${d.keyNote}` : ""}`,
-    `**TEMPO:** ${d.bpm} BPM${d.tempoNote ? ` — ${d.tempoNote}` : ""}`,
-    "",
-    "**SECTION MAP**",
-    "",
-  ];
+  const out: string[] = [];
+  if (d.keyNote) out.push(`**KEY NOTE:** ${d.keyNote}`);
+  if (d.tempoNote) out.push(`**TEMPO NOTE:** ${d.tempoNote}`);
+  if (out.length) out.push("");
+  out.push("**SECTION MAP**", "");
   d.sections.forEach((s, i) => out.push(`${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`));
   return out.join("\n");
 }
 
 export function StructureEditor({
-  songId, stageId, kind, content, onChanged,
+  songId, stageId, kind, content, keyRoot, keyMode, bpm, onChanged,
 }: {
-  songId: string; stageId: string; kind: string; content: string; onChanged: () => void;
+  songId: string; stageId: string; kind: string; content: string;
+  keyRoot: string; keyMode: string; bpm: number; onChanged: () => void;
 }) {
-  const [d, setD] = useState<StructureData>(() => parseStructure(content));
+  const [d, setD] = useState<StructureData>(() => parseStructure(content, { keyRoot, keyMode, bpm }));
   const [saved, setSaved] = useState("");
   const set = (patch: Partial<StructureData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
   const setSec = (i: number, patch: Partial<Section>) => set({ sections: d.sections.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
@@ -56,9 +63,11 @@ export function StructureEditor({
     mutationFn: async () => {
       // persist `frozen` only when set, so unfrozen sections stay as before
       const sections = d.sections.map((s) => ({ type: s.type, label: s.label, bars: s.bars, role: s.role, ...(s.frozen ? { frozen: true } : {}) }));
-      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: structureToMarkdown(d), data: { key: { root: d.root, mode: d.mode }, bpm: d.bpm, keyNote: d.keyNote, tempoNote: d.tempoNote, sections } }));
-      // Structure is the source of truth for key/tempo — sync it to the song so
-      // the Chords palette, Sheet, and Ableton all infer from one place
+      // The artifact carries NO key/bpm (docs/SONG-FACTS.md) — only the prose
+      // notes and the section map. Saving also migrates legacy embedded copies away.
+      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: structureToMarkdown(d), data: { keyNote: d.keyNote, tempoNote: d.tempoNote, sections } }));
+      // The SONG owns key/tempo — the pickers write it song-level, the single
+      // source the Chords palette, Sheet, prompts, and Ableton all read.
       await api.updateSongKey(songId, d.root, d.mode, d.bpm);
     },
     onSuccess: () => { setSaved("Saved — key/tempo synced to the song."); onChanged(); },

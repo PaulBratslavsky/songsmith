@@ -347,15 +347,10 @@ function importLyricsIntoSong(songId: string, text: string) {
       ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? 8), role: old.role ?? "", ...(old.frozen ? { frozen: true } : {}) }
       : { type: "", label: p.label, bars: 8, role: "" };
   });
-  const sData = {
-    key: { root: prior?.key?.root ?? song.key_root, mode: prior?.key?.mode ?? song.key_mode },
-    bpm: prior?.bpm ?? song.bpm, keyNote: prior?.keyNote ?? "", tempoNote: prior?.tempoNote ?? "", sections,
-  };
-  const sText = [
-    `**KEY:** ${sData.key.root} ${sData.key.mode}`, `**TEMPO:** ${sData.bpm} BPM`, "", "**SECTION MAP**", "",
-    ...sections.map((s, i) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`),
-  ].join("\n");
-  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: sText, data: sData }));
+  // The SONG owns key/tempo (docs/SONG-FACTS.md) — no embedded copies; only
+  // the prose notes carry over (mirrors core agent.rs apply_parsed_lyrics).
+  const sData = { keyNote: prior?.keyNote ?? "", tempoNote: prior?.tempoNote ?? "", sections };
+  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData), data: sData }));
   // Chords back-fill from inline [chord] tags (Feature B2 #2) — mirrors agent.rs:
   // per section, the tag sequence collapsed to one progression pass, beats 4;
   // untagged sections empty; no tags anywhere → Chords untouched.
@@ -392,11 +387,16 @@ function mergeFrozen(priorSecs: Any[], newSecs: Any[]): Any[] {
 function chordsText(secs: Any[]): string {
   return secs.map((s) => `${s.label ?? "Section"}: ${(s.chords ?? []).map((c: Any) => (typeof c === "string" ? c : c.name)).join(" ")}`).join("\n");
 }
+// Mirror of StructureEditor.structureToMarkdown / core render.rs for the new
+// data shape: no KEY/TEMPO fact lines (the SONG owns key/tempo — docs/SONG-FACTS.md).
 function structureText(d: Any): string {
-  return [
-    `**KEY:** ${d.key.root} ${d.key.mode}`, `**TEMPO:** ${d.bpm} BPM`, "", "**SECTION MAP**", "",
-    ...d.sections.map((s: Any, i: number) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`),
-  ].join("\n");
+  const out: string[] = [];
+  if (d.keyNote) out.push(`**KEY NOTE:** ${d.keyNote}`);
+  if (d.tempoNote) out.push(`**TEMPO NOTE:** ${d.tempoNote}`);
+  if (out.length) out.push("");
+  out.push("**SECTION MAP**", "");
+  out.push(...d.sections.map((s: Any, i: number) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`));
+  return out.join("\n");
 }
 /** Write resolved sections into a song's Chords + Structure stages. */
 function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
@@ -429,9 +429,9 @@ function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
       ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? Math.max(1, Number(p.bars) || 8)), role: old.role ?? "", ...(old.frozen ? { frozen: true } : {}) }
       : { type: "", label: p.label, bars: Math.max(1, Number(p.bars) || 8), role: "" };
   });
+  // No embedded key/bpm — the SONG owns them (docs/SONG-FACTS.md); notes carry over.
   const sData = {
-    key: { root: priorS?.key?.root ?? song.key_root, mode: priorS?.key?.mode ?? song.key_mode },
-    bpm: priorS?.bpm ?? song.bpm, keyNote: priorS?.keyNote ?? "", tempoNote: priorS?.tempoNote ?? "",
+    keyNote: priorS?.keyNote ?? "", tempoNote: priorS?.tempoNote ?? "",
     sections: mergeFrozen(priorSSecs, newSSecs),
   };
   push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData), data: sData }));

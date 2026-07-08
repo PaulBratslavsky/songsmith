@@ -113,18 +113,23 @@ export const StructureDataSchema = z.preprocess(
   (raw) => {
     const d = asObj(raw);
     const key = asObj(d.key);
-    const bpm = Number(d.bpm ?? 120);
+    const bpm = Number(d.bpm);
     return {
-      key: { root: str(key.root) || "A", mode: str(key.mode) || "minor" },
-      bpm: Number.isFinite(bpm) ? bpm : 120,
+      // LEGACY ONLY (docs/SONG-FACTS.md): old rows embedded the song's key/bpm;
+      // the SONG owns them now. Tolerated when present, absent on new saves —
+      // readers must take key/tempo from the song, never from here.
+      key: str(key.root) ? { root: str(key.root), mode: str(key.mode) || "minor" } : undefined,
+      bpm: d.bpm != null && Number.isFinite(bpm) ? bpm : undefined,
       keyNote: str(d.keyNote),
       tempoNote: str(d.tempoNote),
       sections: Array.isArray(d.sections) ? d.sections : [],
     };
   },
   z.object({
-    key: z.object({ root: z.string(), mode: z.string() }),
-    bpm: z.number(),
+    /** @deprecated legacy embedded song fact — read the song's key instead */
+    key: z.object({ root: z.string(), mode: z.string() }).optional(),
+    /** @deprecated legacy embedded song fact — read the song's bpm instead */
+    bpm: z.number().optional(),
     keyNote: z.string(),
     tempoNote: z.string(),
     sections: z.array(StructureSectionSchema),

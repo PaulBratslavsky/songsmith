@@ -227,6 +227,9 @@ export function SongWorkspace() {
               stageId={sd.stage.id}
               kind={sd.artifact.kind}
               content={sd.artifact.content}
+              keyRoot={v.key_root}
+              keyMode={v.key_mode}
+              bpm={Number(v.bpm)}
               onChanged={invalidate}
             />
           ) : sd?.artifact && sd.stage.type === "chords" ? (

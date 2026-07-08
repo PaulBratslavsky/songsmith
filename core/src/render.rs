@@ -44,20 +44,32 @@ pub(crate) fn chords_editor_text(c: &Value) -> String {
     out.join("\n")
 }
 
-/// Mirror of `StructureEditor.structureToMarkdown`.
+/// Mirror of `StructureEditor.structureToMarkdown`. The SONG owns key/tempo
+/// (docs/SONG-FACTS.md): new editor/back-fill saves don't carry `key`/`bpm` in
+/// the data, so the KEY/TEMPO fact lines render only when the data still has
+/// them — legacy rows, and generation saves (where `enforce_song_key_tempo`
+/// re-injects the song's current values). Without the facts, the prose notes
+/// render on their own as KEY NOTE / TEMPO NOTE lines.
 pub(crate) fn structure_editor_text(d: &Value) -> String {
-    let root = d.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("");
-    let mode = d.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("");
-    let bpm = d.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
     let key_note = d.get("keyNote").and_then(|v| v.as_str()).unwrap_or("");
     let tempo_note = d.get("tempoNote").and_then(|v| v.as_str()).unwrap_or("");
-    let mut lines = vec![
-        format!("**KEY:** {root} {mode}{}", if key_note.is_empty() { String::new() } else { format!(" — {key_note}") }),
-        format!("**TEMPO:** {bpm} BPM{}", if tempo_note.is_empty() { String::new() } else { format!(" — {tempo_note}") }),
-        String::new(),
-        "**SECTION MAP**".into(),
-        String::new(),
-    ];
+    let mut lines = Vec::new();
+    if let Some(root) = d.pointer("/key/root").and_then(|v| v.as_str()) {
+        let mode = d.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("");
+        lines.push(format!("**KEY:** {root} {mode}{}", if key_note.is_empty() { String::new() } else { format!(" — {key_note}") }));
+    } else if !key_note.is_empty() {
+        lines.push(format!("**KEY NOTE:** {key_note}"));
+    }
+    if let Some(bpm) = d.get("bpm").and_then(|v| v.as_i64()) {
+        lines.push(format!("**TEMPO:** {bpm} BPM{}", if tempo_note.is_empty() { String::new() } else { format!(" — {tempo_note}") }));
+    } else if !tempo_note.is_empty() {
+        lines.push(format!("**TEMPO NOTE:** {tempo_note}"));
+    }
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push("**SECTION MAP**".into());
+    lines.push(String::new());
     if let Some(arr) = d.get("sections").and_then(|v| v.as_array()) {
         for (i, sec) in arr.iter().enumerate() {
             let label = sec.get("label").and_then(|v| v.as_str())
@@ -349,5 +361,33 @@ mod tests {
         assert!(b.contains("- Verse 1: 8 bars → aim for 4-8 lines."), "got: {b}");
         // 24 bars: 12..24 clamps to 10..10, widened to 8-10
         assert!(b.contains("- Chorus: 24 bars → aim for 8-10 lines; land the hook on line 1."), "got: {b}");
+    }
+
+    /// Song-facts contract (docs/SONG-FACTS.md): structure data WITHOUT embedded
+    /// key/bpm (the new editor-save shape) renders no KEY/TEMPO fact lines —
+    /// prose notes stand alone; legacy/splice data that still carries them
+    /// renders the classic KEY/TEMPO header unchanged.
+    #[test]
+    fn structure_text_renders_key_tempo_only_when_data_carries_them() {
+        // new shape: keyNote/tempoNote + sections, no key/bpm
+        let new_shape = json!({ "keyNote": "serves the vocal", "tempoNote": "half-time feel",
+            "sections": [{ "label": "Verse 1", "bars": 8, "role": "open" }] });
+        let t = structure_editor_text(&new_shape);
+        assert!(!t.contains("**KEY:**") && !t.contains("**TEMPO:**"), "no embedded facts → no fact lines, got: {t}");
+        assert!(t.contains("**KEY NOTE:** serves the vocal"), "got: {t}");
+        assert!(t.contains("**TEMPO NOTE:** half-time feel"), "got: {t}");
+        assert!(t.contains("1. **Verse 1** (8 bars) — open"), "got: {t}");
+
+        // new shape with empty notes: just the section map
+        let bare = json!({ "keyNote": "", "tempoNote": "", "sections": [{ "label": "Chorus", "bars": 8, "role": "" }] });
+        let t = structure_editor_text(&bare);
+        assert!(t.starts_with("**SECTION MAP**"), "got: {t}");
+
+        // legacy / generation-splice shape: KEY/TEMPO render exactly as before
+        let legacy = json!({ "key": { "root": "F#", "mode": "minor" }, "bpm": 100,
+            "keyNote": "dark", "tempoNote": "", "sections": [{ "label": "Verse 1", "bars": 8, "role": "" }] });
+        let t = structure_editor_text(&legacy);
+        assert!(t.contains("**KEY:** F# minor — dark"), "got: {t}");
+        assert!(t.contains("**TEMPO:** 100 BPM"), "got: {t}");
     }
 }
