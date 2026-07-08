@@ -125,13 +125,16 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
         // Reverse context (Feature B2 #1) — empty for a normal forward song, so
         // this prompt stays byte-identical when no later artifacts exist.
         let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
-        let later_block = if later.is_empty() { String::new() } else { format!("{LATER_STAGES_BANNER}\n\n{later}\n\n") };
+        // a self-check is by definition a regeneration — later stages are reference only
+        let later_block = if later.is_empty() { String::new() } else { format!("{LATER_STAGES_REGEN_BANNER}\n\n{later}\n\n") };
         let system = build_system_prompt(&skill, &preset, &song);
         let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
 1. TITLE/HOOK: does the song's title (from the Concept) actually land as the chorus hook line? If not, work it in so the chorus sings the title. ONLY if the song clearly found a stronger, more specific hook, build the chorus around that instead and keep it consistent across every chorus.\n\
 2. COHERENCE: every section must fit the Lyric Spec's beat sheet and the concept — no section that drifts off-theme, contradicts the story, or repeats instead of develops.\n\
-3. CRAFT: cut clichés, weak \"to be\" verbs, abstract emotion-words, forced rhymes, and over-written \"poetic\" lines that no one would actually sing; keep it human and singable.\n\
-4. Preserve the inline [chord] tags and the section labels exactly.\n\
+3. CRAFT: cut clichés, weak \"to be\" verbs, abstract emotion-words, forced rhymes, and over-written \"poetic\" lines that no one would actually sing; keep it human and singable. Hunt UNEARNED images: personified objects/weather, chained aphorisms (X's got Y and Y's got Z), abstractions doing physical verbs — an image must grow from the song's established world AND sound like a person; a line that only works as isolated poetry gets rewritten plain.\n\
+4. THE STRANGER TEST (for lyric content): reading ONLY the words, a first-time listener must be able to follow one clear story, section by section. Rewrite any line that depends on outside knowledge, any motif used before it's established in plain language, and any pronoun without an obvious referent.\n\
+5. WORDS, NOT ARRANGEMENT (for lyric content): parenthetical cues are capped at 2-3 in the whole song and must be short vocal-delivery cues only — a parenthetical is NEVER a substitute for a sung line, and production/FX directions ((melisma), (pitched down), (static)…) do not belong in lyrics; move that intent to the Generation Prompt stage's notes instead.\n\
+6. Preserve the inline [chord] tags and the section labels exactly.\n\
 Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
         let mut user = format!(
             "Prior stages (context):\n\n{prior}\n\n{later_block}---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
@@ -262,13 +265,23 @@ async fn gather_later_context(conn: &Connection, song_id: &str, ordinal: i64) ->
 /// The banner over reverse (later-stage) context in stage prompts.
 const LATER_STAGES_BANNER: &str = "ALREADY-WRITTEN LATER STAGES (this song was imported lyrics-first) — DERIVE this stage FROM them; stay consistent; do not contradict or invent a different song.";
 
+/// Used instead of `LATER_STAGES_BANNER` when the stage being run ALREADY HAS an
+/// artifact (a regeneration). Derive-from-later is right when filling an empty
+/// stage, but on a regeneration it locks in exactly what the user is trying to
+/// improve — real Claude dutifully copied a stale Generation Prompt's old lyrics
+/// back verbatim under the derive banner (caught in live skill testing).
+const LATER_STAGES_REGEN_BANNER: &str = "LATER STAGES ALREADY EXIST (reference only — they may be OUTDATED). You are REGENERATING this stage: write a fresh, improved version per your skill and the earlier stages. Do NOT copy this content back from the later stages' rendition of it; downstream stages will be re-run afterwards. Only borrow from them what is genuinely settled (the song's identity, story, and hook).";
+
 /// The user prompt for a stage run: earlier-stage context, reverse (later-
 /// stage) context when it exists, and the producer's seed. Factored out of
 /// `run_stage` so tests can assert the exact prompt without a Claude call.
 pub(crate) async fn stage_user_prompt(conn: &Connection, stage: &Stage, user_input: Option<&str>) -> Result<String> {
     let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
     let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
-    Ok(build_user_prompt(&stage.r#type, &prior, &later, user_input))
+    // Empty stage → later content is the source of truth (derive). Regeneration
+    // → later content is reference only (see LATER_STAGES_REGEN_BANNER).
+    let regenerating = db::current_artifact(conn, &stage.id).await?.is_some();
+    Ok(build_user_prompt(&stage.r#type, &prior, &later, user_input, regenerating))
 }
 
 fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> String {
@@ -292,7 +305,7 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
     )
 }
 
-fn build_user_prompt(stage_type: &str, prior: &str, later: &str, user_input: Option<&str>) -> String {
+fn build_user_prompt(stage_type: &str, prior: &str, later: &str, user_input: Option<&str>, regenerating: bool) -> String {
     let mut p = String::new();
     if !prior.is_empty() {
         p.push_str("Approved outputs from earlier stages (carry these forward):\n\n");
@@ -300,7 +313,7 @@ fn build_user_prompt(stage_type: &str, prior: &str, later: &str, user_input: Opt
         p.push_str("\n\n");
     }
     if !later.is_empty() {
-        p.push_str(LATER_STAGES_BANNER);
+        p.push_str(if regenerating { LATER_STAGES_REGEN_BANNER } else { LATER_STAGES_BANNER });
         p.push_str("\n\n");
         p.push_str(later);
         p.push_str("\n\n");
@@ -1798,6 +1811,40 @@ mod tests {
         assert!(prompt.contains("### Structure output"));
     }
 
+    /// Regenerating a stage that already has an artifact must get the REFERENCE
+    /// banner, not the derive banner — real Claude copied a stale Generation
+    /// Prompt's old lyrics back verbatim under "DERIVE FROM them" (caught live).
+    #[tokio::test]
+    async fn regenerating_stage_gets_reference_banner_not_derive() {
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+        }).await.unwrap();
+        let text = "[Verse 1]\nMidnight, the room gone quiet\n\n[Chorus]\nPull me under, make me clean";
+        let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Imported", text).await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").unwrap();
+
+        // give a LATER stage (prompt) an artifact, like a generated Generation Prompt
+        let prompt_stage = stages.iter().find(|s| s.r#type == "prompt").unwrap();
+        db::save_artifact(&conn, &song.id, Some(&prompt_stage.id), "prompt",
+            &json!({ "kind": "prompt", "text": "style + tagged lyrics …", "data": null }).to_string(),
+        ).await.unwrap();
+
+        // the lyrics stage HAS an artifact (the import) → regenerating it must
+        // use the reference banner so it doesn't copy the later stage back
+        let prompt = stage_user_prompt(&conn, lyrics_stage, None).await.unwrap();
+        assert!(prompt.contains(LATER_STAGES_REGEN_BANNER), "regen must use the reference banner, got: {prompt}");
+        assert!(!prompt.contains(LATER_STAGES_BANNER), "regen must NOT use the derive banner");
+
+        // while an EMPTY stage (concept) still derives
+        let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
+        let cprompt = stage_user_prompt(&conn, concept, None).await.unwrap();
+        assert!(cprompt.contains(LATER_STAGES_BANNER), "empty stage keeps the derive banner");
+    }
+
     /// Advance stops at a done-but-STALE stage (user-reported: after generating
     /// Concept on an imported song, advance skipped the ⚠-flagged Structure
     /// straight to Chords — the UI warned "out of date" while advance hopped it).
@@ -1843,7 +1890,7 @@ mod tests {
 
         let prompt = stage_user_prompt(&conn, concept, Some("a song about rain")).await.unwrap();
         // byte-identical to the pre-B2 prompt builder (empty later block)
-        assert_eq!(prompt, build_user_prompt("concept", "", "", Some("a song about rain")));
+        assert_eq!(prompt, build_user_prompt("concept", "", "", Some("a song about rain"), false));
         assert!(!prompt.contains("ALREADY-WRITTEN LATER STAGES"));
     }
 
