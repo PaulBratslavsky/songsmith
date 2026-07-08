@@ -40,7 +40,7 @@ function seed(): Any {
   // a demo song so the Sheet / play-along view has real data to render
   const songId = uid();
   const song = {
-    id: songId, style_preset_id: presetId, title: "Cyber Dreams", status: "in_progress",
+    id: songId, style_preset_id: presetId, title: "Cyber Dreams", intent: "", status: "in_progress",
     current_stage: "prompt", key_root: "A", key_mode: "minor", bpm: 120, voicings: "{}", created_at: ts, updated_at: ts,
   };
   const order = ["concept", "structure", "chords", "lyric_spec", "lyrics", "prompt"];
@@ -447,7 +447,8 @@ function toArtifact(art: Any | null): Artifact | null;
 function toArtifact(art: Any | null) {
   return art ? ({ ...art, version: BigInt(art.version) } as Artifact) : null;
 }
-const toSong = (v: Any): Song => ({ ...v, bpm: BigInt(v.bpm) } as Song);
+// `intent ?? ""` migrates mock DBs persisted before the North Star field existed
+const toSong = (v: Any): Song => ({ ...v, intent: v.intent ?? "", bpm: BigInt(v.bpm) } as Song);
 const toStage = (s: Any): Stage => ({ ...s, ordinal: BigInt(s.ordinal) } as Stage);
 
 /** One handler per CommandMap command — a missing or mistyped handler is a
@@ -467,7 +468,7 @@ const handlers: MockHandlers = {
   create_song: (a) => {
     const id = uid();
     const kt = presetKeyTempo(a.stylePresetId); // seed key/BPM from the preset's prose
-    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", intent: (a.intent ?? "").trim(), status: "in_progress",
       current_stage: "concept", key_root: kt.root, key_mode: kt.mode, bpm: kt.bpm, voicings: "{}", created_at: now(), updated_at: now() };
     db.songs.unshift(v);
     STAGE_ORDER.forEach((type, ordinal) =>
@@ -484,6 +485,7 @@ const handlers: MockHandlers = {
   },
   update_song_status: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.status = a.status; v.updated_at = now(); return toSong(v); },
   update_song_title: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.title = a.title; v.updated_at = now(); return toSong(v); },
+  update_song_intent: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.intent = a.intent; v.updated_at = now(); return toSong(v); },
   update_song_key: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.key_root = a.root; v.key_mode = a.mode; v.bpm = a.bpm; v.updated_at = now(); return toSong(v); },
   update_song_voicings: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.voicings = a.voicings; v.updated_at = now(); return toSong(v); },
   refine_field: (a) => `(mock) ${a.fieldLabel}: ${a.instruction}`,
@@ -500,6 +502,11 @@ const handlers: MockHandlers = {
   },
   run_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.stageId);
+    // North Star parity: a Concept-stage seed becomes the song's intent (only when empty)
+    if (stage.type === "concept" && a.userInput?.trim()) {
+      const song = db.songs.find((v: Any) => v.id === stage.song_id);
+      if (song && !(song.intent ?? "").trim()) { song.intent = a.userInput.trim(); song.updated_at = now(); }
+    }
     stage.status = "in_progress";
     const kind = KINDS[stage.type] ?? "artifact";
     const text = `# ${kind} (mock)\n\nSimulated ${stage.type} for this song. Run in the Tauri app with Claude for real output.\n` +
@@ -578,7 +585,7 @@ const handlers: MockHandlers = {
   create_song_from_lyrics: (a) => {
     const id = uid();
     const kt = presetKeyTempo(a.stylePresetId); // seed key/BPM from the preset's prose
-    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
+    const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", intent: (a.intent ?? "").trim(), status: "in_progress",
       current_stage: "concept", key_root: kt.root, key_mode: kt.mode, bpm: kt.bpm, voicings: "{}", created_at: now(), updated_at: now() };
     db.songs.unshift(v);
     STAGE_ORDER.forEach((type, ordinal) =>
@@ -657,7 +664,7 @@ export async function mockCall<C extends keyof CommandMap>(cmd: C, a: CommandArg
 
 const MOCK_TOOLS = [
   "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset",
-  "create_song","list_songs","get_song","update_song_status","update_song_title","delete_song",
+  "create_song","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
   "get_stage","run_stage","approve_stage","advance_stage",
   "get_artifact","save_artifact","list_artifact_revisions","revert_artifact",
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",

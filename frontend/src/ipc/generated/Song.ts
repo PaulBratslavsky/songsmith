@@ -2,6 +2,13 @@
 
 export type Song = { id: string, style_preset_id: string, title: string, 
 /**
+ * The producer's one-line brief ("what this song is about") — the north
+ * star every stage honors alongside the title. Seeded from the Concept
+ * stage's user input when empty; user-editable any time.
+ * `#[serde(default)]` keeps pre-upgrade payloads deserializable.
+ */
+intent: string, 
+/**
  * `in_progress` | `done` | `archived`
  */
 status: string, current_stage: string, key_root: string, 

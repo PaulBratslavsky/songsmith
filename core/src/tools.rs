@@ -37,6 +37,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "get_song", description: "Get a song with its preset and stages.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "update_song_status", description: "Set a song's status (in_progress/done/archived).", destructive: false, input_schema: obj(json!({"id": s(""),"status": s("")}), &["id","status"]) },
         ToolSpec { name: "update_song_title", description: "Rename a song (set its title).", destructive: false, input_schema: obj(json!({"id": s(""),"title": s("")}), &["id","title"]) },
+        ToolSpec { name: "update_song_intent", description: "Set a song's intent — the producer's one-line brief every stage honors alongside the title (the north star).", destructive: false, input_schema: obj(json!({"id": s(""),"intent": s("one line — what this song is about")}), &["id","intent"]) },
         ToolSpec { name: "delete_song", description: "Delete a song and all its stages/artifacts.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "get_stage", description: "Get a stage with its current artifact and active skill.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "run_stage", description: "Run a stage: load skill + style preset + prior approved artifacts, call Claude, write the artifact.", destructive: false, input_schema: obj(json!({"stage_id": s(""),"user_input": s("optional seed (your own chords/lyrics/title)")}), &["stage_id"]) },
@@ -190,6 +191,7 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "get_song" => v(db::get_song_detail(conn, arg(args, "id")?).await?),
         "update_song_status" => v(db::update_song_status(conn, arg(args, "id")?, arg(args, "status")?).await?),
         "update_song_title" => v(db::update_song_title(conn, arg(args, "id")?, arg(args, "title")?).await?),
+        "update_song_intent" => v(db::update_song_intent(conn, arg(args, "id")?, arg(args, "intent")?).await?),
         "delete_song" => { db::delete_song(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
         "get_stage" => v(db::get_stage_detail(conn, arg(args, "id")?).await?),
         "run_stage" => v(agent::run_stage(conn, settings, arg(args, "stage_id")?, arg_opt(args, "user_input").map(String::from), |_| {}, None).await?.artifact),

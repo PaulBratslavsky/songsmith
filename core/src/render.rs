@@ -262,7 +262,7 @@ mod tests {
 
     fn song(bpm: i64) -> Song {
         Song {
-            id: "s1".into(), style_preset_id: "p1".into(), title: "T".into(),
+            id: "s1".into(), style_preset_id: "p1".into(), title: "T".into(), intent: String::new(),
             status: "in_progress".into(), current_stage: "lyrics".into(),
             key_root: "A".into(), key_mode: "minor".into(), bpm,
             voicings: "{}".into(), created_at: String::new(), updated_at: String::new(),

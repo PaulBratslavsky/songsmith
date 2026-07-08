@@ -19,17 +19,19 @@ function StageTrack({ song }: { song: Song }) {
 function NewSongButton() {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
+  const [intent, setIntent] = useState("");
   const [presetId, setPresetId] = useState("");
   const nav = useNavigate();
   const qc = useQueryClient();
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.listStylePresets });
 
   const create = useMutation({
-    mutationFn: () => api.createSong(presetId || presets.data![0].id, title || "Untitled song"),
+    mutationFn: () => api.createSong(presetId || presets.data![0].id, title || "Untitled song", intent.trim() || undefined),
     onSuccess: (s) => {
       qc.invalidateQueries({ queryKey: ["songs"] });
       setOpen(false);
       setTitle("");
+      setIntent("");
       nav({ to: "/song/$id", params: { id: s.id } });
     },
   });
@@ -49,6 +51,8 @@ function NewSongButton() {
             </select>
             <label>Working title (optional)</label>
             <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Taillights" style={{ width: "100%" }} />
+            <label>What's this song about? (one line — the north star, optional)</label>
+            <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="e.g. searching for love in the desert" style={{ width: "100%" }} />
             <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}>
               <button className="ghost" onClick={() => setOpen(false)}>Cancel</button>
               <button className="primary" onClick={() => create.mutate()} disabled={create.isPending}>
@@ -68,6 +72,7 @@ function NewSongButton() {
 function NewFromLyricsButton() {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
+  const [intent, setIntent] = useState("");
   const [presetId, setPresetId] = useState("");
   const [text, setText] = useState("");
   const [preview, setPreview] = useState<ParsedLyrics | null>(null);
@@ -83,10 +88,10 @@ function NewFromLyricsButton() {
   }, [text, open]);
 
   const create = useMutation({
-    mutationFn: () => api.createSongFromLyrics(presetId || presets.data![0].id, title || "Untitled song", text),
+    mutationFn: () => api.createSongFromLyrics(presetId || presets.data![0].id, title || "Untitled song", text, intent.trim() || undefined),
     onSuccess: (s) => {
       qc.invalidateQueries({ queryKey: ["songs"] });
-      setOpen(false); setTitle(""); setText(""); setPreview(null);
+      setOpen(false); setTitle(""); setIntent(""); setText(""); setPreview(null);
       nav({ to: "/song/$id", params: { id: s.id } });
     },
   });
@@ -118,6 +123,8 @@ function NewFromLyricsButton() {
                 <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Taillights" style={{ width: "100%" }} />
               </div>
             </div>
+            <label style={{ marginTop: 8, display: "block" }}>What's this song about? (one line — the north star, optional)</label>
+            <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="e.g. searching for love in the desert" style={{ width: "100%" }} />
             <label style={{ marginTop: 8, display: "block" }}>Lyrics</label>
             <div className="row" style={{ gap: 12, alignItems: "stretch" }}>
               <textarea

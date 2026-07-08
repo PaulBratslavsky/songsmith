@@ -48,6 +48,12 @@ pub struct Song {
     pub id: String,
     pub style_preset_id: String,
     pub title: String,
+    /// The producer's one-line brief ("what this song is about") — the north
+    /// star every stage honors alongside the title. Seeded from the Concept
+    /// stage's user input when empty; user-editable any time.
+    /// `#[serde(default)]` keeps pre-upgrade payloads deserializable.
+    #[serde(default)]
+    pub intent: String,
     /// `in_progress` | `done` | `archived`
     pub status: String,
     pub current_stage: String,

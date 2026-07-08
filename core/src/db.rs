@@ -86,6 +86,7 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     .await?;
     // columns added after v0.1 — idempotent (errors if already present, ignored)
     let _ = conn.execute("ALTER TABLE song ADD COLUMN voicings TEXT NOT NULL DEFAULT '{}'", ()).await;
+    let _ = conn.execute("ALTER TABLE song ADD COLUMN intent TEXT NOT NULL DEFAULT ''", ()).await;
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN lyric_exemplars TEXT NOT NULL DEFAULT ''", ()).await;
     // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
     // songs that predate it — make room by shifting Lyrics/Prompt, then insert.
@@ -338,12 +339,13 @@ fn bpm_number_before(prefix: &str) -> Option<i64> {
 }
 
 const SONG_COLS: &str =
-    "id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at, voicings";
+    "id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at, voicings, intent";
 fn map_song(r: &libsql::Row) -> Song {
     let voicings = so(r, 10).filter(|v| !v.is_empty()).unwrap_or_else(|| "{}".into());
+    let intent = so(r, 11).unwrap_or_default();
     Song {
         id: s(r, 0), style_preset_id: s(r, 1), title: s(r, 2), status: s(r, 3), current_stage: s(r, 4),
-        key_root: s(r, 5), key_mode: s(r, 6), bpm: i(r, 7), created_at: s(r, 8), updated_at: s(r, 9), voicings,
+        key_root: s(r, 5), key_mode: s(r, 6), bpm: i(r, 7), created_at: s(r, 8), updated_at: s(r, 9), voicings, intent,
     }
 }
 // includes the current artifact's timestamp (max-version) as a correlated subquery
@@ -373,8 +375,8 @@ pub async fn create_song(conn: &Connection, preset_id: &str, title: &str) -> Res
     // song + its stage spec land atomically — no half-created songs
     let tx = conn.transaction().await?;
     tx.execute(
-        "INSERT INTO song (id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'in_progress', 'concept', ?4, ?5, ?6, ?7, ?7)",
+        "INSERT INTO song (id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, intent, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'in_progress', 'concept', ?4, ?5, ?6, '', ?7, ?7)",
         params![id.clone(), preset_id, title, key_root, key_mode, bpm, ts.clone()],
     ).await?;
     for (ordinal, stage_type) in STAGE_ORDER.iter().enumerate() {
@@ -410,6 +412,10 @@ pub async fn update_song_status(conn: &Connection, id: &str, status: &str) -> Re
 }
 pub async fn update_song_title(conn: &Connection, id: &str, title: &str) -> Result<Song> {
     conn.execute("UPDATE song SET title=?2, updated_at=?3 WHERE id=?1", params![id, title, now()]).await?;
+    get_song(conn, id).await?.ok_or_else(|| anyhow!("song not found after update"))
+}
+pub async fn update_song_intent(conn: &Connection, id: &str, intent: &str) -> Result<Song> {
+    conn.execute("UPDATE song SET intent=?2, updated_at=?3 WHERE id=?1", params![id, intent, now()]).await?;
     get_song(conn, id).await?.ok_or_else(|| anyhow!("song not found after update"))
 }
 pub async fn update_song_voicings(conn: &Connection, id: &str, voicings: &str) -> Result<Song> {
@@ -802,6 +808,27 @@ mod tests {
         }).await.unwrap();
         let song = create_song(&conn, &vague.id, "Default").await.unwrap();
         assert_eq!((song.key_root.as_str(), song.key_mode.as_str(), song.bpm), ("A", "minor", 120));
+    }
+
+    /// North Star: new songs start with an empty intent; `update_song_intent`
+    /// round-trips through get/list and bumps `updated_at`.
+    #[tokio::test]
+    async fn update_song_intent_round_trips() {
+        let (_db, conn) = mem_conn().await;
+        let preset = create_preset(&conn, StyleInput {
+            name: "P".into(), genre: String::new(), mood: String::new(), influences: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
+        }).await.unwrap();
+        let song = create_song(&conn, &preset.id, "Finding you in the sand of time").await.unwrap();
+        assert_eq!(song.intent, "", "a new song has no intent yet");
+
+        let updated = update_song_intent(&conn, &song.id, "searching for love in desert").await.unwrap();
+        assert_eq!(updated.intent, "searching for love in desert");
+        assert!(updated.updated_at >= song.updated_at);
+        let got = get_song(&conn, &song.id).await.unwrap().unwrap();
+        assert_eq!(got.intent, "searching for love in desert");
+        let listed = list_songs(&conn).await.unwrap();
+        assert_eq!(listed.iter().find(|v| v.id == song.id).unwrap().intent, "searching for love in desert");
     }
 
     /// The stored blob comes back byte-for-byte (the Composer round-trips

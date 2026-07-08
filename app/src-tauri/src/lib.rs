@@ -60,8 +60,13 @@ async fn generate_style_preset(app: tauri::AppHandle, state: State<'_, AppState>
 // ---- Songs & stages --------------------------------------------------------
 
 #[tauri::command]
-async fn create_song(state: State<'_, AppState>, style_preset_id: String, title: String) -> R<Song> {
-    db::create_song(&state.conn, &style_preset_id, &title).await.map_err(e2s)
+async fn create_song(state: State<'_, AppState>, style_preset_id: String, title: String, intent: Option<String>) -> R<Song> {
+    let song = db::create_song(&state.conn, &style_preset_id, &title).await.map_err(e2s)?;
+    // optional north-star brief straight from the create form
+    match intent.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(i) => db::update_song_intent(&state.conn, &song.id, i).await.map_err(e2s),
+        None => Ok(song),
+    }
 }
 #[tauri::command]
 async fn list_songs(state: State<'_, AppState>) -> R<Vec<Song>> {
@@ -78,6 +83,10 @@ async fn update_song_status(state: State<'_, AppState>, id: String, status: Stri
 #[tauri::command]
 async fn update_song_title(state: State<'_, AppState>, id: String, title: String) -> R<Song> {
     db::update_song_title(&state.conn, &id, &title).await.map_err(e2s)
+}
+#[tauri::command]
+async fn update_song_intent(state: State<'_, AppState>, id: String, intent: String) -> R<Song> {
+    db::update_song_intent(&state.conn, &id, &intent).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_key(state: State<'_, AppState>, id: String, root: String, mode: String, bpm: i64) -> R<Song> {
@@ -129,9 +138,14 @@ async fn import_lyrics(state: State<'_, AppState>, song_id: String, text: String
 
 /// New song from pasted lyrics: mirrors `create_song`'s inputs, then imports.
 #[tauri::command]
-async fn create_song_from_lyrics(state: State<'_, AppState>, style_preset_id: String, title: String, text: String) -> R<Song> {
+async fn create_song_from_lyrics(state: State<'_, AppState>, style_preset_id: String, title: String, text: String, intent: Option<String>) -> R<Song> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
-    agent::create_song_from_lyrics(&state.conn, &settings, &style_preset_id, &title, &text).await.map_err(e2s)
+    let song = agent::create_song_from_lyrics(&state.conn, &settings, &style_preset_id, &title, &text).await.map_err(e2s)?;
+    // optional north-star brief straight from the create form
+    match intent.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(i) => db::update_song_intent(&state.conn, &song.id, i).await.map_err(e2s),
+        None => Ok(song),
+    }
 }
 
 // ---- Composer export (composition → song) -----------------------------------
@@ -967,6 +981,7 @@ pub fn run() {
             get_song,
             update_song_status,
             update_song_title,
+            update_song_intent,
             update_song_key,
             update_song_voicings,
             import_reference,

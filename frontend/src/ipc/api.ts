@@ -34,17 +34,18 @@ export type CommandMap = {
   update_style_preset: { args: { id: string; input: StyleInput }; result: StylePreset };
   generate_style_preset: { args: { name: string; notes: string | null }; result: StyleInput };
   // songs & stages
-  create_song: { args: { stylePresetId: string; title: string }; result: Song };
+  create_song: { args: { stylePresetId: string; title: string; intent: string | null }; result: Song };
   list_songs: { args: Record<string, never>; result: Song[] };
   get_song: { args: { id: string }; result: SongDetail | null };
   update_song_status: { args: { id: string; status: string }; result: Song };
   update_song_title: { args: { id: string; title: string }; result: Song };
+  update_song_intent: { args: { id: string; intent: string }; result: Song };
   update_song_key: { args: { id: string; root: string; mode: string; bpm: number }; result: Song };
   update_song_voicings: { args: { id: string; voicings: string }; result: Song };
   import_reference: { args: { audioPath: string }; result: string };
   parse_pasted_lyrics: { args: { text: string }; result: ParsedLyrics };
   import_lyrics: { args: { songId: string; text: string }; result: void };
-  create_song_from_lyrics: { args: { stylePresetId: string; title: string; text: string }; result: Song };
+  create_song_from_lyrics: { args: { stylePresetId: string; title: string; text: string; intent: string | null }; result: Song };
   export_composition_to_song: { args: { songId: string; sectionsJson: string }; result: ExportResult };
   create_song_from_composition: {
     args: { stylePresetId: string; title: string; keyRoot: string; keyMode: string; bpm: number; sectionsJson: string };
@@ -198,19 +199,22 @@ export const api = {
     call("generate_style_preset", { name, notes: notes ?? null }),
 
   // songs & stages
-  createSong: (stylePresetId: string, title: string) => call("create_song", { stylePresetId, title }),
+  createSong: (stylePresetId: string, title: string, intent?: string) =>
+    call("create_song", { stylePresetId, title, intent: intent ?? null }),
   listSongs: () => call("list_songs"),
   getSong: (id: string) => call("get_song", { id }),
   updateSongStatus: (id: string, status: string) => call("update_song_status", { id, status }),
   updateSongTitle: (id: string, title: string) => call("update_song_title", { id, title }),
+  // the producer's one-line brief — the north star every stage honors
+  updateSongIntent: (id: string, intent: string) => call("update_song_intent", { id, intent }),
   updateSongKey: (id: string, root: string, mode: string, bpm: number) => call("update_song_key", { id, root, mode, bpm }),
   updateSongVoicings: (id: string, voicings: string) => call("update_song_voicings", { id, voicings }),
   importReference: (audioPath: string) => call("import_reference", { audioPath }),
   // paste-lyrics import (words kept verbatim — parse/tag only, never rewrite)
   parsePastedLyrics: (text: string) => call("parse_pasted_lyrics", { text }),
   importLyrics: (songId: string, text: string) => call("import_lyrics", { songId, text }),
-  createSongFromLyrics: (stylePresetId: string, title: string, text: string) =>
-    call("create_song_from_lyrics", { stylePresetId, title, text }),
+  createSongFromLyrics: (stylePresetId: string, title: string, text: string, intent?: string) =>
+    call("create_song_from_lyrics", { stylePresetId, title, text, intent: intent ?? null }),
   // Composer export (composition → song). `sectionsJson` is the RESOLVED
   // sections array from lib/music/compose/compositionToSong.ts.
   exportCompositionToSong: (songId: string, sectionsJson: string) =>

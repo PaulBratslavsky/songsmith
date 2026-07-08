@@ -79,6 +79,9 @@ export function SongWorkspace() {
   const setStatus = useMutation({ mutationFn: (s: string) => api.updateSongStatus(id, s), onSuccess: invalidate });
   const setTitle = useMutation({ mutationFn: (t: string) => api.updateSongTitle(id, t), onSuccess: invalidate });
   const [editTitle, setEditTitle] = useState<string | null>(null);
+  // 🎯 the producer's one-line brief — the north star every stage honors (title-edit pattern)
+  const setIntent = useMutation({ mutationFn: (t: string) => api.updateSongIntent(id, t), onSuccess: invalidate });
+  const [editIntent, setEditIntent] = useState<string | null>(null);
   const del = useMutation({
     mutationFn: () => api.deleteSong(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["songs"] }); nav({ to: "/" }); },
@@ -109,6 +112,29 @@ export function SongWorkspace() {
                 if (e.key === "Escape") setEditTitle(null);
               }}
               style={{ fontSize: 22, fontWeight: 700, width: "min(480px, 60vw)" }}
+            />
+          )}
+          {editIntent === null ? (
+            <div
+              className={v.intent ? "muted" : "faint"}
+              onDoubleClick={() => setEditIntent(v.intent)}
+              title="double-click to edit — every stage follows this brief"
+              style={{ cursor: "text", margin: "2px 0" }}
+            >
+              🎯 {v.intent || "set the song's intent — every stage follows it"}
+            </div>
+          ) : (
+            <input
+              autoFocus
+              value={editIntent}
+              onChange={(e) => setEditIntent(e.target.value)}
+              placeholder="what's this song about? (one line — the north star)"
+              onBlur={() => { if (editIntent.trim() !== v.intent) setIntent.mutate(editIntent.trim()); setEditIntent(null); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { if (editIntent.trim() !== v.intent) setIntent.mutate(editIntent.trim()); setEditIntent(null); }
+                if (e.key === "Escape") setEditIntent(null);
+              }}
+              style={{ width: "min(480px, 60vw)", margin: "2px 0" }}
             />
           )}
           <div className="row" style={{ gap: 8 }}>

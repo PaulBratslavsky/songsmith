@@ -54,11 +54,20 @@ where
     F: Fn(String) + Send,
 {
     let stage = db::get_stage(conn, stage_id).await?.ok_or_else(|| anyhow!("stage not found"))?;
-    let song = db::get_song(conn, &stage.song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let mut song = db::get_song(conn, &stage.song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let preset = db::get_preset(conn, &song.style_preset_id).await?.ok_or_else(|| anyhow!("style preset not found"))?;
     let skill = db::get_active_skill_for_stage(conn, &stage.r#type)
         .await?
         .ok_or_else(|| anyhow!("no enabled skill for stage '{}'", stage.r#type))?;
+
+    // North Star: a Concept-stage seed IS the producer's intent — persist it on
+    // the song BEFORE building prompts so every later stage and regeneration
+    // sees it. Concept only; only when empty — never overwrite a user-set intent.
+    if stage.r#type == "concept" && song.intent.trim().is_empty() {
+        if let Some(seed) = user_input.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            song = db::update_song_intent(conn, &song.id, seed).await?;
+        }
+    }
 
     let prior_status = stage.status.clone();
     db::set_stage_status(conn, stage_id, "in_progress").await?;
@@ -132,6 +141,7 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
         let brief_block = if tech_brief.is_empty() { String::new() } else { format!("{tech_brief}\n\n") };
         let system = build_system_prompt(&skill, &preset, &song);
         let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
+0. INTENT: does the output serve the song's title and the producer's intent (THE SONG block above)? If it drifted into a different song, rewrite toward the brief.\n\
 1. TITLE/HOOK: does the song's title (from the Concept) actually land as the chorus hook line? If not, work it in so the chorus sings the title. ONLY if the song clearly found a stronger, more specific hook, build the chorus around that instead and keep it consistent across every chorus.\n\
 2. COHERENCE: every section must fit the Lyric Spec's beat sheet and the concept — no section that drifts off-theme, contradicts the story, or repeats instead of develops.\n\
 3. CRAFT: cut clichés, weak \"to be\" verbs, abstract emotion-words, forced rhymes, and over-written \"poetic\" lines that no one would actually sing; keep it human and singable. Hunt UNEARNED images: personified objects/weather, chained aphorisms (X's got Y and Y's got Z), abstractions doing physical verbs — an image must grow from the song's established world AND sound like a person; a line that only works as isolated poetry gets rewritten plain.\n\
@@ -335,6 +345,17 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
         ktf = preset.key_tempo_feel, vr = preset.vocal_range, themes = preset.themes,
         root = song.key_root, mode = song.key_mode, bpm = song.bpm,
     );
+    // THE SONG — the producer's brief. EVERY stage sees the title + intent so
+    // no stage can drift into a different song than the one the user asked for.
+    let intent = song.intent.trim();
+    p.push_str(&format!(
+        "\n\n----- THE SONG (the producer's brief — the north star; NEVER drift from it) -----\n\
+         Title: {title}   (the title's plain meaning is part of the brief)\n\
+         Producer's intent: {intent}\n\
+         ---------------------------------------------------------------------------------",
+        title = song.title,
+        intent = if intent.is_empty() { "(none stated — honor the title)" } else { intent },
+    ));
     // The user's taste lever: lyric-stage runs (and self-checks) see the
     // preset's exemplar lines as voice calibration — never as content.
     if skill.stage_type == "lyrics" && !preset.lyric_exemplars.trim().is_empty() {
@@ -2000,7 +2021,7 @@ mod tests {
             created_at: String::new(), updated_at: String::new(),
         };
         let song = Song {
-            id: "s".into(), style_preset_id: "p".into(), title: "T".into(), status: "in_progress".into(),
+            id: "s".into(), style_preset_id: "p".into(), title: "T".into(), intent: String::new(), status: "in_progress".into(),
             current_stage: "lyrics".into(), key_root: "A".into(), key_mode: "minor".into(), bpm: 120,
             voicings: "{}".into(), created_at: String::new(), updated_at: String::new(),
         };
@@ -2017,6 +2038,85 @@ mod tests {
         preset.lyric_exemplars = "  \n ".into();
         let plain = build_system_prompt(&mk_skill("lyrics"), &preset, &song);
         assert!(!plain.contains("LYRIC EXEMPLARS"));
+    }
+
+    /// North Star: EVERY stage's system prompt carries THE SONG block with the
+    /// title + producer's intent; an empty intent shows the "(none stated —
+    /// honor the title)" fallback instead of a blank line.
+    #[test]
+    fn north_star_title_and_intent_in_every_stage_system_prompt() {
+        let mk_skill = |stage_type: &str| Skill {
+            id: "sk".into(), key: "k".into(), name: "N".into(), stage_type: stage_type.into(),
+            instructions: "INSTR".into(), source: "builtin".into(), enabled: true,
+            created_at: String::new(), updated_at: String::new(),
+        };
+        let preset = StylePreset {
+            id: "p".into(), name: "P".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+            created_at: String::new(), updated_at: String::new(),
+        };
+        let mut song = Song {
+            id: "s".into(), style_preset_id: "p".into(), title: "Finding you in the sand of time".into(),
+            intent: "searching for love in desert".into(), status: "in_progress".into(),
+            current_stage: "concept".into(), key_root: "A".into(), key_mode: "minor".into(), bpm: 120,
+            voicings: "{}".into(), created_at: String::new(), updated_at: String::new(),
+        };
+
+        for t in ["concept", "structure", "chords", "lyric_spec", "lyrics", "prompt"] {
+            let p = build_system_prompt(&mk_skill(t), &preset, &song);
+            assert!(p.contains("----- THE SONG (the producer's brief — the north star; NEVER drift from it) -----"), "{t} prompt must carry THE SONG block");
+            assert!(p.contains("Title: Finding you in the sand of time"), "{t} prompt must carry the title");
+            assert!(p.contains("Producer's intent: searching for love in desert"), "{t} prompt must carry the intent");
+            assert!(!p.contains("(none stated — honor the title)"), "{t}: a stated intent must not show the fallback");
+        }
+
+        // empty/whitespace intent → the fallback keeps the title authoritative
+        song.intent = "  \n ".into();
+        let p = build_system_prompt(&mk_skill("concept"), &preset, &song);
+        assert!(p.contains("Producer's intent: (none stated — honor the title)"), "got: {p}");
+    }
+
+    /// North Star: a Concept run with a seed persists it as the song's intent
+    /// (once) — a later run with a different seed never overwrites it, and a
+    /// seeded run of any OTHER stage never touches it.
+    #[tokio::test]
+    async fn concept_seed_persists_as_intent_only_when_empty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Finding you in the sand of time").await.unwrap();
+        assert_eq!(song.intent, "");
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let concept_stage = stages.iter().find(|s| s.r#type == "concept").unwrap();
+        let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
+
+        let claude_out = "```json\n".to_string() + &json!({
+            "title": "Finding you in the sand of time", "alternates": ["A", "B"],
+            "hook": "h", "theme": "t", "emotionalArc": "a", "mood": ["m"]
+        }).to_string() + "\n```";
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", &claude_out);
+
+        // 1. concept run with a seed → the seed (trimmed) becomes the intent
+        run_stage(&conn, &settings, &concept_stage.id, Some("  searching for love in desert \n".into()), |_| {}, None).await.unwrap();
+        let song = db::get_song(&conn, &song.id).await.unwrap().unwrap();
+        assert_eq!(song.intent, "searching for love in desert", "the concept seed is persisted as the intent");
+
+        // 2. a concept re-run with a different seed does NOT overwrite it
+        run_stage(&conn, &settings, &concept_stage.id, Some("a totally different idea".into()), |_| {}, None).await.unwrap();
+        let song = db::get_song(&conn, &song.id).await.unwrap().unwrap();
+        assert_eq!(song.intent, "searching for love in desert", "an existing intent is never overwritten");
+
+        // 3. a seeded run of another stage never touches the intent
+        db::update_song_intent(&conn, &song.id, "").await.unwrap();
+        run_stage(&conn, &settings, &structure_stage.id, Some("four on the floor".into()), |_| {}, None).await.unwrap();
+        let song = db::get_song(&conn, &song.id).await.unwrap().unwrap();
+        assert_eq!(song.intent, "", "only the CONCEPT stage seeds the intent");
+
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
     }
 
     /// (2 — pure) Progression collapse: exact repeats fold to one pass; partial
