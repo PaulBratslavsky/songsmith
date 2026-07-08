@@ -91,18 +91,23 @@ export function AIRunPanel({
     setRunning(false);
   };
   const approve = async () => { await api.approveStage(stageId); onChanged(); };
-  // key/scale override for the Chords stage — updates the song key (one source of
-  // truth) so the chord generation is grounded in it.
-  const setKey = async (root: string, mode: string) => { if (songId) { await api.updateSongKey(songId, root, mode, bpm ?? 120); onChanged(); } };
+  // key/scale/BPM are SONG facts (docs/SONG-FACTS.md) — editable BEFORE the
+  // first run so the generation is grounded in the user's choice instead of
+  // the preset-seeded default (user-reported: no way to pick the key pre-run,
+  // so the first Structure locked in A minor / 138).
+  const setKey = async (root: string, mode: string, newBpm?: number) => {
+    if (songId) { await api.updateSongKey(songId, root, mode, newBpm ?? bpm ?? 120); onChanged(); }
+  };
 
   return (
     <div className="card" style={{ marginTop: 12 }}>
       <h3>Co-write with Claude</h3>
-      {stageType === "chords" && songId && keyRoot && (
+      {(stageType === "chords" || stageType === "structure") && songId && keyRoot && (
         <div className="row" style={{ gap: 10, alignItems: "flex-end", marginBottom: 8 }}>
           <div><label>Key</label><select value={keyRoot} onChange={(e) => setKey(e.target.value, keyMode ?? "minor")} disabled={running}>{NOTE_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
           <div><label>Scale</label><select value={keyMode ?? "minor"} onChange={(e) => setKey(keyRoot, e.target.value)} disabled={running}><option value="minor">minor</option><option value="major">major</option></select></div>
-          <span className="faint" style={{ fontSize: 11 }}>steers the chords · updates the song key</span>
+          <div><label>BPM</label><input type="number" value={bpm ?? 120} onChange={(e) => setKey(keyRoot, keyMode ?? "minor", Number(e.target.value) || 120)} disabled={running} style={{ width: 70 }} /></div>
+          <span className="faint" style={{ fontSize: 11 }}>the song's key/tempo — every stage follows it</span>
         </div>
       )}
       <label>Your seed ({STAGE_LABELS[stageType]})</label>
