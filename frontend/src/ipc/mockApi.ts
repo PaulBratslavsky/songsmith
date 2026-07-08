@@ -123,6 +123,7 @@ function seed(): Any {
         id: presetId, name: "Night Drive", genre: "synthwave", mood: "moody, propulsive",
         influences: "80s film scores, neon-noir", key_tempo_feel: "A minor, ~120 BPM",
         vocal_range: "mid baritone", themes: "motion, loneliness, the open road",
+        lyric_exemplars: "",
         created_at: ts, updated_at: ts,
       },
     ],
@@ -460,8 +461,9 @@ const handlers: MockHandlers = {
   get_style_preset: (a) => db.presets.find((p: Any) => p.id === a.id) ?? null,
   create_style_preset: (a) => { const p = { id: uid(), ...a.input, created_at: now(), updated_at: now() }; db.presets.push(p); return p; },
   update_style_preset: (a) => { const p = db.presets.find((x: Any) => x.id === a.id); Object.assign(p, a.input, { updated_at: now() }); return p; },
+  // lyric_exemplars stays empty on generate — the user's taste lever, never invented
   generate_style_preset: (a) => ({ name: a.name, genre: "(mock) genre", mood: "moody", influences: "describe the sound",
-    key_tempo_feel: "A minor, 120 BPM", vocal_range: "mid", themes: `themes for ${a.name}` }),
+    key_tempo_feel: "A minor, 120 BPM", vocal_range: "mid", themes: `themes for ${a.name}`, lyric_exemplars: "" }),
   create_song: (a) => {
     const id = uid();
     const kt = presetKeyTempo(a.stylePresetId); // seed key/BPM from the preset's prose

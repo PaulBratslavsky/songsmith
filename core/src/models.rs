@@ -33,6 +33,11 @@ pub struct StylePreset {
     pub key_tempo_feel: String,
     pub vocal_range: String,
     pub themes: String,
+    /// A few lyric lines the user considers great for this project — voice/
+    /// diction/line-length calibration for the Lyricist. Never copied into
+    /// songs. `#[serde(default)]` keeps pre-upgrade payloads deserializable.
+    #[serde(default)]
+    pub lyric_exemplars: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -142,6 +147,9 @@ pub struct StyleInput {
     pub key_tempo_feel: String,
     pub vocal_range: String,
     pub themes: String,
+    /// see `StylePreset::lyric_exemplars`
+    #[serde(default)]
+    pub lyric_exemplars: String,
 }
 
 /// A final generated audio version of a song, referenced by file path on disk

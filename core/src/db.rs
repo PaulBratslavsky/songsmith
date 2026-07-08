@@ -86,6 +86,7 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     .await?;
     // columns added after v0.1 — idempotent (errors if already present, ignored)
     let _ = conn.execute("ALTER TABLE song ADD COLUMN voicings TEXT NOT NULL DEFAULT '{}'", ()).await;
+    let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN lyric_exemplars TEXT NOT NULL DEFAULT ''", ()).await;
     // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
     // songs that predate it — make room by shifting Lyrics/Prompt, then insert.
     // TRANSACTIONAL: the shift + insert must land together — a crash between them
@@ -187,11 +188,12 @@ fn i(row: &libsql::Row, i: i32) -> i64 {
 // ---- Style presets ---------------------------------------------------------
 
 const PRESET_COLS: &str =
-    "id, name, genre, mood, influences, key_tempo_feel, vocal_range, themes, created_at, updated_at";
+    "id, name, genre, mood, influences, key_tempo_feel, vocal_range, themes, lyric_exemplars, created_at, updated_at";
 fn map_preset(r: &libsql::Row) -> StylePreset {
     StylePreset {
         id: s(r, 0), name: s(r, 1), genre: s(r, 2), mood: s(r, 3), influences: s(r, 4),
-        key_tempo_feel: s(r, 5), vocal_range: s(r, 6), themes: s(r, 7), created_at: s(r, 8), updated_at: s(r, 9),
+        key_tempo_feel: s(r, 5), vocal_range: s(r, 6), themes: s(r, 7), lyric_exemplars: s(r, 8),
+        created_at: s(r, 9), updated_at: s(r, 10),
     }
 }
 
@@ -209,16 +211,16 @@ pub async fn create_preset(conn: &Connection, p: StyleInput) -> Result<StylePres
     let id = new_id();
     let ts = now();
     conn.execute(
-        "INSERT INTO style_preset (id, name, genre, mood, influences, key_tempo_feel, vocal_range, themes, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-        params![id.clone(), p.name, p.genre, p.mood, p.influences, p.key_tempo_feel, p.vocal_range, p.themes, ts],
+        "INSERT INTO style_preset (id, name, genre, mood, influences, key_tempo_feel, vocal_range, themes, lyric_exemplars, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+        params![id.clone(), p.name, p.genre, p.mood, p.influences, p.key_tempo_feel, p.vocal_range, p.themes, p.lyric_exemplars, ts],
     ).await?;
     get_preset(conn, &id).await?.ok_or_else(|| anyhow!("preset not found after create"))
 }
 pub async fn update_preset(conn: &Connection, id: &str, p: StyleInput) -> Result<StylePreset> {
     conn.execute(
-        "UPDATE style_preset SET name=?2, genre=?3, mood=?4, influences=?5, key_tempo_feel=?6, vocal_range=?7, themes=?8, updated_at=?9 WHERE id=?1",
-        params![id, p.name, p.genre, p.mood, p.influences, p.key_tempo_feel, p.vocal_range, p.themes, now()],
+        "UPDATE style_preset SET name=?2, genre=?3, mood=?4, influences=?5, key_tempo_feel=?6, vocal_range=?7, themes=?8, lyric_exemplars=?9, updated_at=?10 WHERE id=?1",
+        params![id, p.name, p.genre, p.mood, p.influences, p.key_tempo_feel, p.vocal_range, p.themes, p.lyric_exemplars, now()],
     ).await?;
     get_preset(conn, id).await?.ok_or_else(|| anyhow!("preset not found after update"))
 }
@@ -789,14 +791,14 @@ mod tests {
             name: "Sinister Memphis Phonk".into(), genre: "phonk".into(), mood: String::new(),
             influences: String::new(),
             key_tempo_feel: "Dark minor key (F minor / cowbell-friendly), ~135–145 BPM with a half-time trap feel".into(),
-            vocal_range: String::new(), themes: String::new(),
+            vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
         }).await.unwrap();
         let song = create_song(&conn, &phonk.id, "Seeded").await.unwrap();
         assert_eq!((song.key_root.as_str(), song.key_mode.as_str(), song.bpm), ("F", "minor", 140));
 
         let vague = create_preset(&conn, StyleInput {
             name: "Vibes".into(), genre: String::new(), mood: String::new(), influences: String::new(),
-            key_tempo_feel: "dreamy and slow".into(), vocal_range: String::new(), themes: String::new(),
+            key_tempo_feel: "dreamy and slow".into(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
         }).await.unwrap();
         let song = create_song(&conn, &vague.id, "Default").await.unwrap();
         assert_eq!((song.key_root.as_str(), song.key_mode.as_str(), song.bpm), ("A", "minor", 120));

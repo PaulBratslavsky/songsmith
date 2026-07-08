@@ -60,7 +60,7 @@ export function PresetChat({
       `[Songsmith — style preset]\n` +
       `Edit the style preset id="${presetId}". Current fields (JSON): ${JSON.stringify(currentRef.current)}\n` +
       `To APPLY, call the songsmith MCP tool update_style_preset with id="${presetId}" and the full field set ` +
-      `{name, genre, mood, influences, key_tempo_feel, vocal_range, themes} — preserve unchanged fields, change only what's asked. ` +
+      `{name, genre, mood, influences, key_tempo_feel, vocal_range, themes, lyric_exemplars} — preserve unchanged fields, change only what's asked. ` +
       `Then reply with one short line.\n\nRequest: ${ask}`;
     try {
       sessionRef.current = await api.chatSend(ctx, sessionRef.current ?? undefined);

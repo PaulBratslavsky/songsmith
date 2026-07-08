@@ -23,7 +23,8 @@ pub fn registry() -> Vec<ToolSpec> {
     let s = |t: &str| json!({ "type": "string", "description": t });
     let style_props = json!({
         "name": s(""), "genre": s(""), "mood": s(""), "influences": s(""),
-        "key_tempo_feel": s(""), "vocal_range": s(""), "themes": s("")
+        "key_tempo_feel": s(""), "vocal_range": s(""), "themes": s(""),
+        "lyric_exemplars": s("a few lyric lines that calibrate the Lyricist's voice — never copied")
     });
     vec![
         ToolSpec { name: "list_style_presets", description: "List all style presets.", destructive: false, input_schema: obj(json!({}), &[]) },
@@ -107,6 +108,7 @@ fn style_input(args: &Value) -> StyleInput {
         key_tempo_feel: arg_opt(args, "key_tempo_feel").unwrap_or_default().into(),
         vocal_range: arg_opt(args, "vocal_range").unwrap_or_default().into(),
         themes: arg_opt(args, "themes").unwrap_or_default().into(),
+        lyric_exemplars: arg_opt(args, "lyric_exemplars").unwrap_or_default().into(),
     }
 }
 fn skill_input(args: &Value) -> SkillInput {
@@ -170,7 +172,18 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "list_style_presets" => v(db::list_presets(conn).await?),
         "get_style_preset" => v(db::get_preset(conn, arg(args, "id")?).await?),
         "create_style_preset" => v(db::create_preset(conn, style_input(args)).await?),
-        "update_style_preset" => v(db::update_preset(conn, arg(args, "id")?, style_input(args)).await?),
+        "update_style_preset" => {
+            let id = arg(args, "id")?;
+            let mut input = style_input(args);
+            // a caller that omits lyric_exemplars (e.g. a chat edit passing the
+            // classic 7-field set) must not silently wipe the user's exemplars
+            if arg_opt(args, "lyric_exemplars").is_none() {
+                if let Some(existing) = db::get_preset(conn, id).await? {
+                    input.lyric_exemplars = existing.lyric_exemplars;
+                }
+            }
+            v(db::update_preset(conn, id, input).await?)
+        }
         "generate_style_preset" => v(agent::generate_style_preset(conn, settings, arg(args, "name")?, arg_opt(args, "notes"), |_| {}).await?),
         "create_song" => v(db::create_song(conn, arg(args, "style_preset_id")?, arg_opt(args, "title").unwrap_or("Untitled song")).await?),
         "list_songs" => v(db::list_songs(conn).await?),

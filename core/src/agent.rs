@@ -127,6 +127,9 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
         let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
         // a self-check is by definition a regeneration — later stages are reference only
         let later_block = if later.is_empty() { String::new() } else { format!("{LATER_STAGES_REGEN_BANNER}\n\n{later}\n\n") };
+        // lyrics stage: the same computed TECHNICAL BRIEF the run saw ("" otherwise)
+        let tech_brief = lyrics_brief_for_stage(conn, &stage).await?;
+        let brief_block = if tech_brief.is_empty() { String::new() } else { format!("{tech_brief}\n\n") };
         let system = build_system_prompt(&skill, &preset, &song);
         let checks = "SELF-TEST then REVISE. You wrote the output below. Audit it hard and rewrite it, fixing every issue you find:\n\
 1. TITLE/HOOK: does the song's title (from the Concept) actually land as the chorus hook line? If not, work it in so the chorus sings the title. ONLY if the song clearly found a stronger, more specific hook, build the chorus around that instead and keep it consistent across every chorus.\n\
@@ -137,7 +140,7 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
 6. Preserve the inline [chord] tags and the section labels exactly.\n\
 Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
         let mut user = format!(
-            "Prior stages (context):\n\n{prior}\n\n{later_block}---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
+            "Prior stages (context):\n\n{prior}\n\n{later_block}{brief_block}---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
             stage_label(&stage.r#type)
         );
         // frozen sections are FINAL even through a self-test/revise pass
@@ -205,6 +208,9 @@ where
         key_tempo_feel: g("key_tempo_feel"),
         vocal_range: g("vocal_range"),
         themes: g("themes"),
+        // deliberately left empty — exemplars are the USER's taste lever, not
+        // something the generator should invent
+        lyric_exemplars: String::new(),
     })
 }
 
@@ -272,20 +278,46 @@ const LATER_STAGES_BANNER: &str = "ALREADY-WRITTEN LATER STAGES (this song was i
 /// back verbatim under the derive banner (caught in live skill testing).
 const LATER_STAGES_REGEN_BANNER: &str = "LATER STAGES ALREADY EXIST (reference only — they may be OUTDATED). You are REGENERATING this stage: write a fresh, improved version per your skill and the earlier stages. Do NOT copy this content back from the later stages' rendition of it; downstream stages will be re-run afterwards. Only borrow from them what is genuinely settled (the song's identity, story, and hook).";
 
+/// The computed TECHNICAL BRIEF for a song's LYRICS stage (run + self-check):
+/// real Structure/Chords `data` + the song's BPM → per-section bar / chord-
+/// change / line budgets (see `render::lyrics_technical_brief`). Empty when
+/// the stage isn't lyrics or the song has no structure yet — prompt unchanged.
+async fn lyrics_brief_for_stage(conn: &Connection, stage: &Stage) -> Result<String> {
+    if stage.r#type != "lyrics" {
+        return Ok(String::new());
+    }
+    let Some(song) = db::get_song(conn, &stage.song_id).await? else { return Ok(String::new()) };
+    let stages = db::list_stages(conn, &stage.song_id).await?;
+    let mut structure = None;
+    let mut chords = None;
+    for s in &stages {
+        if s.r#type != "structure" && s.r#type != "chords" {
+            continue;
+        }
+        if let Some(a) = db::current_artifact(conn, &s.id).await? {
+            let data = serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned());
+            if s.r#type == "structure" { structure = data; } else { chords = data; }
+        }
+    }
+    Ok(crate::render::lyrics_technical_brief(&song, structure.as_ref(), chords.as_ref()))
+}
+
 /// The user prompt for a stage run: earlier-stage context, reverse (later-
-/// stage) context when it exists, and the producer's seed. Factored out of
-/// `run_stage` so tests can assert the exact prompt without a Claude call.
+/// stage) context when it exists, the lyrics-stage TECHNICAL BRIEF, and the
+/// producer's seed. Factored out of `run_stage` so tests can assert the exact
+/// prompt without a Claude call.
 pub(crate) async fn stage_user_prompt(conn: &Connection, stage: &Stage, user_input: Option<&str>) -> Result<String> {
     let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
     let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
+    let tech_brief = lyrics_brief_for_stage(conn, stage).await?;
     // Empty stage → later content is the source of truth (derive). Regeneration
     // → later content is reference only (see LATER_STAGES_REGEN_BANNER).
     let regenerating = db::current_artifact(conn, &stage.id).await?.is_some();
-    Ok(build_user_prompt(&stage.r#type, &prior, &later, user_input, regenerating))
+    Ok(build_user_prompt(&stage.r#type, &prior, &later, &tech_brief, user_input, regenerating))
 }
 
 fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> String {
-    format!(
+    let mut p = format!(
         "{instructions}\n\n\
          ----- STYLE PRESET (persistent context — read this on every stage) -----\n\
          Project: {name}\n\
@@ -302,10 +334,21 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
         name = preset.name, genre = preset.genre, mood = preset.mood, influences = preset.influences,
         ktf = preset.key_tempo_feel, vr = preset.vocal_range, themes = preset.themes,
         root = song.key_root, mode = song.key_mode, bpm = song.bpm,
-    )
+    );
+    // The user's taste lever: lyric-stage runs (and self-checks) see the
+    // preset's exemplar lines as voice calibration — never as content.
+    if skill.stage_type == "lyrics" && !preset.lyric_exemplars.trim().is_empty() {
+        p.push_str(&format!(
+            "\n\n----- LYRIC EXEMPLARS (calibrate voice/diction/line-length to these; NEVER copy or lightly rework them) -----\n\
+             {}\n\
+             -----------------------------------------------------------------------",
+            preset.lyric_exemplars.trim()
+        ));
+    }
+    p
 }
 
-fn build_user_prompt(stage_type: &str, prior: &str, later: &str, user_input: Option<&str>, regenerating: bool) -> String {
+fn build_user_prompt(stage_type: &str, prior: &str, later: &str, tech_brief: &str, user_input: Option<&str>, regenerating: bool) -> String {
     let mut p = String::new();
     if !prior.is_empty() {
         p.push_str("Approved outputs from earlier stages (carry these forward):\n\n");
@@ -316,6 +359,10 @@ fn build_user_prompt(stage_type: &str, prior: &str, later: &str, user_input: Opt
         p.push_str(if regenerating { LATER_STAGES_REGEN_BANNER } else { LATER_STAGES_BANNER });
         p.push_str("\n\n");
         p.push_str(later);
+        p.push_str("\n\n");
+    }
+    if !tech_brief.is_empty() {
+        p.push_str(tech_brief);
         p.push_str("\n\n");
     }
     if let Some(input) = user_input {
@@ -353,7 +400,7 @@ pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path
         Some(p) => p.id,
         None => db::create_preset(conn, StyleInput {
             name: "Imported".into(), genre: String::new(), mood: String::new(), influences: String::new(),
-            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
         }).await?.id,
     };
     let title = std::path::Path::new(audio_path).file_stem()
@@ -1124,7 +1171,7 @@ mod tests {
 
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1177,7 +1224,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1201,7 +1248,7 @@ mod tests {
     async fn frozen_chords_fixture(conn: &libsql::Connection) -> (Song, Stage, String, Value) {
         let preset = db::create_preset(conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(conn, &preset.id, "Test Song").await.unwrap();
         let stages = db::list_stages(conn, &song.id).await.unwrap();
@@ -1291,7 +1338,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1425,7 +1472,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1482,7 +1529,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
 
         let text = "[Verse 1]\nFirst line here\nSecond line here\n\n[Chorus]\nHook line";
@@ -1616,7 +1663,7 @@ mod tests {
         let (_db, conn) = mem_conn().await;
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Test Song").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1655,7 +1702,7 @@ mod tests {
         let (_db, conn) = mem_conn().await;
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
 
         // compositionToSong.ts: C major, degrees 1,5,6,4 (one bar each) →
@@ -1727,7 +1774,7 @@ mod tests {
         let (_db, conn) = mem_conn().await;
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "phonk".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Black Eucharist").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1765,7 +1812,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let text = "[Verse 1]\nCity lights are calling me home\n\n[Chorus]\nWe run until the morning finds us";
         let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Imported", text).await.unwrap();
@@ -1792,7 +1839,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let text = "[Verse 1]\nMidnight, the room gone quiet\n\n[Chorus]\nPull me under, make me clean";
         let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Tagless", text).await.unwrap();
@@ -1820,7 +1867,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let text = "[Verse 1]\nMidnight, the room gone quiet\n\n[Chorus]\nPull me under, make me clean";
         let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Imported", text).await.unwrap();
@@ -1854,7 +1901,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let text = "[Verse 1]\nMidnight, the room gone quiet\n\n[Chorus]\nPull me under, make me clean";
         let song = create_song_from_lyrics(&conn, &settings, &preset.id, "Imported", text).await.unwrap();
@@ -1882,7 +1929,7 @@ mod tests {
         let (_db, conn) = mem_conn().await;
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Forward Song").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
@@ -1890,8 +1937,86 @@ mod tests {
 
         let prompt = stage_user_prompt(&conn, concept, Some("a song about rain")).await.unwrap();
         // byte-identical to the pre-B2 prompt builder (empty later block)
-        assert_eq!(prompt, build_user_prompt("concept", "", "", Some("a song about rain"), false));
+        assert_eq!(prompt, build_user_prompt("concept", "", "", "", Some("a song about rain"), false));
         assert!(!prompt.contains("ALREADY-WRITTEN LATER STAGES"));
+    }
+
+    /// The computed TECHNICAL BRIEF lands in the LYRICS stage prompt only —
+    /// and only once real Structure data exists (missing data → no brief).
+    #[tokio::test]
+    async fn technical_brief_injected_into_lyrics_prompt_only() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Brief Song").await.unwrap(); // 120 BPM default
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let stage = |t: &str| stages.iter().find(|s| s.r#type == t).unwrap();
+
+        // no structure yet → the lyrics prompt is unchanged (no brief)
+        let bare = stage_user_prompt(&conn, stage("lyrics"), None).await.unwrap();
+        assert!(!bare.contains("TECHNICAL BRIEF"), "no data → no brief, got: {bare}");
+
+        let s_data = json!({ "sections": [
+            { "label": "Intro", "bars": 4 },
+            { "label": "Verse 1", "bars": 8 },
+            { "label": "Chorus 1", "bars": 8 }
+        ]});
+        db::save_artifact(&conn, &song.id, Some(&stage("structure").id), "structure",
+            &json!({ "kind": "structure", "text": structure_editor_text(&s_data), "data": s_data }).to_string()).await.unwrap();
+        let c_data = json!({ "sections": [
+            { "label": "Chorus 1", "chords": [{"name":"F","beats":4},{"name":"C","beats":4},{"name":"G","beats":4},{"name":"Am","beats":4}] }
+        ]});
+        db::save_artifact(&conn, &song.id, Some(&stage("chords").id), "chords",
+            &json!({ "kind": "chords", "text": chords_editor_text(&c_data), "data": c_data }).to_string()).await.unwrap();
+
+        let prompt = stage_user_prompt(&conn, stage("lyrics"), None).await.unwrap();
+        assert!(prompt.contains("----- TECHNICAL BRIEF"), "lyrics prompt must carry the brief, got: {prompt}");
+        assert!(prompt.contains("Tempo: 120 BPM → a comfortable sung line is roughly 6-10 syllables."), "got: {prompt}");
+        assert!(prompt.contains("- Intro: 4 bars, instrumental"), "got: {prompt}");
+        assert!(prompt.contains("- Chorus 1: 8 bars, 4 chord changes (16 beats) → aim for 4-8 lines, roughly one chord change per line; land the hook on line 1."), "got: {prompt}");
+
+        // other stages never see it — even with the same data present
+        for t in ["concept", "structure", "chords", "lyric_spec", "prompt"] {
+            let p = stage_user_prompt(&conn, stage(t), None).await.unwrap();
+            assert!(!p.contains("TECHNICAL BRIEF"), "{t} prompt must not carry the brief");
+        }
+    }
+
+    /// Lyric exemplars: appended to the LYRICS system prompt only, and only
+    /// when non-empty — never copied, always fenced as calibration.
+    #[test]
+    fn lyric_exemplars_in_lyrics_system_prompt_only() {
+        let mk_skill = |stage_type: &str| Skill {
+            id: "sk".into(), key: "k".into(), name: "N".into(), stage_type: stage_type.into(),
+            instructions: "INSTR".into(), source: "builtin".into(), enabled: true,
+            created_at: String::new(), updated_at: String::new(),
+        };
+        let mut preset = StylePreset {
+            id: "p".into(), name: "P".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            lyric_exemplars: "I left the porch light on again\nNobody's coming home".into(),
+            created_at: String::new(), updated_at: String::new(),
+        };
+        let song = Song {
+            id: "s".into(), style_preset_id: "p".into(), title: "T".into(), status: "in_progress".into(),
+            current_stage: "lyrics".into(), key_root: "A".into(), key_mode: "minor".into(), bpm: 120,
+            voicings: "{}".into(), created_at: String::new(), updated_at: String::new(),
+        };
+
+        let lyr = build_system_prompt(&mk_skill("lyrics"), &preset, &song);
+        assert!(lyr.contains("----- LYRIC EXEMPLARS (calibrate voice/diction/line-length to these; NEVER copy or lightly rework them) -----"), "got: {lyr}");
+        assert!(lyr.contains("I left the porch light on again"));
+
+        // other stages never see the exemplars
+        let con = build_system_prompt(&mk_skill("concept"), &preset, &song);
+        assert!(!con.contains("LYRIC EXEMPLARS"));
+
+        // empty/whitespace exemplars → the lyrics system prompt is unchanged
+        preset.lyric_exemplars = "  \n ".into();
+        let plain = build_system_prompt(&mk_skill("lyrics"), &preset, &song);
+        assert!(!plain.contains("LYRIC EXEMPLARS"));
     }
 
     /// (2 — pure) Progression collapse: exact repeats fold to one pass; partial
@@ -1935,7 +2060,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
 
         let text = "[Verse 1]\n\
@@ -1990,7 +2115,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "F minor, 140 BPM".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "F minor, 140 BPM".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
 
         let text = "[Verse 1]\nPlain words with no chord tags\n\n[Chorus]\nStill nothing marked";
@@ -2013,7 +2138,7 @@ mod tests {
         let settings = db::get_settings(&conn).await.unwrap();
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "Existing").await.unwrap();
 

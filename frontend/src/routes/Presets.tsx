@@ -5,7 +5,7 @@ import type { StylePreset, StyleInput } from "../ipc/generated";
 import { PresetChat } from "../components/PresetChat";
 
 const EMPTY: StyleInput = {
-  name: "", genre: "", mood: "", influences: "", key_tempo_feel: "", vocal_range: "", themes: "",
+  name: "", genre: "", mood: "", influences: "", key_tempo_feel: "", vocal_range: "", themes: "", lyric_exemplars: "",
 };
 
 function PresetForm({ initial, editingId, onDone }: { initial: StyleInput; editingId: string | null; onDone: () => void }) {
@@ -72,13 +72,17 @@ function PresetForm({ initial, editingId, onDone }: { initial: StyleInput; editi
       <textarea value={form.vocal_range} onChange={set("vocal_range")} placeholder="mid baritone" />
       <label>Recurring themes</label>
       <textarea value={form.themes} onChange={set("themes")} placeholder="motion, loneliness, the open road" />
+      <label>Lyric exemplars</label>
+      <textarea value={form.lyric_exemplars} onChange={set("lyric_exemplars")} rows={4}
+        placeholder={"one line per lyric, e.g.\nI left the porch light on again\nNobody's coming home"} />
+      <p className="faint" style={{ marginTop: 2 }}>a few lines that sound like what you want — calibrates the Lyricist's voice; never copied</p>
       <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}>
         {editingId && <button className="ghost" onClick={onDone}>Cancel</button>}
         <button className="primary" disabled={!form.name || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : editingId ? "Save changes" : "Create preset"}
         </button>
       </div>
-      {editingId && <PresetChat presetId={editingId} current={form} onApplied={(p) => setForm({ name: p.name, genre: p.genre, mood: p.mood, influences: p.influences, key_tempo_feel: p.key_tempo_feel, vocal_range: p.vocal_range, themes: p.themes })} />}
+      {editingId && <PresetChat presetId={editingId} current={form} onApplied={(p) => setForm({ name: p.name, genre: p.genre, mood: p.mood, influences: p.influences, key_tempo_feel: p.key_tempo_feel, vocal_range: p.vocal_range, themes: p.themes, lyric_exemplars: p.lyric_exemplars })} />}
     </div>
   );
 }
@@ -119,6 +123,7 @@ export function Presets() {
               initial={editing ? {
                 name: editing.name, genre: editing.genre, mood: editing.mood, influences: editing.influences,
                 key_tempo_feel: editing.key_tempo_feel, vocal_range: editing.vocal_range, themes: editing.themes,
+                lyric_exemplars: editing.lyric_exemplars,
               } : EMPTY}
               onDone={() => { setEditing(null); setCreating(false); }}
             />

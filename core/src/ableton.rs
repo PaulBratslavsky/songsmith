@@ -331,7 +331,7 @@ mod tests {
         let (_db, conn) = mem_conn().await;
         let preset = db::create_preset(&conn, StyleInput {
             name: "T".into(), genre: "phonk".into(), mood: String::new(), influences: String::new(),
-            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
         }).await.unwrap();
         let song = db::create_song(&conn, &preset.id, "T").await.unwrap();
         let stages = db::list_stages(&conn, &song.id).await.unwrap();
