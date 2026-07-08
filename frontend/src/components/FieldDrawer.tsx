@@ -2,6 +2,13 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { api } from "../ipc/api";
 
 export type FieldRef = { id: string; stageLabel: string; fieldLabel: string; value: string; onChange: (v: string) => void };
+
+/** The song whose page we're on — field refinement sends it so Claude gets the
+ *  song's key/BPM + style preset as context (💬 edits stay on-style). The 💬
+ *  drawer only exists on /song/<id> pages, so the URL is the source of truth. */
+function currentSongId(): string | undefined {
+  return window.location.pathname.match(/\/song\/([^/?#]+)/)?.[1];
+}
 type Ctx = { active: FieldRef | null; open: (r: FieldRef) => void; sync: (r: FieldRef) => void; close: () => void };
 
 const FieldDrawerContext = createContext<Ctx | null>(null);
@@ -51,7 +58,7 @@ function Variants({ f }: { f: FieldRef }) {
   const gen = async () => {
     setBusy(true); setOpts([]);
     try {
-      const out = await api.refineField(f.stageLabel, f.fieldLabel, f.value, "Give exactly 3 DISTINCT alternative versions of this field. Separate the three with a line containing only ~~~ . No numbering, no commentary.");
+      const out = await api.refineField(f.stageLabel, f.fieldLabel, f.value, "Give exactly 3 DISTINCT alternative versions of this field. Separate the three with a line containing only ~~~ . No numbering, no commentary.", currentSongId());
       const parts = out.split(/\n?~~~\n?/).map((s) => s.trim()).filter(Boolean);
       setOpts(parts.length >= 2 ? parts : [out.trim()]);
     } catch (e: any) { setOpts([`Error: ${String(e?.message ?? e)}`]); }
@@ -81,7 +88,7 @@ function FieldThread({ f }: { f: FieldRef }) {
     const t = input.trim(); if (!t || busy) return;
     setInput(""); setMsgs((m) => [...m, { role: "you", text: t }]); setBusy(true);
     try {
-      const out = await api.refineField(f.stageLabel, f.fieldLabel, f.value, t);
+      const out = await api.refineField(f.stageLabel, f.fieldLabel, f.value, t, currentSongId());
       f.onChange(out);
       setMsgs((m) => [...m, { role: "claude", text: "✓ updated the field" }]);
     } catch (e: any) { setMsgs((m) => [...m, { role: "claude", text: "error: " + String(e?.message ?? e) }]); }

@@ -98,9 +98,11 @@ async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<Art
     song_core::agent::self_check_stage(&state.conn, &settings, &stage_id).await.map_err(e2s)
 }
 #[tauri::command]
-async fn refine_field(state: State<'_, AppState>, stage_label: String, field_label: String, current: String, instruction: String) -> R<String> {
+async fn refine_field(state: State<'_, AppState>, stage_label: String, field_label: String, current: String, instruction: String, song_id: Option<String>) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
-    agent::refine_field(&settings, &stage_label, &field_label, &current, &instruction).await.map_err(|e| e.to_string())
+    agent::refine_field(&state.conn, &settings, song_id.as_deref(), &stage_label, &field_label, &current, &instruction)
+        .await
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 async fn delete_song(state: State<'_, AppState>, id: String) -> R<()> {

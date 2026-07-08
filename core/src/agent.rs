@@ -755,14 +755,58 @@ fn chords_text(c: &Value) -> String {
     out
 }
 
+/// The style/song context block injected into field refinement so 💬 edits stay
+/// on-style. Without it, refined fields drift: Claude rewrites a Memphis-phonk
+/// style line with no idea the project IS Memphis phonk (audit Tier-2 #9).
+pub fn field_refine_context(song: &Song, preset: &StylePreset) -> String {
+    format!(
+        "----- SONG & STYLE CONTEXT (stay faithful to this) -----\n\
+         Song: {title} — {root} {mode} · {bpm} BPM\n\
+         Genre: {genre}\nMood: {mood}\nInfluences: {influences}\n\
+         Key/tempo feel: {ktf}\nVocal: {vocal}\nThemes: {themes}\n\
+         --------------------------------------------------------",
+        title = song.title,
+        root = song.key_root,
+        mode = song.key_mode,
+        bpm = song.bpm,
+        genre = preset.genre,
+        mood = preset.mood,
+        influences = preset.influences,
+        ktf = preset.key_tempo_feel,
+        vocal = preset.vocal_range,
+        themes = preset.themes,
+    )
+}
+
 /// Refine a single field of a song spec via Claude — returns ONLY the new value
 /// for that field, so the caller can drop it straight into the structured object.
-pub async fn refine_field(settings: &Settings, stage_label: &str, field_label: &str, current: &str, instruction: &str) -> Result<String> {
-    let system = "You refine exactly ONE field of a song's structured spec. Return ONLY the new value for that field — no preamble, no explanation, no markdown code fences, no surrounding quotes. If the field is a list, separate items with ' · '. Keep the same voice and length unless the request says otherwise.";
+/// When `song_id` is given, the song's key/BPM + full style preset are injected
+/// so the rewrite stays on-style.
+pub async fn refine_field(
+    conn: &Connection,
+    settings: &Settings,
+    song_id: Option<&str>,
+    stage_label: &str,
+    field_label: &str,
+    current: &str,
+    instruction: &str,
+) -> Result<String> {
+    let mut system = String::from(
+        "You refine exactly ONE field of a song's structured spec. Return ONLY the new value for that field — no preamble, no explanation, no markdown code fences, no surrounding quotes. If the field is a list, separate items with ' · '. Keep the same voice and length unless the request says otherwise.",
+    );
+    if let Some(sid) = song_id {
+        if let Some(song) = db::get_song(conn, sid).await? {
+            if let Some(preset) = db::get_preset(conn, &song.style_preset_id).await? {
+                system.push_str("\n\n");
+                system.push_str(&field_refine_context(&song, &preset));
+                system.push_str("\nEvery rewrite must stay inside this sonic world unless the producer's request explicitly changes it.");
+            }
+        }
+    }
     let user = format!(
         "Stage: {stage_label}\nField: {field_label}\n\nCurrent value:\n{current}\n\nProducer's request: {instruction}\n\nReturn ONLY the new {field_label} value.",
     );
-    let text = call_claude(settings, system, &user, &|_: String| {}, None).await?;
+    let text = call_claude(settings, &system, &user, &|_: String| {}, None).await?;
     let t = text.trim();
     // strip an accidental ```fence``` or wrapping quotes if the model added them
     let t = t.strip_prefix("```").map(|s| s.trim_start_matches(|c: char| c.is_alphanumeric()).trim()).unwrap_or(t);

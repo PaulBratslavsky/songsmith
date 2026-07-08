@@ -123,8 +123,8 @@ export const api = {
     call<ExportResult>("export_composition_to_song", { songId, sectionsJson }),
   createSongFromComposition: (stylePresetId: string, title: string, keyRoot: string, keyMode: string, bpm: number, sectionsJson: string) =>
     call<Song>("create_song_from_composition", { stylePresetId, title, keyRoot, keyMode, bpm, sectionsJson }),
-  refineField: (stageLabel: string, fieldLabel: string, current: string, instruction: string) =>
-    call<string>("refine_field", { stageLabel, fieldLabel, current, instruction }),
+  refineField: (stageLabel: string, fieldLabel: string, current: string, instruction: string, songId?: string) =>
+    call<string>("refine_field", { stageLabel, fieldLabel, current, instruction, songId: songId ?? null }),
   deleteSong: (id: string) => call<void>("delete_song", { id }),
   getStage: (id: string) => call<StageDetail | null>("get_stage", { id }),
   runStage: (stageId: string, userInput?: string) =>
