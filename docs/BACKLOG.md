@@ -18,3 +18,10 @@
   (frontend backlog batch): CommandMap api/mock parity (#7), zod artifact schemas in
   `lib/artifacts.ts` (#8), Composer/Builder rename (#14), frontend dead-code sweep (#15), ChordPro
   consolidation into `lib/music/chordpro.ts` (#16, partial) — see the audit annotations.
+
+- **Section-spine normalization (milestone — spec first, do NOT bolt on)** (user-approved direction,
+  2026-07-08): sections (labels/order/bars) are duplicated across structure/chords/lyric_spec/lyrics
+  artifact data and reconciled by back-fills — the biggest remaining copy-drift class (see
+  docs/SONG-FACTS.md "Explicitly deferred"). Plan: a song-level `sections` entity as the single
+  spine; stage data references section ids; freeze flags move to the spine; Composer/import/export
+  read it. Touches every editor + Composer + freeze + imports — needs its own spec + test plan.
