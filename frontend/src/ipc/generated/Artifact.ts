@@ -8,4 +8,10 @@ kind: string,
 /**
  * JSON payload (shape depends on `kind`).
  */
-content: string, version: bigint, approved: boolean, created_at: string, };
+content: string, version: bigint, approved: boolean, created_at: string, 
+/**
+ * User-set name for this revision ("pre-chorus rewrite") — the History
+ * timeline's handle. `#[serde(default)]` keeps pre-upgrade payloads
+ * deserializable; NULL in the DB until the user names the revision.
+ */
+label: string | null, };

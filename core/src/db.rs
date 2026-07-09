@@ -88,6 +88,7 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE song ADD COLUMN voicings TEXT NOT NULL DEFAULT '{}'", ()).await;
     let _ = conn.execute("ALTER TABLE song ADD COLUMN intent TEXT NOT NULL DEFAULT ''", ()).await;
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN lyric_exemplars TEXT NOT NULL DEFAULT ''", ()).await;
+    let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
     // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
     // songs that predate it — make room by shifting Lyrics/Prompt, then insert.
     // TRANSACTIONAL: the shift + insert must land together — a crash between them
@@ -508,11 +509,11 @@ pub async fn get_stage_detail(conn: &Connection, id: &str) -> Result<Option<Stag
 
 // ---- Artifacts (journaled) -------------------------------------------------
 
-const ARTIFACT_COLS: &str = "id, song_id, stage_id, kind, content, version, approved, created_at";
+const ARTIFACT_COLS: &str = "id, song_id, stage_id, kind, content, version, approved, created_at, label";
 fn map_artifact(r: &libsql::Row) -> Artifact {
     Artifact {
         id: s(r, 0), song_id: s(r, 1), stage_id: so(r, 2), kind: s(r, 3), content: s(r, 4),
-        version: i(r, 5), approved: i(r, 6) != 0, created_at: s(r, 7),
+        version: i(r, 5), approved: i(r, 6) != 0, created_at: s(r, 7), label: so(r, 8),
     }
 }
 
@@ -563,6 +564,13 @@ pub async fn list_artifact_revisions(conn: &Connection, stage_id: &str) -> Resul
 pub async fn revert_artifact(conn: &Connection, artifact_id: &str) -> Result<Artifact> {
     let t = get_artifact(conn, artifact_id).await?.ok_or_else(|| anyhow!("artifact not found"))?;
     save_artifact(conn, &t.song_id, t.stage_id.as_deref(), &t.kind, &t.content).await
+}
+/// Name (or clear — `None`) a revision's label. Non-destructive metadata: the
+/// content journal is untouched; new revisions always start unlabeled (the
+/// explicit `save_artifact` column lists leave `label` NULL).
+pub async fn set_artifact_label(conn: &Connection, artifact_id: &str, label: Option<&str>) -> Result<()> {
+    conn.execute("UPDATE artifact SET label=?2 WHERE id=?1", params![artifact_id, label]).await?;
+    Ok(())
 }
 pub async fn set_artifact_approved(conn: &Connection, artifact_id: &str, approved: bool) -> Result<()> {
     conn.execute("UPDATE artifact SET approved=?2 WHERE id=?1", params![artifact_id, if approved { 1i64 } else { 0 }]).await?;
@@ -829,6 +837,37 @@ mod tests {
         assert_eq!(got.intent, "searching for love in desert");
         let listed = list_songs(&conn).await.unwrap();
         assert_eq!(listed.iter().find(|v| v.id == song.id).unwrap().intent, "searching for love in desert");
+    }
+
+    /// Revision labels (History UX): new revisions start unlabeled, a set
+    /// label round-trips through get/list, sticks to ITS revision when newer
+    /// ones land, and `None` clears it.
+    #[tokio::test]
+    async fn artifact_label_round_trips() {
+        let (_db, conn) = mem_conn().await;
+        let preset = create_preset(&conn, StyleInput {
+            name: "P".into(), genre: String::new(), mood: String::new(), influences: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
+        }).await.unwrap();
+        let song = create_song(&conn, &preset.id, "Labeled").await.unwrap();
+        let stage = list_stages(&conn, &song.id).await.unwrap().into_iter().find(|s| s.r#type == "lyrics").unwrap();
+
+        let v1 = save_artifact(&conn, &song.id, Some(&stage.id), "lyrics", r#"{"kind":"lyrics","text":"v1","data":null}"#).await.unwrap();
+        assert_eq!(v1.label, None, "a new revision starts unlabeled");
+
+        set_artifact_label(&conn, &v1.id, Some("first draft")).await.unwrap();
+        assert_eq!(get_artifact(&conn, &v1.id).await.unwrap().unwrap().label.as_deref(), Some("first draft"));
+
+        // a newer revision doesn't inherit the label; the list carries both correctly
+        save_artifact(&conn, &song.id, Some(&stage.id), "lyrics", r#"{"kind":"lyrics","text":"v2","data":null}"#).await.unwrap();
+        let revs = list_artifact_revisions(&conn, &stage.id).await.unwrap();
+        assert_eq!(revs.len(), 2);
+        assert_eq!(revs[0].label, None, "newest first, unlabeled");
+        assert_eq!(revs[1].label.as_deref(), Some("first draft"));
+
+        // None clears
+        set_artifact_label(&conn, &v1.id, None).await.unwrap();
+        assert_eq!(get_artifact(&conn, &v1.id).await.unwrap().unwrap().label, None);
     }
 
     /// The stored blob comes back byte-for-byte (the Composer round-trips

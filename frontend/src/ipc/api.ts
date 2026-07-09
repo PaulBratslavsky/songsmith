@@ -67,6 +67,7 @@ export type CommandMap = {
   save_artifact: { args: { songId: string; stageId: string | null; kind: string; content: string }; result: Artifact };
   list_artifact_revisions: { args: { stageId: string }; result: Artifact[] };
   revert_artifact: { args: { artifactId: string }; result: Artifact };
+  set_artifact_label: { args: { artifactId: string; label: string | null }; result: void };
   // skills
   list_skills: { args: Record<string, never>; result: Skill[] };
   get_skill: { args: { id: string }; result: Skill | null };
@@ -238,6 +239,8 @@ export const api = {
     call("save_artifact", { songId, stageId, kind, content }),
   listArtifactRevisions: (stageId: string) => call("list_artifact_revisions", { stageId }),
   revertArtifact: (artifactId: string) => call("revert_artifact", { artifactId }),
+  /** name (or clear — null) a revision in the History timeline; metadata only */
+  setArtifactLabel: (artifactId: string, label: string | null) => call("set_artifact_label", { artifactId, label }),
 
   // skills
   listSkills: () => call("list_skills"),

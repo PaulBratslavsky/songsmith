@@ -224,6 +224,20 @@ button.sm { padding: 3px 7px; font-size: 11px; }
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal { background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; width: 440px; max-width: 90vw; }
 
+/* ---- revision history (version control for stage artifacts) ---- */
+.hist-modal { width: 940px; max-width: 94vw; }
+.hist-body { display: flex; gap: 12px; align-items: stretch; }
+.hist-timeline { width: 250px; flex: none; max-height: 62vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.hist-item { border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; cursor: pointer; background: var(--paper); }
+.hist-item:hover { border-color: var(--ink-faint); }
+.hist-item.active { border-color: var(--accent-dim); background: var(--paper-3); }
+.hist-label { width: 100%; margin-top: 6px; padding: 3px 6px; font-size: 11px; background: var(--paper-2); }
+.hist-item.active .hist-label { background: var(--paper); }
+.hist-preview { flex: 1; min-width: 0; max-height: 62vh; overflow-y: auto; }
+.hist-preview .artifact-text { max-height: none; }
+.hist-diff .diff-add { color: var(--accent); background: rgba(200, 255, 61, 0.07); }
+.hist-diff .diff-del { color: var(--danger); opacity: 0.6; text-decoration: line-through; background: rgba(255, 92, 92, 0.05); }
+
 .tag { display: inline-block; padding: 1px 6px; border: 1px solid var(--line); border-radius: var(--r); margin: 0 4px 4px 0; font-size: 11px; color: var(--ink-dim); }
 .empty { text-align: center; color: var(--ink-faint); padding: 48px 0; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

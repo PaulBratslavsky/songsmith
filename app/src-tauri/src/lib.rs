@@ -261,6 +261,11 @@ async fn list_artifact_revisions(state: State<'_, AppState>, stage_id: String) -
 async fn revert_artifact(state: State<'_, AppState>, artifact_id: String) -> R<Artifact> {
     db::revert_artifact(&state.conn, &artifact_id).await.map_err(e2s)
 }
+/// Name (or clear) a revision in the History timeline — metadata only.
+#[tauri::command]
+async fn set_artifact_label(state: State<'_, AppState>, artifact_id: String, label: Option<String>) -> R<()> {
+    db::set_artifact_label(&state.conn, &artifact_id, label.as_deref()).await.map_err(e2s)
+}
 
 // ---- Skills ----------------------------------------------------------------
 
@@ -1002,6 +1007,7 @@ pub fn run() {
             save_artifact,
             list_artifact_revisions,
             revert_artifact,
+            set_artifact_label,
             list_skills,
             get_skill,
             create_skill,

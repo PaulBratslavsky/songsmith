@@ -47,6 +47,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "save_artifact", description: "Save a new artifact revision for a stage.", destructive: false, input_schema: obj(json!({"song_id": s(""),"stage_id": s(""),"kind": s(""),"content": s("JSON content")}), &["song_id","kind","content"]) },
         ToolSpec { name: "list_artifact_revisions", description: "List all revisions of a stage's artifact, newest first.", destructive: false, input_schema: obj(json!({"stage_id": s("")}), &["stage_id"]) },
         ToolSpec { name: "revert_artifact", description: "Restore a prior artifact revision as a new revision.", destructive: false, input_schema: obj(json!({"artifact_id": s("")}), &["artifact_id"]) },
+        ToolSpec { name: "set_artifact_label", description: "Name an artifact revision (metadata only — content untouched). The label shows in the History timeline; omit `label` to clear it.", destructive: false, input_schema: obj(json!({"artifact_id": s(""),"label": s("short name for the revision, e.g. \"pre-chorus rewrite\" (omit to clear)")}), &["artifact_id"]) },
         ToolSpec { name: "list_skills", description: "List all skills.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_skill", description: "Get a skill by id.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "create_skill", description: "Create a user skill (custom songwriting method).", destructive: false, input_schema: obj(json!({"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["key","name","stage_type","instructions"]) },
@@ -205,6 +206,8 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "save_artifact" => v(agent::save_artifact_guarded(conn, arg(args, "song_id")?, arg_opt(args, "stage_id"), arg(args, "kind")?, arg(args, "content")?).await?),
         "list_artifact_revisions" => v(db::list_artifact_revisions(conn, arg(args, "stage_id")?).await?),
         "revert_artifact" => v(agent::revert_artifact_guarded(conn, arg(args, "artifact_id")?).await?),
+        // metadata-only (never touches content) — no freeze guard needed
+        "set_artifact_label" => { db::set_artifact_label(conn, arg(args, "artifact_id")?, arg_opt(args, "label")).await?; Ok(json!({ "ok": true })) }
         "list_skills" => v(db::list_skills(conn).await?),
         "get_skill" => v(db::get_skill(conn, arg(args, "id")?).await?),
         "create_skill" => v(db::create_skill(conn, skill_input(args)).await?),

@@ -6,6 +6,7 @@ import { api, STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
 import { StageChecklist, staleStageIds } from "../components/StageChecklist";
 import { ArtifactPanel } from "../components/ArtifactPanel";
+import { HistoryButton } from "../components/RevisionHistory";
 import { AIRunPanel } from "../components/AIRunPanel";
 import { SectionChordsEditor } from "../components/SectionChordsEditor";
 import { LyricsEditor } from "../components/LyricsEditor";
@@ -198,7 +199,13 @@ export function SongWorkspace() {
         <div className="pane">
           <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
             <h2>{sd ? STAGE_LABELS[sd.stage.type] : "Stage"}</h2>
-            {sd?.skill && <span className="faint">skill: {sd.skill.name}</span>}
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              {sd?.skill && <span className="faint">skill: {sd.skill.name}</span>}
+              {/* version control for THIS stage's artifact — compare, label, restore (whole or per section) */}
+              {sd?.artifact && (
+                <HistoryButton songId={id} stageId={sd.stage.id} kind={sd.artifact.kind} current={sd.artifact} onChanged={invalidate} />
+              )}
+            </div>
           </div>
           {isStale && (
             <div className="banner warn" style={{ marginBottom: 8 }}>

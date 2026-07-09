@@ -98,6 +98,11 @@ pub struct Artifact {
     pub version: i64,
     pub approved: bool,
     pub created_at: String,
+    /// User-set name for this revision ("pre-chorus rewrite") — the History
+    /// timeline's handle. `#[serde(default)]` keeps pre-upgrade payloads
+    /// deserializable; NULL in the DB until the user names the revision.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

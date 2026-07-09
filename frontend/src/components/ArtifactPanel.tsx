@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import type { Artifact } from "../ipc/generated";
+import { HistoryButton } from "./RevisionHistory";
 
 function parse(content: string): { text: string; data: any } {
   try {
@@ -68,22 +69,11 @@ export function ArtifactPanel({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [showHistory, setShowHistory] = useState(false);
-  const qc = useQueryClient();
   const { text, data } = parse(artifact.content);
 
-  const revisions = useQuery({
-    queryKey: ["revisions", stageId],
-    queryFn: () => api.listArtifactRevisions(stageId),
-    enabled: showHistory,
-  });
   const saveEdit = useMutation({
     mutationFn: () => api.saveArtifact(songId, stageId, artifact.kind, JSON.stringify({ kind: artifact.kind, text: draft, data })),
     onSuccess: () => { setEditing(false); onChanged(); },
-  });
-  const revert = useMutation({
-    mutationFn: (id: string) => api.revertArtifact(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["revisions", stageId] }); onChanged(); },
   });
 
   return (
@@ -95,7 +85,7 @@ export function ArtifactPanel({
           {artifact.approved && <span className="badge done">approved</span>}
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button className="sm" onClick={() => setShowHistory((h) => !h)}>{showHistory ? "hide history" : "history"}</button>
+          <HistoryButton songId={songId} stageId={stageId} kind={artifact.kind} current={artifact} onChanged={onChanged} />
           {!editing ? (
             <button className="sm" onClick={() => { setDraft(text); setEditing(true); }}>edit</button>
           ) : (
@@ -114,18 +104,6 @@ export function ArtifactPanel({
           <div className="artifact-text">{text || <span className="faint">(empty)</span>}</div>
           <StructuredView data={data} />
         </>
-      )}
-
-      {showHistory && (
-        <div className="card" style={{ marginTop: 10 }}>
-          <h3>Revision history</h3>
-          {revisions.data?.map((rv) => (
-            <div key={rv.id} className="list-item" style={{ marginBottom: 6 }}>
-              <span>v{String(rv.version)} {rv.approved ? "· approved" : ""} <span className="faint">{rv.created_at.slice(0, 19).replace("T", " ")}</span></span>
-              <button className="sm" onClick={() => revert.mutate(rv.id)}>restore</button>
-            </div>
-          ))}
-        </div>
       )}
     </div>
   );

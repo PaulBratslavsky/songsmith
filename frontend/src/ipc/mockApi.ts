@@ -445,7 +445,8 @@ function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
 function toArtifact(art: Any): Artifact;
 function toArtifact(art: Any | null): Artifact | null;
 function toArtifact(art: Any | null) {
-  return art ? ({ ...art, version: BigInt(art.version) } as Artifact) : null;
+  // `label ?? null` migrates mock DBs persisted before revision labels existed
+  return art ? ({ ...art, label: art.label ?? null, version: BigInt(art.version) } as Artifact) : null;
 }
 // `intent ?? ""` migrates mock DBs persisted before the North Star field existed
 const toSong = (v: Any): Song => ({ ...v, intent: v.intent ?? "", bpm: BigInt(v.bpm) } as Song);
@@ -539,9 +540,14 @@ const handlers: MockHandlers = {
   revert_artifact: (a) => {
     const src = db.artifacts.find((x: Any) => x.id === a.artifactId);
     const ver = (currentArtifact(src.stage_id)?.version ?? 0) + 1;
-    const art = { ...src, id: uid(), version: ver, approved: false, created_at: now() };
+    // the restored revision starts unlabeled, like the core (label stays NULL)
+    const art = { ...src, id: uid(), version: ver, approved: false, label: null, created_at: now() };
     db.artifacts.push(art);
     return toArtifact(art);
+  },
+  set_artifact_label: (a) => {
+    const x = db.artifacts.find((y: Any) => y.id === a.artifactId);
+    if (x) x.label = a.label;
   },
   list_skills: () => db.skills,
   get_skill: (a) => db.skills.find((s: Any) => s.id === a.id) ?? null,
@@ -666,7 +672,7 @@ const MOCK_TOOLS = [
   "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset",
   "create_song","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
   "get_stage","run_stage","approve_stage","advance_stage",
-  "get_artifact","save_artifact","list_artifact_revisions","revert_artifact",
+  "get_artifact","save_artifact","list_artifact_revisions","revert_artifact","set_artifact_label",
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",
   "list_progressions","save_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
