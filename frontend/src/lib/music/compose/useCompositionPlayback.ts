@@ -1,18 +1,52 @@
-// Progression Composer — playback hook. Owns the tick clock (sixteenth
-// resolution) and is the only piece that touches the synth. The pure
-// schedule comes from buildSchedule; this walks the tick cursor and
-// fires the synth with each layer's own voice + sustain.
+// Progression Composer — playback hook. Owns the playback clock
+// (sixteenth-tick resolution) and is the only piece that touches the
+// synth. The pure schedule comes from buildSchedule; this walks the tick
+// cursor and fires the synth with each layer's own voice + sustain.
 //
-// The schedule and tempo are read through refs so that editing the
-// composition *while it plays* takes effect on the next tick WITHOUT
-// re-arming the interval (which would snap the cursor back to tick 0).
-// Only starting/stopping and the loop flag re-arm the clock.
+// N2 timing upgrade: notes are no longer fired from a setTimeout tick
+// (which drifts) — a LOOKAHEAD scheduler runs on a coarse ~25ms timer
+// and schedules every tick's audio ~100ms ahead at EXACT audio-clock
+// times (synth.playNote/playChord take an `at`). The same timer then
+// maps audio time -> tick for the UI: each scheduled tick carries its
+// start time, and the cursor state is set once when that boundary
+// passes — never more than once per tick, exactly the old discipline
+// (activeChordId / activeLineTick additionally only SET on change).
+//
+// The schedule, tempo, and voices are read through refs so that editing
+// the composition *while it plays* takes effect on the next scheduled
+// tick WITHOUT re-arming the clock (which would snap the cursor back to
+// tick 0). Only starting/stopping and the loop flag re-arm it. On stop,
+// notes already sounding ring out their envelope (as before) but the
+// ~100ms of lookahead notes that haven't started yet are cancelled.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { synth } from '../../../music/synth';
+import { synth, type Voice } from '../../../music/synth';
 import type { Composition } from './types';
 import { buildSchedule, msPerTick } from './playback';
 import { spanAt } from './spans';
+
+/** Per-lane voice mapping (melody/chords/bass keep distinct timbres). */
+export type LaneVoices = { melody: Voice; chord: Voice; bass: Voice };
+
+/** The original oscillator mapping — the default, byte-identical path. */
+export const SYNTH_VOICES: LaneVoices = {
+  melody: 'piano',
+  chord: 'string',
+  bass: 'bass',
+};
+
+/** N2 sampled mapping (falls back per-voice while samples load). */
+export const SAMPLED_VOICES: LaneVoices = {
+  melody: 'piano-sampled',
+  chord: 'strings-sampled',
+  bass: 'bass-sampled',
+};
+
+/** Schedule audio this far ahead of the audio clock (seconds)... */
+const LOOKAHEAD_S = 0.1;
+/** ...checking for due work this often (ms). Coarser than any tick
+ *  (a sixteenth at 180 BPM is ~83ms), so UI updates stay per-tick. */
+const TIMER_MS = 25;
 
 export type CompositionPlayback = {
   isPlaying: boolean;
@@ -36,7 +70,7 @@ export type CompositionPlayback = {
 
 export function useCompositionPlayback(
   comp: Composition,
-  opts: { loop?: boolean } = {},
+  opts: { loop?: boolean; voices?: LaneVoices } = {},
 ): CompositionPlayback {
   const loop = opts.loop ?? true;
   const [isPlaying, setIsPlaying] = useState(false);
@@ -50,12 +84,15 @@ export function useCompositionPlayback(
     return map;
   }, [comp]);
 
-  // Latest schedule + tempo, read live by the running interval so edits
-  // (and tempo nudges) apply on the next tick without resetting position.
+  // Latest schedule + tempo + voices, read live by the running scheduler
+  // so edits (and tempo nudges, and the Synth/Sampled picker) apply to
+  // the next scheduled tick without resetting position.
   const eventsRef = useRef(eventsByStep);
   eventsRef.current = eventsByStep;
   const tickMsRef = useRef(msPerTick(comp.bpm));
   tickMsRef.current = msPerTick(comp.bpm);
+  const voicesRef = useRef(opts.voices ?? SYNTH_VOICES);
+  voicesRef.current = opts.voices ?? SYNTH_VOICES;
   // Read live so a key/length change while playing wraps at the right tick.
   const totalTicksRef = useRef(comp.totalTicks);
   totalTicksRef.current = comp.totalTicks;
@@ -115,44 +152,86 @@ export function useCompositionPlayback(
       }
     };
 
-    const fire = (step: number) => {
+    // Schedule one tick's notes at exact audio time `when`, remembering a
+    // cancel so stop() can drop lookahead notes that haven't started yet.
+    const pending: { time: number; cancel: () => void }[] = [];
+    const fire = (step: number, when: number) => {
       const e = eventsRef.current.get(step);
       if (!e) return;
       const tickMs = tickMsRef.current;
+      const v = voicesRef.current;
+      const cancels: (() => void)[] = [];
       // Each layer sustains for its span length and uses its own voice.
-      if (e.chord) synth.playChord(e.chord, tickMs * (e.chordTicks ?? 1) * 0.97, 'string');
-      if (e.melody != null) synth.playNote(e.melody, tickMs * (e.melodyTicks ?? 1) * 0.95, 'piano');
-      if (e.bass != null) synth.playNote(e.bass, tickMs * (e.bassTicks ?? 1) * 0.97, 'bass');
+      if (e.chord) cancels.push(synth.playChord(e.chord, tickMs * (e.chordTicks ?? 1) * 0.97, v.chord, when));
+      if (e.melody != null) cancels.push(synth.playNote(e.melody, tickMs * (e.melodyTicks ?? 1) * 0.95, v.melody, when));
+      if (e.bass != null) cancels.push(synth.playNote(e.bass, tickMs * (e.bassTicks ?? 1) * 0.97, v.bass, when));
+      if (cancels.length) pending.push({ time: when, cancel: () => cancels.forEach((c) => c()) });
     };
 
+    // ---- lookahead state (local to this run; edits flow in via refs) ----
+    let nextStep = 0; // next tick to SCHEDULE (audio side)
+    let nextTime = synth.now() + 0.05; // its audio-clock start time
+    let endAt: number | null = null; // non-loop: when the last tick finishes
+    // UI boundary queue: each scheduled tick with its start time; the UI
+    // side pops due entries and moves the cursor once per boundary.
+    const uiQueue: { step: number; time: number }[] = [];
+
+    const scheduleAhead = () => {
+      const horizon = synth.now() + LOOKAHEAD_S;
+      while (endAt == null && nextTime < horizon) {
+        fire(nextStep, nextTime);
+        uiQueue.push({ step: nextStep, time: nextTime });
+        // Tempo is read PER TICK, so a live bpm change stretches from the
+        // next scheduled tick onward — the cursor never resets.
+        nextTime += tickMsRef.current / 1000;
+        const n = nextStep + 1;
+        if (n >= totalTicksRef.current) {
+          if (loop) nextStep = 0;
+          else endAt = nextTime; // let the last tick play out, then stop
+        } else {
+          nextStep = n;
+        }
+      }
+    };
+
+    const updateUi = () => {
+      const now = synth.now();
+      // Started notes no longer need their stop()-cancel kept around.
+      while (pending.length && pending[0].time <= now) pending.shift();
+      // Advance the cursor to the LATEST boundary that has passed —
+      // at most one state set per timer run, one run per tick boundary.
+      let due: { step: number } | null = null;
+      while (uiQueue.length && uiQueue[0].time <= now) due = uiQueue.shift()!;
+      if (due) {
+        stepRef.current = due.step;
+        setCurrentStep(due.step);
+        noteActiveChord(due.step);
+      }
+      if (endAt != null && now >= endAt) {
+        setIsPlaying(false);
+        setCurrentStep(null);
+      }
+    };
+
+    // Cursor answers immediately on play (tick 0's audio starts ~50ms
+    // later on the audio clock; its queued boundary re-set is a no-op).
     stepRef.current = 0;
     setCurrentStep(0);
     noteActiveChord(0);
-    fire(0);
+    scheduleAhead();
 
-    // Self-scheduling timeout (re-read tickMs each tick) so a live tempo
-    // change takes effect without re-arming and losing the cursor.
-    let timer: ReturnType<typeof setTimeout>;
-    const advance = () => {
-      const next = stepRef.current + 1;
-      if (next >= totalTicksRef.current) {
-        if (!loop) {
-          setIsPlaying(false);
-          setCurrentStep(null);
-          return;
-        }
-        stepRef.current = 0;
-      } else {
-        stepRef.current = next;
-      }
-      setCurrentStep(stepRef.current);
-      noteActiveChord(stepRef.current);
-      fire(stepRef.current);
-      timer = setTimeout(advance, tickMsRef.current);
+    const timer = setInterval(() => {
+      scheduleAhead();
+      updateUi();
+    }, TIMER_MS);
+
+    return () => {
+      clearInterval(timer);
+      // Notes already sounding ring out (old behavior); lookahead notes
+      // that haven't started yet are cancelled so stop is immediate.
+      const now = synth.now();
+      for (const p of pending) if (p.time > now) p.cancel();
     };
-    timer = setTimeout(advance, tickMsRef.current);
-
-    return () => clearTimeout(timer);
   }, [isPlaying, loop]);
 
   return {

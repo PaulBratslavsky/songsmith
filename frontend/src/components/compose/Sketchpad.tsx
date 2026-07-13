@@ -29,7 +29,12 @@ import {
 import { LABEL_W, BAR_MIN_PX } from './laneLayout';
 import { CompositionSchema, parseStoredComposition } from '../../lib/music/compose/schema';
 import { useCompositionState } from '../../lib/music/compose/useCompositionState';
-import { useCompositionPlayback } from '../../lib/music/compose/useCompositionPlayback';
+import {
+  useCompositionPlayback,
+  SYNTH_VOICES,
+  SAMPLED_VOICES,
+  type LaneVoices,
+} from '../../lib/music/compose/useCompositionPlayback';
 import { synth } from '../../music/synth';
 import {
   keyToScaleSelection,
@@ -162,9 +167,19 @@ export function Sketchpad({
   const [seventhMode, setSeventhMode] = useState(false);
   // N1: composition view — the editable lane grid or read-only notation.
   const [view, setView] = useState<'grid' | 'notation'>('grid');
+  // N2: sound set — the original oscillators or the sampled soundfont
+  // voices. Per-lane mapping stays (melody=piano, chords=strings,
+  // bass=bass); picking Sampled kicks off the lazy soundfont load and
+  // playback falls back to the oscillators until it lands.
+  const [soundSet, setSoundSet] = useState<'synth' | 'sampled'>('synth');
+  const voices: LaneVoices = soundSet === 'sampled' ? SAMPLED_VOICES : SYNTH_VOICES;
+  const pickSoundSet = (s: 'synth' | 'sampled') => {
+    if (s === 'sampled') void synth.preloadSampled();
+    setSoundSet(s);
+  };
 
   const { isPlaying, currentStep, activeChordId, activeLineTick, toggle, stop } =
-    useCompositionPlayback(comp, { loop });
+    useCompositionPlayback(comp, { loop, voices });
 
   // Active BAR under the playhead for the notation view. Sketchpad already
   // re-renders per tick (currentStep); flooring to the bar keeps the memo'd
@@ -205,11 +220,11 @@ export function Sketchpad({
   previewRef.current = {
     melody: (d) => {
       const midi = resolveMelodyMidi(comp, { degree: d, octave: 0 });
-      if (midi != null) synth.playNote(midi, 260, 'piano');
+      if (midi != null) synth.playNote(midi, 260, voices.melody);
     },
     bass: (d) => {
       const midi = resolveBassMidi(comp, { degree: d, octave: 0 });
-      if (midi != null) synth.playNote(midi, 260, 'bass');
+      if (midi != null) synth.playNote(midi, 260, voices.bass);
     },
   };
 
@@ -464,9 +479,33 @@ export function Sketchpad({
           </div>
         </div>
 
-        <button type="button" className="sm" onClick={() => setMuted((m) => !m)}>
-          {muted ? '🔇 Muted' : '🔊 Sound'}
-        </button>
+        {/* N2: sound — mute toggle + Synth (oscillators) / Sampled picker */}
+        <div className="row" style={{ alignItems: 'center', gap: 3 }}>
+          <button
+            type="button"
+            className="sm"
+            onClick={() => setMuted((m) => !m)}
+            title={muted ? 'Unmute' : 'Mute'}
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+          <button
+            type="button"
+            className={'sm' + (soundSet === 'synth' ? ' primary' : '')}
+            onClick={() => pickSoundSet('synth')}
+            title="Built-in oscillator voices"
+          >
+            Synth
+          </button>
+          <button
+            type="button"
+            className={'sm' + (soundSet === 'sampled' ? ' primary' : '')}
+            onClick={() => pickSoundSet('sampled')}
+            title="Sampled piano / strings / bass (FluidR3 soundfont — loads on first pick, oscillators sound until then)"
+          >
+            Sampled
+          </button>
+        </div>
 
         <button
           type="button"

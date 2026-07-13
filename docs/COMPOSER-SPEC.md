@@ -295,10 +295,36 @@ independent phases, smallest-first:
     never redraws per tick; full SVG redraw on comp/key/clef/width change only). Dark theme via
     context ink fill/stroke + accent highlight. Lyric sheet stays below in both views. Triplets
     don't exist on the 16th grid, so no tuplet handling; blank sketches render their 8 bars.
-- **N2 — Realistic playback:** soundfont-based voices (WebAudioFont or soundfont-player, local
-  assets — no network dependency) behind the existing `synth` interface as selectable "Piano
-  (sampled)/Strings/Bass" options; the oscillator voices stay as fallback. Timing note: consider the
-  AudioContext-lookahead scheduler upgrade here (known setTimeout drift).
+- **N2 — Realistic playback:** — ✅ DONE (2026-07-13) — soundfont-based voices (WebAudioFont or
+  soundfont-player, local assets — no network dependency) behind the existing `synth` interface as
+  selectable "Piano (sampled)/Strings/Bass" options; the oscillator voices stay as fallback. Timing
+  note: consider the AudioContext-lookahead scheduler upgrade here (known setTimeout drift).
+  - **Shipped 2026-07-13:** sampled voices + the lookahead-scheduler timing upgrade, frontend-only.
+    Assets: three FluidR3_GM instruments vendored from **gleitz/midi-js-soundfonts (MIT; the
+    underlying FluidR3_GM soundfont by Frank Wen is also MIT)** — acoustic_grand_piano /
+    string_ensemble_1 / acoustic_bass, trimmed to every 3rd semitone in each lane's octave band
+    (one velocity layer, MP3 — WKWebView won't decode OGG) as
+    `frontend/src/assets/soundfonts/{piano,strings,bass}.json` (~1.4 MB total; license +
+    regeneration notes in the README beside them). The JSONs are dynamic-imported (own lazy Vite
+    chunks, like NotationView's vexflow — main bundle +3 KB only) and decoded once by
+    `music/soundfonts.ts`; playback picks the nearest sample and repitches via playbackRate
+    (≤1 semitone). `synth` grew voices `piano-sampled`/`strings-sampled`/`bass-sampled` riding the
+    same playNote/playChord API and master gain (mute works) — while chunks load, or if decode
+    fails, each falls back to its oscillator sibling so playback never goes silent; old call sites
+    (Chord Builder, SectionChordsEditor, Circle of Fifths, ChordPalette) are untouched oscillator
+    paths. The transport's Sound control is now mute + a **Synth / Sampled** picker (per-lane
+    mapping stays melody=piano, chords=strings, bass=bass; picking Sampled preloads; lane previews
+    follow the picker; switching mid-play applies on the next scheduled tick). Timing:
+    useCompositionPlayback's setTimeout tick clock became an AudioContext LOOKAHEAD scheduler — a
+    25 ms timer schedules notes ~100 ms ahead at exact audio-clock times (playNote/playChord take
+    an optional `at` and return a cancel fn); the same timer maps audio time → tick and moves the
+    cursor once per boundary, so the exposed API (isPlaying/currentStep/activeChordId/
+    activeLineTick/loop) and the per-tick / per-chord / per-line re-render discipline are unchanged
+    (playhead CSS-calc, lyric-sheet highlight, notation active bar all work as before).
+    Schedule/tempo/voices are still read through refs, so mid-play edits and tempo nudges apply
+    from the next scheduled tick without resetting the cursor; on stop, sounding notes ring out
+    (old behavior) but not-yet-started lookahead notes are cancelled. With "Synth" selected the
+    audio path is the original oscillator code.
 - **N3 — MIDI keyboard input:** Tauri's WKWebView has NO Web MIDI — requires a native bridge:
   `midir` crate in the Rust core streaming note events over a Tauri channel; frontend maps notes to
   the cursor position/duration for step entry into melody/bass lanes. Device picker in the transport.

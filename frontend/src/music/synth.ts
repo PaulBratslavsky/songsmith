@@ -7,6 +7,15 @@
 // playNote / playChord / setMuted with a trailing `voice` arg. The original
 // playChord / playChordAt / playSequence exports are unchanged so existing
 // call sites (Chord Builder, Circle of Fifths) keep working.
+//
+// N2 adds SAMPLED voices ('piano-sampled' / 'strings-sampled' /
+// 'bass-sampled') backed by vendored FluidR3_GM notes (music/soundfonts).
+// They ride the same playNote/playChord API and the same master gain
+// (mute works); while the sample chunks load — or if decoding fails —
+// each sampled voice gracefully falls back to its oscillator sibling.
+// playNote/playChord also grew an optional `at` (audio-clock start time,
+// for the lookahead scheduler) and return a cancel fn; existing callers
+// that ignore both are unaffected.
 
 let ctx: AudioContext | null = null;
 function audio(): AudioContext {
@@ -65,7 +74,29 @@ export function playSequence(steps: Step[], bpm: number, onStep?: (i: number) =>
 
 // ---- Per-voice synth (Composer) ----
 
-export type Voice = "default" | "piano" | "string" | "bass";
+import { getSample, loadSamples, samplesReady, type SampledInstrument } from "./soundfonts";
+
+/** The original oscillator voices (VOICES holds their params). */
+type OscVoice = "default" | "piano" | "string" | "bass";
+
+export type Voice = OscVoice | "piano-sampled" | "strings-sampled" | "bass-sampled";
+
+/** No-op cancel for paths with nothing to stop. */
+const NOOP = () => {};
+
+type SampledParams = {
+  instrument: SampledInstrument;
+  /** Oscillator voice used while samples load / if decoding failed. */
+  fallback: OscVoice;
+  /** Per-note gain (samples are hotter than the oscillator peaks). */
+  peak: number;
+};
+
+const SAMPLED: Partial<Record<Voice, SampledParams>> = {
+  "piano-sampled": { instrument: "piano", fallback: "piano", peak: 0.9 },
+  "strings-sampled": { instrument: "strings", fallback: "string", peak: 0.5 },
+  "bass-sampled": { instrument: "bass", fallback: "bass", peak: 0.9 },
+};
 
 type VoiceParams = {
   type: OscillatorType;
@@ -77,7 +108,7 @@ type VoiceParams = {
   cutoff: number | null;
 };
 
-const VOICES: Record<Voice, VoiceParams> = {
+const VOICES: Record<OscVoice, VoiceParams> = {
   default: { type: "triangle", attack: 0.005, peak: 0.5, cutoff: null },
   // Melody — bright and percussive.
   piano: { type: "triangle", attack: 0.003, peak: 0.5, cutoff: 4500 },
@@ -109,18 +140,49 @@ class VoiceSynth {
     if (this.masterGain) this.masterGain.gain.value = muted ? 0 : 0.3;
   }
 
-  /** Play one MIDI note with the given voice for `durationMs`. */
-  playNote(midi: number, durationMs = 600, voice: Voice = "default"): void {
-    if (this.muted) return;
+  /** Current audio-clock time (creates/resumes the context) — the
+   *  timebase the lookahead scheduler passes back as `at`. */
+  now(): number {
+    return this.ensure().ac.currentTime;
+  }
+
+  /** Kick off the lazy soundfont load (idempotent; resolves false on
+   *  failure — sampled voices then keep falling back to oscillators). */
+  preloadSampled(): Promise<boolean> {
+    return loadSamples(this.ensure().ac);
+  }
+
+  /**
+   * Play one MIDI note with the given voice for `durationMs`, starting
+   * now or at audio-clock time `at`. Returns a cancel fn that stops the
+   * note immediately (used by the scheduler to drop not-yet-started
+   * lookahead notes on stop); existing callers ignore it.
+   */
+  playNote(midi: number, durationMs = 600, voice: Voice = "default", at?: number): () => void {
+    if (this.muted) return NOOP;
+    const sampled = SAMPLED[voice];
+    if (sampled) {
+      if (!samplesReady()) {
+        // First sampled request triggers the load; sound the oscillator
+        // sibling in the meantime so playback never goes silent.
+        void this.preloadSampled();
+        return this.playNote(midi, durationMs, sampled.fallback, at);
+      }
+      const played = this.playSampled(midi, durationMs, sampled, at);
+      // Missing sample (shouldn't happen in-range) → oscillator fallback.
+      return played ?? this.playNote(midi, durationMs, sampled.fallback, at);
+    }
+
     const { ac, master } = this.ensure();
-    const v = VOICES[voice];
+    // Every sampled voice returned above, so only oscillator voices reach here.
+    const v = VOICES[voice as OscVoice];
     const freq = midiToHz(midi);
     const osc = ac.createOscillator();
     const gain = ac.createGain();
     osc.type = v.type;
-    osc.frequency.setValueAtTime(freq, ac.currentTime);
 
-    const t = ac.currentTime;
+    const t = at ?? ac.currentTime;
+    osc.frequency.setValueAtTime(freq, t);
     const attack = v.attack;
     const release = durationMs / 1000;
     gain.gain.setValueAtTime(0, t);
@@ -148,11 +210,66 @@ class VoiceSynth {
         /* already disconnected */
       }
     };
+    return () => {
+      try {
+        osc.stop();
+      } catch {
+        /* already stopped */
+      }
+    };
   }
 
-  /** Play multiple notes at once (chord). */
-  playChord(midis: number[], durationMs = 900, voice: Voice = "default"): void {
-    midis.forEach((m) => this.playNote(m, durationMs, voice));
+  /** Sampled playback: nearest vendored note, repitched via playbackRate,
+   *  short release ramp at note end. Null when the bank lacks the note. */
+  private playSampled(
+    midi: number,
+    durationMs: number,
+    params: SampledParams,
+    at?: number,
+  ): (() => void) | null {
+    const sample = getSample(params.instrument, midi);
+    if (!sample) return null;
+    const { ac, master } = this.ensure();
+    const t = at ?? ac.currentTime;
+
+    const src = ac.createBufferSource();
+    src.buffer = sample.buffer;
+    src.playbackRate.value = sample.rate;
+
+    // Sustain for the note length (capped by the sample's own tail),
+    // then a short release so cut-offs don't click. The samples carry
+    // their natural decay, so no synthetic envelope beyond that.
+    const dur = Math.min(durationMs / 1000, sample.buffer.duration / sample.rate);
+    const release = 0.12;
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(params.peak, t);
+    gain.gain.setValueAtTime(params.peak, t + dur);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur + release);
+
+    src.connect(gain);
+    gain.connect(master);
+    src.start(t);
+    src.stop(t + dur + release + 0.05);
+    src.onended = () => {
+      try {
+        gain.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+    };
+    return () => {
+      try {
+        src.stop();
+      } catch {
+        /* already stopped */
+      }
+    };
+  }
+
+  /** Play multiple notes at once (chord). Returns a cancel for all. */
+  playChord(midis: number[], durationMs = 900, voice: Voice = "default", at?: number): () => void {
+    const cancels = midis.map((m) => this.playNote(m, durationMs, voice, at));
+    return () => cancels.forEach((c) => c());
   }
 
   /** Play notes in sequence (arpeggio / scale ascending). */
