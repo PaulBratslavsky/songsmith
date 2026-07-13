@@ -266,6 +266,26 @@ sung song (Chorus = the progression twice if that's how it's sung).
   `composer-sheet-v3-chorus.png` + spans==occurrences / unique-span-link / 28-block assertions in
   `scripts/visual_test.py`. Saved pre-v3 compositions still load unchanged (schema untouched).
 
-## Possible later add-on the user floated
+## Notation view (user, 2026-07-13) — REQUIRED, phased
+The Composer should offer a SHEET-MUSIC representation in the spirit of MuseScore / Dorico SE
+(user-cited: alto clef support, MIDI keyboard input, realistic playback). Honest scoping — three
+independent phases, smallest-first:
+- **N1 — Staff notation view (frontend-only, VexFlow MIT):** a "𝄞 Notation" toggle rendering the
+  composition as engraved staves — melody (treble), bass (bass clef), chords as symbols above the
+  melody staff (optionally as a third staff of stacked notes); clef selector per staff incl. ALTO;
+  key signature from the composition key, 4/4 bars from the tick grid, ties across bars, playhead
+  cursor follows playback. Read-only in N1 (the piano-roll stays the editor). Degrees→pitches via
+  the existing theory engine; ticks→note values (16th resolution) with dotted/tied handling.
+- **N2 — Realistic playback:** soundfont-based voices (WebAudioFont or soundfont-player, local
+  assets — no network dependency) behind the existing `synth` interface as selectable "Piano
+  (sampled)/Strings/Bass" options; the oscillator voices stay as fallback. Timing note: consider the
+  AudioContext-lookahead scheduler upgrade here (known setTimeout drift).
+- **N3 — MIDI keyboard input:** Tauri's WKWebView has NO Web MIDI — requires a native bridge:
+  `midir` crate in the Rust core streaming note events over a Tauri channel; frontend maps notes to
+  the cursor position/duration for step entry into melody/bass lanes. Device picker in the transport.
+Order N1 → N2 → N3; each is independently shippable. N1 first (biggest visible value, zero native
+risk).
+
+## Possible later add-on the user floated## Possible later add-on the user floated
 Allow **creating/editing the composition via chat** (Claude over MCP rewrites the Composition JSON and
 the grid live-reloads) — after the visual builder + import/export work.
