@@ -1,4 +1,4 @@
-# Section Spine — one source of truth for sections (spec, DRAFT for user review)
+# Section Spine — one source of truth for sections (spec, APPROVED 2026-07-13)
 
 The last big copy-drift class (docs/SONG-FACTS.md deferred it here): sections are duplicated across
 four stage artifacts and reconciled by label-matching back-fills. This spec normalizes them into a
@@ -98,7 +98,9 @@ self-contained without making the spine itself versioned.
 3. Writers switch (editors, run_stage reconciliation, imports, Composer, freeze-by-id).
 4. Cleanup: structure artifact drops sections; UI polish; docs.
 
-## USER DECISIONS (answer before implementation)
+## USER DECISIONS — ✅ RESOLVED 2026-07-13: user accepted all four recommendations
+(D1 structure = spine editor · D2 keep+warn · D3 no section creation by non-structure runs ·
+D4 bar changes shown in export dialog). Spec is ready for implementation as its own session.
 D1. Structure stage = the spine editor (sections move out of its artifact entirely) — OK? The
     alternative (spine editable everywhere, structure keeps a copy) preserves today's feel but keeps
     a copy alive. RECOMMEND: yes, structure becomes the spine editor.
