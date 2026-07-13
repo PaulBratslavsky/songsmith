@@ -14,12 +14,13 @@
 // reopens rows via parseStoredComposition + the load action (which
 // reidentifies spans).
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../ipc/api';
 import type { CompositionMeta } from '../../ipc/generated';
 import { PITCH_CLASSES, type PitchClass } from '../../lib/music/types';
 import {
   DURATIONS,
+  TICKS_PER_BAR,
   emptyComposition,
   type Composition,
   type Degree,
@@ -51,6 +52,12 @@ import { NoteLane } from './NoteLane';
 import { SectionBand } from './SectionBand';
 import { LyricSheet, buildSheetModel } from './LyricSheet';
 import { ExportDialog } from './ExportDialog';
+
+// N1: lazy — VexFlow (engraving fonts included) only loads when the user
+// first flips to the notation view, keeping the composer's chunk light.
+const NotationView = lazy(() =>
+  import('./NotationView').then((m) => ({ default: m.NotationView })),
+);
 
 const MELODY_COLOR = '#2563eb';
 const BASS_COLOR = '#9333ea';
@@ -153,9 +160,18 @@ export function Sketchpad({
   const [loop, setLoop] = useState(true);
   // Sticky placement mode: newly-dropped chords are sevenths while on.
   const [seventhMode, setSeventhMode] = useState(false);
+  // N1: composition view — the editable lane grid or read-only notation.
+  const [view, setView] = useState<'grid' | 'notation'>('grid');
 
   const { isPlaying, currentStep, activeChordId, activeLineTick, toggle, stop } =
     useCompositionPlayback(comp, { loop });
+
+  // Active BAR under the playhead for the notation view. Sketchpad already
+  // re-renders per tick (currentStep); flooring to the bar keeps the memo'd
+  // NotationView re-rendering on bar boundaries only (same discipline as
+  // activeChordId).
+  const activeBar =
+    currentStep == null ? null : Math.floor(currentStep / TICKS_PER_BAR);
 
   useEffect(() => {
     synth.setMuted(muted);
@@ -461,6 +477,26 @@ export function Sketchpad({
           ↻ Loop {loop ? 'on' : 'off'}
         </button>
 
+        {/* N1: grid ⇄ staff-notation view toggle (notation is read-only) */}
+        <div className="row" style={{ gap: 3 }}>
+          <button
+            type="button"
+            className={'sm' + (view === 'grid' ? ' primary' : '')}
+            onClick={() => setView('grid')}
+            title="Lane timeline (the editor)"
+          >
+            ▦ Grid
+          </button>
+          <button
+            type="button"
+            className={'sm' + (view === 'notation' ? ' primary' : '')}
+            onClick={() => setView('notation')}
+            title="Staff notation (read-only)"
+          >
+            𝄞 Notation
+          </button>
+        </div>
+
         <button type="button" className="sm ghost" onClick={clearAll} style={{ marginLeft: 'auto' }}>
           Clear
         </button>
@@ -565,7 +601,9 @@ export function Sketchpad({
         </div>
       )}
 
-      {/* Palette */}
+      {/* Palette — grid-editing tool, hidden in the read-only notation view */}
+      {view === 'grid' && (
+      <>
       <div className="row" style={{ flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>
         <ChordPalette
           comp={comp}
@@ -599,9 +637,25 @@ export function Sketchpad({
           ? 'Chord selected — pick a palette chip to change it, "7th" to toggle the seventh, drag its body to move, the right edge to extend, or × to remove.'
           : `Click a beat in the chord lane to set where the next chord lands, then a palette chip. "7th" ${seventhMode ? 'is on — new chords are sevenths.' : 'makes new chords sevenths.'} Click melody/bass cells to add notes at the chosen duration.`}
       </p>
+      </>
+      )}
+
+      {/* N1: staff-notation view — same composition, engraved (read-only) */}
+      {view === 'notation' && (
+        <Suspense
+          fallback={
+            <div className="card faint" style={{ fontSize: 12 }}>
+              loading notation…
+            </div>
+          }
+        >
+          <NotationView comp={comp} labels={labels} activeBar={activeBar} />
+        </Suspense>
+      )}
 
       {/* Timeline — horizontally scrollable; long (full-song) compositions
           get a wide track so sections/chords stay legible. */}
+      {view === 'grid' && (
       <div className="card" style={{ overflowX: 'auto' }}>
         <div style={{ position: 'relative', minWidth: Math.max(820, comp.bars * BAR_MIN_PX) }}>
           {/* Moving playhead — spans all lanes at the current tick. The
@@ -666,6 +720,7 @@ export function Sketchpad({
           </div>
         </div>
       </div>
+      )}
 
       {/* ChordPro lyric sheet — the readable view below the timeline
           (full-song mode only; blank sketches have no sections → no sheet).

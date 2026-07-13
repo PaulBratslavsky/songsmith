@@ -82,6 +82,13 @@ def main():
             # chips, transport). MUST still render unchanged with no ?song.
             pg.click(".nav >> text=Composer"); pg.wait_for_timeout(700)
             pg.screenshot(path=f"{OUT}/composer.png", full_page=True)
+
+            # N1 notation view: engraved staves (VexFlow), clef selectors, chord symbols
+            note_btn = pg.locator("button:has-text('Notation')")
+            if note_btn.count() > 0:
+                note_btn.first.click(); pg.wait_for_timeout(1500)  # lazy chunk + font load
+                pg.screenshot(path=f"{OUT}/composer-notation.png", full_page=True)
+                pg.locator("button:has-text('Grid')").first.click(); pg.wait_for_timeout(300)
             # select the first chord block → shades its triad tones in the melody grid
             block = pg.locator(".main [aria-label='Remove chord']")
             if block.count() > 0:

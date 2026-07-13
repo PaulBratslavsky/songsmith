@@ -270,12 +270,31 @@ sung song (Chorus = the progression twice if that's how it's sung).
 The Composer should offer a SHEET-MUSIC representation in the spirit of MuseScore / Dorico SE
 (user-cited: alto clef support, MIDI keyboard input, realistic playback). Honest scoping — three
 independent phases, smallest-first:
-- **N1 — Staff notation view (frontend-only, VexFlow MIT):** a "𝄞 Notation" toggle rendering the
-  composition as engraved staves — melody (treble), bass (bass clef), chords as symbols above the
-  melody staff (optionally as a third staff of stacked notes); clef selector per staff incl. ALTO;
-  key signature from the composition key, 4/4 bars from the tick grid, ties across bars, playhead
-  cursor follows playback. Read-only in N1 (the piano-roll stays the editor). Degrees→pitches via
-  the existing theory engine; ticks→note values (16th resolution) with dotted/tied handling.
+- **N1 — Staff notation view (frontend-only, VexFlow MIT):** — ✅ DONE (2026-07-13) — a
+  "𝄞 Notation" toggle rendering the composition as engraved staves — melody (treble), bass (bass
+  clef), chords as symbols above the melody staff (optionally as a third staff of stacked notes);
+  clef selector per staff incl. ALTO; key signature from the composition key, 4/4 bars from the
+  tick grid, ties across bars, playhead cursor follows playback. Read-only in N1 (the piano-roll
+  stays the editor). Degrees→pitches via the existing theory engine; ticks→note values (16th
+  resolution) with dotted/tied handling.
+  - **Shipped 2026-07-13:** `vexflow` 5.0.0 (MIT, `vexflow/bravura` entry, lazy-loaded so the
+    engraving fonts only fetch on first toggle). Transport gets a "▦ Grid / 𝄞 Notation" pair; the
+    grid is untouched and stays the editor. `components/compose/NotationView.tsx` renders systems
+    of two staves (melody + bass, per-staff clef selects with treble/alto/tenor/bass) that wrap
+    responsively (~4 bars per system, ResizeObserver), section labels in accent above the bar where
+    a section starts, chord SYMBOLS above the melody staff (`ChordSpan.name` else the diatonic
+    triad/seventh label), key signature via a root+mode → VexFlow spec map (minor specs like "Am"
+    render the relative-major signature), 4/4 from the tick grid. All tick→engraving math is pure in
+    `lib/music/compose/notation.ts`: lanes flatten to gap-free per-bar cells (RESTS fill gaps,
+    spans split at bar lines with TIES — cross-system ties draw as two half-ties), greedy
+    16th-grid decomposition into plain+dotted values (7→q.+16 etc.), and MIDI spelling with the
+    key's enharmonics (Bb in F major, E# in F# major) — degrees→MIDI reuses playback's
+    `resolveMelodyMidi`/`resolveBassMidi` (same octave bands the synth sounds). Playback highlights
+    the ACTIVE BAR via an overlay div moved between measure rects captured at draw time
+    (`activeBar = floor(tick/16)` on the memo'd component — bar-boundary re-renders only, VexFlow
+    never redraws per tick; full SVG redraw on comp/key/clef/width change only). Dark theme via
+    context ink fill/stroke + accent highlight. Lyric sheet stays below in both views. Triplets
+    don't exist on the 16th grid, so no tuplet handling; blank sketches render their 8 bars.
 - **N2 — Realistic playback:** soundfont-based voices (WebAudioFont or soundfont-player, local
   assets — no network dependency) behind the existing `synth` interface as selectable "Piano
   (sampled)/Strings/Bass" options; the oscillator voices stay as fallback. Timing note: consider the
