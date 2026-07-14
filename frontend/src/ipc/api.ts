@@ -8,6 +8,7 @@ import type {
   Settings,
   Progression,
   Render,
+  Section,
   Skill,
   SkillInput,
   Song,
@@ -42,6 +43,16 @@ export type CommandMap = {
   update_song_intent: { args: { id: string; intent: string }; result: Song };
   update_song_key: { args: { id: string; root: string; mode: string; bpm: number }; result: Song };
   update_song_voicings: { args: { id: string; voicings: string }; result: Song };
+  // section spine (docs/SECTION-SPINE-SPEC.md — Phase 1: CRUD only; stage
+  // artifacts still carry labels and every consumer still reads them)
+  list_sections: { args: { songId: string }; result: Section[] };
+  create_section: {
+    args: { songId: string; label: string; sectionType: string; bars: number; role: string; position: number | null };
+    result: Section;
+  };
+  update_section: { args: { id: string; label: string; sectionType: string; bars: number; role: string }; result: Section };
+  delete_section: { args: { id: string }; result: void };
+  reorder_sections: { args: { songId: string; sectionIds: string[] }; result: Section[] };
   import_reference: { args: { audioPath: string }; result: string };
   parse_pasted_lyrics: { args: { text: string }; result: ParsedLyrics };
   import_lyrics: { args: { songId: string; text: string }; result: void };
@@ -210,6 +221,18 @@ export const api = {
   updateSongIntent: (id: string, intent: string) => call("update_song_intent", { id, intent }),
   updateSongKey: (id: string, root: string, mode: string, bpm: number) => call("update_song_key", { id, root, mode, bpm }),
   updateSongVoicings: (id: string, voicings: string) => call("update_song_voicings", { id, voicings }),
+  // section spine (Phase 1 CRUD — the single source of truth for section
+  // identity/order/form once the Phase-2/3 consumers switch over)
+  listSections: (songId: string) => call("list_sections", { songId }),
+  /** `position` omitted/null appends at the end; a number inserts there (clamped). */
+  createSection: (songId: string, label: string, sectionType = "", bars = 8, role = "", position?: number) =>
+    call("create_section", { songId, label, sectionType, bars, role, position: position ?? null }),
+  /** form only (label/type/bars/role) — order changes go through reorderSections */
+  updateSection: (id: string, label: string, sectionType: string, bars: number, role: string) =>
+    call("update_section", { id, label, sectionType, bars, role }),
+  deleteSection: (id: string) => call("delete_section", { id }),
+  /** `sectionIds` must be every section id of the song, each once, in the new order */
+  reorderSections: (songId: string, sectionIds: string[]) => call("reorder_sections", { songId, sectionIds }),
   importReference: (audioPath: string) => call("import_reference", { audioPath }),
   // paste-lyrics import (words kept verbatim — parse/tag only, never rewrite)
   parsePastedLyrics: (text: string) => call("parse_pasted_lyrics", { text }),

@@ -5,6 +5,7 @@ export type { CompositionMeta } from "./CompositionMeta";
 export type { CompositionRow } from "./CompositionRow";
 export type { Progression } from "./Progression";
 export type { Render } from "./Render";
+export type { Section } from "./Section";
 export type { Settings } from "./Settings";
 export type { Skill } from "./Skill";
 export type { SkillInput } from "./SkillInput";

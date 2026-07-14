@@ -19,6 +19,7 @@ pub async fn open(path: &Path) -> Result<Database> {
     let db = Builder::new_local(path).build().await?;
     let conn = connect(&db).await?;
     migrate(&conn).await?;
+    migrate_sections(&conn).await?;
     seed_skills(&conn).await?;
     Ok(db)
 }
@@ -81,6 +82,13 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_render_song ON render(song_id);
         CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS section (
+          id TEXT PRIMARY KEY, song_id TEXT NOT NULL REFERENCES song(id),
+          position INTEGER NOT NULL, label TEXT NOT NULL,
+          type TEXT NOT NULL DEFAULT '', bars INTEGER NOT NULL DEFAULT 8,
+          role TEXT NOT NULL DEFAULT '', created_at TEXT, updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_section_song ON section(song_id);
         "#,
     )
     .await?;
@@ -122,6 +130,188 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
              ) WHERE stage_id IS NOT NULL", ()).await?;
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_stage_version ON artifact(stage_id, version)", ()).await?;
     }
+    Ok(())
+}
+
+// ---- Section-spine migration (docs/SECTION-SPINE-SPEC.md §Migration) --------
+
+/// The section-bearing stages, in seed/first-seen order.
+const SECTION_STAGES: [&str; 4] = ["structure", "chords", "lyric_spec", "lyrics"];
+
+/// ONE-TIME spine migration for existing songs. Builds each song's `section`
+/// rows from its CURRENT stage artifacts (structure's sections first — the form
+/// owner — else chords', else lyrics'; sections that exist only in other stages
+/// are unioned in, appended in first-seen order), then rewrites those artifacts
+/// ADDITIVELY: `section_id` attached to every section entry / lyric_spec beat
+/// alongside the existing label fields, plus a `spine_snapshot` beside `data`.
+/// Labels are NOT removed — Phase-1 readers still use them, so app behavior is
+/// unchanged until the Phase-2/3 consumers switch.
+///
+/// Per-song idempotent: a song that already has spine rows is skipped, so songs
+/// created after this launch are migrated on a later startup (until the Phase-3
+/// writers create spine rows at the source). Artifact rewrites are IN PLACE
+/// (UPDATE, no new revision) — this is a schema migration, not an edit; the
+/// journal and legacy revisions stay untouched (readers keep a label fallback).
+pub async fn migrate_sections(conn: &Connection) -> Result<()> {
+    let mut rows = conn
+        .query("SELECT id FROM song WHERE id NOT IN (SELECT DISTINCT song_id FROM section)", ())
+        .await?;
+    let mut song_ids = Vec::new();
+    while let Some(r) = rows.next().await? { song_ids.push(s(&r, 0)); }
+    for song_id in song_ids {
+        migrate_song_sections(conn, &song_id).await?;
+    }
+    Ok(())
+}
+
+struct SpineEntry {
+    label: String,
+    r#type: String,
+    bars: i64,
+    role: String,
+}
+
+/// A section entry's bar count, tolerant of string-typed numbers; default 8.
+fn entry_bars(sec: &serde_json::Value) -> i64 {
+    sec.get("bars")
+        .and_then(|b| b.as_i64().or_else(|| b.as_str().and_then(|t| t.trim().parse().ok())))
+        .filter(|b| *b >= 1)
+        .unwrap_or(8)
+}
+fn entry_str(sec: &serde_json::Value, key: &str) -> String {
+    sec.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+async fn migrate_song_sections(conn: &Connection, song_id: &str) -> Result<()> {
+    use crate::freeze::{norm_label, section_keys, section_label};
+    use serde_json::{json, Value};
+
+    // 1) each section stage's CURRENT artifact, parsed (non-JSON tolerated: skipped)
+    struct StageArtifact {
+        stage_type: &'static str,
+        artifact_id: String,
+        content: Value,
+    }
+    let mut artifacts: Vec<StageArtifact> = Vec::new();
+    for stage_type in SECTION_STAGES {
+        let mut rows = conn
+            .query("SELECT id FROM stage WHERE song_id = ?1 AND type = ?2", params![song_id, stage_type])
+            .await?;
+        let Some(r) = rows.next().await? else { continue };
+        let stage_id = s(&r, 0);
+        let Some(art) = current_artifact(conn, &stage_id).await? else { continue };
+        let Ok(content) = serde_json::from_str::<Value>(&art.content) else { continue };
+        if content.is_object() {
+            artifacts.push(StageArtifact { stage_type, artifact_id: art.id, content });
+        }
+    }
+    let sections_of = |sa: &StageArtifact| -> Vec<Value> {
+        let (arr_key, _) = section_keys(sa.stage_type);
+        sa.content
+            .get("data")
+            .and_then(|d| d.get(arr_key))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // 2) seed the spine from structure (form owner: type/bars/role carry over),
+    //    else chords, else lyrics — first with a non-empty section list
+    let mut spine: Vec<SpineEntry> = Vec::new();
+    let mut seed: Option<usize> = None; // index into `artifacts`
+    for want in ["structure", "chords", "lyrics"] {
+        let Some(ai) = artifacts.iter().position(|sa| sa.stage_type == want) else { continue };
+        let secs = sections_of(&artifacts[ai]);
+        if secs.is_empty() {
+            continue;
+        }
+        let is_structure = want == "structure";
+        spine = secs
+            .iter()
+            .map(|sec| SpineEntry {
+                label: section_label(want, sec),
+                r#type: if is_structure { entry_str(sec, "type") } else { String::new() },
+                bars: if is_structure { entry_bars(sec) } else { 8 },
+                role: if is_structure { entry_str(sec, "role") } else { String::new() },
+            })
+            .collect();
+        seed = Some(ai);
+        break;
+    }
+
+    // 3) union in sections that exist only in other stages, in first-seen order
+    //    (covers the "Bridge only in lyrics" case); empty labels can't be keyed
+    let mut known: std::collections::HashSet<String> =
+        spine.iter().map(|e| norm_label(&e.label)).filter(|l| !l.is_empty()).collect();
+    for sa in &artifacts {
+        for sec in sections_of(sa) {
+            let label = section_label(sa.stage_type, &sec);
+            let norm = norm_label(&label);
+            if norm.is_empty() || known.contains(&norm) {
+                continue;
+            }
+            known.insert(norm);
+            spine.push(SpineEntry { label, r#type: String::new(), bars: 8, role: String::new() });
+        }
+    }
+    if spine.is_empty() {
+        return Ok(()); // nothing section-shaped anywhere — nothing to migrate
+    }
+
+    // 4) mint ids; label → id map (first row wins on duplicate labels)
+    let ids: Vec<String> = spine.iter().map(|_| new_id()).collect();
+    let mut by_label: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (idx, e) in spine.iter().enumerate() {
+        by_label.entry(norm_label(&e.label)).or_insert_with(|| ids[idx].clone());
+    }
+    let snapshot: Vec<Value> = spine
+        .iter()
+        .enumerate()
+        .map(|(idx, e)| json!({ "section_id": ids[idx], "label": e.label, "position": idx }))
+        .collect();
+
+    // 5) rewrite each artifact additively: section_id per entry + the snapshot
+    let mut updates: Vec<(String, String)> = Vec::new(); // (artifact id, new content)
+    for (ai, sa) in artifacts.iter().enumerate() {
+        let mut content = sa.content.clone();
+        if !content.get("data").map(|d| d.is_object()).unwrap_or(false) {
+            continue; // data: null (no structured content) — nothing to key
+        }
+        let (arr_key, _) = section_keys(sa.stage_type);
+        if let Some(arr) = content["data"].get_mut(arr_key).and_then(|v| v.as_array_mut()) {
+            for (idx, sec) in arr.iter_mut().enumerate() {
+                // the seed's entries ARE the spine rows — attach 1:1 by index
+                // (robust to duplicate labels); other stages match by label
+                let id = if Some(ai) == seed {
+                    ids.get(idx).cloned()
+                } else {
+                    by_label.get(&norm_label(&section_label(sa.stage_type, sec))).cloned()
+                };
+                if let (Some(id), Some(obj)) = (id, sec.as_object_mut()) {
+                    obj.insert("section_id".into(), Value::String(id));
+                }
+            }
+        }
+        content["spine_snapshot"] = Value::Array(snapshot.clone());
+        if content != sa.content {
+            updates.push((sa.artifact_id.clone(), content.to_string()));
+        }
+    }
+
+    // 6) rows + rewrites land together (spec: transactional)
+    let ts = now();
+    let tx = conn.transaction().await?;
+    for (idx, e) in spine.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![ids[idx].clone(), song_id, idx as i64, e.label.clone(), e.r#type.clone(), e.bars, e.role.clone(), ts.clone()],
+        ).await?;
+    }
+    for (artifact_id, content) in &updates {
+        tx.execute("UPDATE artifact SET content = ?2 WHERE id = ?1", params![artifact_id.as_str(), content.as_str()]).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -437,9 +627,95 @@ pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
     tx.execute("DELETE FROM artifact WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM render WHERE song_id = ?1", params![id]).await?;
+    tx.execute("DELETE FROM section WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM song WHERE id = ?1", params![id]).await?;
     tx.commit().await?;
     Ok(())
+}
+
+// ---- Section spine (docs/SECTION-SPINE-SPEC.md — Phase 1: CRUD only) --------
+
+const SECTION_COLS: &str = "id, song_id, position, label, type, bars, role, created_at, updated_at";
+fn map_section(r: &libsql::Row) -> Section {
+    Section {
+        id: s(r, 0), song_id: s(r, 1), position: i(r, 2), label: s(r, 3), r#type: s(r, 4),
+        bars: i(r, 5), role: s(r, 6), created_at: s(r, 7), updated_at: s(r, 8),
+    }
+}
+
+pub async fn list_sections(conn: &Connection, song_id: &str) -> Result<Vec<Section>> {
+    let mut rows = conn
+        .query(&format!("SELECT {SECTION_COLS} FROM section WHERE song_id = ?1 ORDER BY position"), params![song_id])
+        .await?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await? { out.push(map_section(&r)); }
+    Ok(out)
+}
+pub async fn get_section(conn: &Connection, id: &str) -> Result<Option<Section>> {
+    let mut rows = conn.query(&format!("SELECT {SECTION_COLS} FROM section WHERE id = ?1"), params![id]).await?;
+    Ok(rows.next().await?.as_ref().map(map_section))
+}
+/// Add a spine row. `position: None` appends at the end; `Some(p)` inserts at
+/// `p` (clamped), shifting later sections down — shift + insert land together.
+pub async fn create_section(
+    conn: &Connection, song_id: &str, label: &str, r#type: &str, bars: i64, role: &str, position: Option<i64>,
+) -> Result<Section> {
+    let id = new_id();
+    let ts = now();
+    let end: i64 = {
+        let mut rows = conn
+            .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
+            .await?;
+        rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0)
+    };
+    let pos = position.map(|p| p.clamp(0, end)).unwrap_or(end);
+    let tx = conn.transaction().await?;
+    tx.execute("UPDATE section SET position = position + 1 WHERE song_id = ?1 AND position >= ?2", params![song_id, pos]).await?;
+    tx.execute(
+        "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![id.clone(), song_id, pos, label, r#type, bars.max(1), role, ts],
+    ).await?;
+    tx.commit().await?;
+    get_section(conn, &id).await?.ok_or_else(|| anyhow!("section not found after create"))
+}
+/// Update a section's FORM (label/type/bars/role). Order changes go through
+/// `reorder_sections`; identity (`id`) and `song_id` never change.
+pub async fn update_section(conn: &Connection, id: &str, label: &str, r#type: &str, bars: i64, role: &str) -> Result<Section> {
+    conn.execute(
+        "UPDATE section SET label=?2, type=?3, bars=?4, role=?5, updated_at=?6 WHERE id=?1",
+        params![id, label, r#type, bars.max(1), role, now()],
+    ).await?;
+    get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found after update"))
+}
+/// Delete a spine row and close the position gap — both or neither.
+pub async fn delete_section(conn: &Connection, id: &str) -> Result<()> {
+    let sec = get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found"))?;
+    let tx = conn.transaction().await?;
+    tx.execute("DELETE FROM section WHERE id = ?1", params![id]).await?;
+    tx.execute(
+        "UPDATE section SET position = position - 1 WHERE song_id = ?1 AND position > ?2",
+        params![sec.song_id, sec.position],
+    ).await?;
+    tx.commit().await?;
+    Ok(())
+}
+/// Reorder a song's spine: `ids` must be exactly the song's section ids (each
+/// once — a full permutation), in the new order. All positions land together.
+pub async fn reorder_sections(conn: &Connection, song_id: &str, ids: &[String]) -> Result<Vec<Section>> {
+    let existing = list_sections(conn, song_id).await?;
+    let have: std::collections::HashSet<&str> = existing.iter().map(|x| x.id.as_str()).collect();
+    let given: std::collections::HashSet<&str> = ids.iter().map(|x| x.as_str()).collect();
+    if ids.len() != existing.len() || have != given {
+        return Err(anyhow!("reorder_sections needs every section id of the song exactly once ({} sections)", existing.len()));
+    }
+    let ts = now();
+    let tx = conn.transaction().await?;
+    for (pos, id) in ids.iter().enumerate() {
+        tx.execute("UPDATE section SET position = ?2, updated_at = ?3 WHERE id = ?1", params![id.as_str(), pos as i64, ts.clone()]).await?;
+    }
+    tx.commit().await?;
+    list_sections(conn, song_id).await
 }
 
 // ---- Final renders (audio versions referenced on disk) ---------------------
@@ -937,6 +1213,278 @@ mod tests {
 
     /// Listing is newest-first by `updated_at` — an in-place save floats the
     /// row to the top — and carries the song badge (song_id) without the blob.
+    // ---- Section spine (docs/SECTION-SPINE-SPEC.md — Phase 1) ---------------
+
+    fn blank_style(name: &str) -> StyleInput {
+        StyleInput {
+            name: name.into(), genre: String::new(), mood: String::new(), influences: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
+        }
+    }
+    async fn spine_song(conn: &Connection, title: &str) -> Song {
+        let preset = create_preset(conn, blank_style("P")).await.unwrap();
+        create_song(conn, &preset.id, title).await.unwrap()
+    }
+    async fn stage_of(conn: &Connection, song_id: &str, t: &str) -> Stage {
+        list_stages(conn, song_id).await.unwrap().into_iter().find(|s| s.r#type == t).unwrap()
+    }
+    async fn save_stage_data(conn: &Connection, song_id: &str, t: &str, data: serde_json::Value) {
+        let stage = stage_of(conn, song_id, t).await;
+        let content = serde_json::json!({ "kind": t, "text": "", "data": data }).to_string();
+        save_artifact(conn, song_id, Some(&stage.id), t, &content).await.unwrap();
+    }
+    async fn current_content(conn: &Connection, song_id: &str, t: &str) -> serde_json::Value {
+        let stage = stage_of(conn, song_id, t).await;
+        let art = current_artifact(conn, &stage.id).await.unwrap().unwrap();
+        serde_json::from_str(&art.content).unwrap()
+    }
+    fn section_ids_of(content: &serde_json::Value, arr_key: &str) -> Vec<String> {
+        content["data"][arr_key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["section_id"].as_str().unwrap_or("<missing>").to_string())
+            .collect()
+    }
+
+    /// Spec test (a): a 3-stage fixture (plus lyric_spec beats) whose labels
+    /// disagree in case/spacing yields ONE spine row per section; ids are
+    /// attached in every artifact (labels kept), snapshots added beside `data`;
+    /// legacy revisions stay untouched and no new revision is created.
+    #[tokio::test]
+    async fn migrate_sections_unifies_mismatched_labels_across_stages() {
+        let (_db, conn) = mem_conn().await;
+        let song = spine_song(&conn, "Spine A").await;
+        save_stage_data(&conn, &song.id, "structure", serde_json::json!({
+            "keyNote": "", "tempoNote": "",
+            "sections": [
+                { "type": "verse", "label": "Verse 1", "bars": 16, "role": "opens the story" },
+                { "type": "chorus", "label": "Chorus 1", "bars": 8, "role": "payoff", "frozen": true },
+            ],
+        })).await;
+        save_stage_data(&conn, &song.id, "chords", serde_json::json!({
+            "sections": [
+                { "label": "VERSE 1", "chords": [{ "name": "Am", "beats": 4 }] },
+                { "label": "chorus  1", "chords": [{ "name": "F", "beats": 4 }] },
+            ],
+        })).await;
+        save_stage_data(&conn, &song.id, "lyric_spec", serde_json::json!({
+            "hook": "H",
+            "beats": [
+                { "section": "verse 1", "beat": "set the scene" },
+                { "section": "Chorus 1", "beat": "the payoff" },
+            ],
+        })).await;
+        // two lyrics revisions — the migration must rewrite ONLY the current one
+        save_stage_data(&conn, &song.id, "lyrics", serde_json::json!({
+            "sections": [{ "label": "Verse 1", "lines": ["old draft"] }],
+        })).await;
+        save_stage_data(&conn, &song.id, "lyrics", serde_json::json!({
+            "sections": [
+                { "label": "verse 1", "lines": ["la la"] },
+                { "label": "CHORUS 1", "lines": ["oh oh"] },
+            ],
+        })).await;
+
+        migrate_sections(&conn).await.unwrap();
+
+        // one spine row per section, in structure order, form fields carried
+        let spine = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(spine.len(), 2, "mismatched-case labels must collapse to one row each");
+        assert_eq!(
+            (spine[0].position, spine[0].label.as_str(), spine[0].r#type.as_str(), spine[0].bars, spine[0].role.as_str()),
+            (0, "Verse 1", "verse", 16, "opens the story"),
+        );
+        assert_eq!(
+            (spine[1].position, spine[1].label.as_str(), spine[1].r#type.as_str(), spine[1].bars, spine[1].role.as_str()),
+            (1, "Chorus 1", "chorus", 8, "payoff"),
+        );
+
+        // ids attached in all four artifacts; labels + frozen flags untouched
+        let expect = vec![spine[0].id.clone(), spine[1].id.clone()];
+        for (stage, arr_key) in [("structure", "sections"), ("chords", "sections"), ("lyric_spec", "beats"), ("lyrics", "sections")] {
+            let content = current_content(&conn, &song.id, stage).await;
+            assert_eq!(section_ids_of(&content, arr_key), expect, "{stage} must key every entry to the spine");
+            // the snapshot sits BESIDE data and mirrors the spine
+            let snap = content["spine_snapshot"].as_array().unwrap();
+            assert_eq!(snap.len(), 2);
+            assert_eq!(snap[0]["section_id"], serde_json::json!(spine[0].id));
+            assert_eq!(snap[1]["label"], serde_json::json!("Chorus 1"));
+            assert_eq!(snap[1]["position"], serde_json::json!(1));
+        }
+        let structure = current_content(&conn, &song.id, "structure").await;
+        assert_eq!(structure["data"]["sections"][0]["label"], serde_json::json!("Verse 1"), "labels stay (Phase-1 readers use them)");
+        assert_eq!(structure["data"]["sections"][1]["frozen"], serde_json::json!(true), "freeze flags stay in stage data");
+        let chords = current_content(&conn, &song.id, "chords").await;
+        assert_eq!(chords["data"]["sections"][0]["label"], serde_json::json!("VERSE 1"), "stage labels are not rewritten");
+        let spec = current_content(&conn, &song.id, "lyric_spec").await;
+        assert_eq!(spec["data"]["beats"][0]["section"], serde_json::json!("verse 1"));
+
+        // in-place rewrite: still 2 lyrics revisions; the legacy v1 untouched
+        let lyrics_stage = stage_of(&conn, &song.id, "lyrics").await;
+        let revs = list_artifact_revisions(&conn, &lyrics_stage.id).await.unwrap();
+        assert_eq!(revs.len(), 2, "migration must not create a new revision");
+        let v1: serde_json::Value = serde_json::from_str(&revs[1].content).unwrap();
+        assert!(v1.get("spine_snapshot").is_none(), "legacy revisions are NOT rewritten");
+    }
+
+    /// Spec test (b): a section that exists only in a later stage (the classic
+    /// lyrics-only Bridge) is unioned into the spine, appended at the end with
+    /// defaults, and its lyrics entry gets the new id.
+    #[tokio::test]
+    async fn migrate_sections_unions_lyrics_only_bridge_at_end() {
+        let (_db, conn) = mem_conn().await;
+        let song = spine_song(&conn, "Spine B").await;
+        save_stage_data(&conn, &song.id, "structure", serde_json::json!({
+            "sections": [
+                { "type": "verse", "label": "Verse 1", "bars": 12, "role": "" },
+                { "type": "chorus", "label": "Chorus", "bars": 8, "role": "" },
+            ],
+        })).await;
+        save_stage_data(&conn, &song.id, "lyrics", serde_json::json!({
+            "sections": [
+                { "label": "Verse 1", "lines": ["a"] },
+                { "label": "Chorus", "lines": ["b"] },
+                { "label": "Bridge", "lines": ["c"] },
+            ],
+        })).await;
+
+        migrate_sections(&conn).await.unwrap();
+
+        let spine = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(
+            spine.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(),
+            vec!["Verse 1", "Chorus", "Bridge"],
+        );
+        let bridge = &spine[2];
+        assert_eq!((bridge.position, bridge.bars, bridge.r#type.as_str(), bridge.role.as_str()), (2, 8, "", ""), "unioned sections take defaults");
+        let lyrics = current_content(&conn, &song.id, "lyrics").await;
+        assert_eq!(lyrics["data"]["sections"][2]["section_id"], serde_json::json!(bridge.id));
+        // the structure snapshot still mirrors the WHOLE spine (incl. Bridge)
+        let structure = current_content(&conn, &song.id, "structure").await;
+        assert_eq!(structure["spine_snapshot"].as_array().unwrap().len(), 3);
+    }
+
+    /// Spec test (c): with no structure artifact the spine seeds from the
+    /// Chords artifact's order; lyrics-only sections still union in after.
+    #[tokio::test]
+    async fn migrate_sections_without_structure_falls_back_to_chords_order() {
+        let (_db, conn) = mem_conn().await;
+        let song = spine_song(&conn, "Spine C").await;
+        save_stage_data(&conn, &song.id, "chords", serde_json::json!({
+            "sections": [
+                { "label": "Intro", "chords": [{ "name": "Am", "beats": 4 }] },
+                { "label": "Verse 1", "chords": [{ "name": "F", "beats": 4 }] },
+            ],
+        })).await;
+        save_stage_data(&conn, &song.id, "lyrics", serde_json::json!({
+            "sections": [
+                { "label": "Verse 1", "lines": ["a"] },
+                { "label": "Outro", "lines": ["b"] },
+            ],
+        })).await;
+
+        migrate_sections(&conn).await.unwrap();
+
+        let spine = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(
+            spine.iter().map(|x| (x.label.as_str(), x.bars)).collect::<Vec<_>>(),
+            vec![("Intro", 8), ("Verse 1", 8), ("Outro", 8)],
+            "chords order seeds the spine; lyrics-only Outro unions in at the end",
+        );
+        let chords = current_content(&conn, &song.id, "chords").await;
+        assert_eq!(section_ids_of(&chords, "sections"), vec![spine[0].id.clone(), spine[1].id.clone()]);
+        let lyrics = current_content(&conn, &song.id, "lyrics").await;
+        assert_eq!(section_ids_of(&lyrics, "sections"), vec![spine[1].id.clone(), spine[2].id.clone()]);
+    }
+
+    /// Spec test (d): the migration is idempotent — a second run leaves rows
+    /// and artifact contents byte-identical (songs with spine rows are skipped).
+    #[tokio::test]
+    async fn migrate_sections_second_run_is_a_no_op() {
+        let (_db, conn) = mem_conn().await;
+        let song = spine_song(&conn, "Spine D").await;
+        save_stage_data(&conn, &song.id, "structure", serde_json::json!({
+            "sections": [{ "type": "verse", "label": "Verse 1", "bars": 8, "role": "" }],
+        })).await;
+        save_stage_data(&conn, &song.id, "lyrics", serde_json::json!({
+            "sections": [{ "label": "Verse 1", "lines": ["a"] }, { "label": "Bridge", "lines": ["b"] }],
+        })).await;
+
+        migrate_sections(&conn).await.unwrap();
+        let spine1 = list_sections(&conn, &song.id).await.unwrap();
+        let structure1 = current_content(&conn, &song.id, "structure").await;
+        let lyrics1 = current_content(&conn, &song.id, "lyrics").await;
+
+        migrate_sections(&conn).await.unwrap();
+        let spine2 = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(spine2.len(), spine1.len());
+        assert_eq!(
+            spine2.iter().map(|x| (x.id.clone(), x.position, x.label.clone())).collect::<Vec<_>>(),
+            spine1.iter().map(|x| (x.id.clone(), x.position, x.label.clone())).collect::<Vec<_>>(),
+            "row identity must survive re-runs",
+        );
+        assert_eq!(current_content(&conn, &song.id, "structure").await, structure1);
+        assert_eq!(current_content(&conn, &song.id, "lyrics").await, lyrics1);
+    }
+
+    /// Spec test (e): spine CRUD round-trips — append + positioned insert,
+    /// form update, delete compacts positions.
+    #[tokio::test]
+    async fn section_crud_round_trips() {
+        let (_db, conn) = mem_conn().await;
+        let song = spine_song(&conn, "CRUD").await;
+
+        let verse = create_section(&conn, &song.id, "Verse 1", "verse", 16, "opens", None).await.unwrap();
+        let chorus = create_section(&conn, &song.id, "Chorus", "chorus", 8, "payoff", None).await.unwrap();
+        assert_eq!((verse.position, chorus.position), (0, 1), "None appends at the end");
+        // positioned insert shifts later sections down; bars clamp to >= 1
+        let intro = create_section(&conn, &song.id, "Intro", "", 0, "", Some(0)).await.unwrap();
+        assert_eq!((intro.position, intro.bars), (0, 1));
+        let labels = |secs: &[Section]| secs.iter().map(|x| x.label.clone()).collect::<Vec<_>>();
+        let spine = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(labels(&spine), vec!["Intro", "Verse 1", "Chorus"]);
+        assert_eq!(spine.iter().map(|x| x.position).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        // update touches FORM only (label/type/bars/role) and bumps updated_at
+        let updated = update_section(&conn, &verse.id, "Verse One", "verse", 12, "sets the scene").await.unwrap();
+        assert_eq!(
+            (updated.label.as_str(), updated.r#type.as_str(), updated.bars, updated.role.as_str(), updated.position),
+            ("Verse One", "verse", 12, "sets the scene", 1),
+        );
+        assert!(updated.updated_at >= verse.updated_at);
+        assert_eq!(get_section(&conn, &verse.id).await.unwrap().unwrap().label, "Verse One");
+
+        // delete closes the position gap
+        delete_section(&conn, &verse.id).await.unwrap();
+        let spine = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(labels(&spine), vec!["Intro", "Chorus"]);
+        assert_eq!(spine.iter().map(|x| x.position).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(get_section(&conn, &verse.id).await.unwrap().is_none());
+        assert!(delete_section(&conn, &verse.id).await.is_err(), "deleting a missing section is an error");
+    }
+
+    /// Spec test (e, reorder): a full permutation reorders; anything else
+    /// (wrong count, duplicate, foreign id) is rejected without changes.
+    #[tokio::test]
+    async fn reorder_sections_requires_a_full_permutation() {
+        let (_db, conn) = mem_conn().await;
+        let song = spine_song(&conn, "Reorder").await;
+        let a = create_section(&conn, &song.id, "A", "", 8, "", None).await.unwrap();
+        let b = create_section(&conn, &song.id, "B", "", 8, "", None).await.unwrap();
+        let c = create_section(&conn, &song.id, "C", "", 8, "", None).await.unwrap();
+
+        let spine = reorder_sections(&conn, &song.id, &[c.id.clone(), a.id.clone(), b.id.clone()]).await.unwrap();
+        assert_eq!(spine.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(), vec!["C", "A", "B"]);
+        assert_eq!(spine.iter().map(|x| x.position).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        assert!(reorder_sections(&conn, &song.id, &[a.id.clone(), b.id.clone()]).await.is_err(), "missing an id");
+        assert!(reorder_sections(&conn, &song.id, &[a.id.clone(), a.id.clone(), b.id.clone()]).await.is_err(), "duplicate id");
+        assert!(reorder_sections(&conn, &song.id, &[a.id.clone(), b.id.clone(), "nope".into()]).await.is_err(), "foreign id");
+        let unchanged = list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(unchanged.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(), vec!["C", "A", "B"], "rejected reorders change nothing");
+    }
+
     #[tokio::test]
     async fn composition_list_orders_newest_first() {
         let (_db, conn) = mem_conn().await;

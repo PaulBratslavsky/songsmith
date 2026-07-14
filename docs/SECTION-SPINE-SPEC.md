@@ -94,6 +94,11 @@ self-contained without making the spine itself versioned.
 
 ## Phasing (one session, but committable checkpoints)
 1. Table + models + migration + spine CRUD commands/tools + tests (no consumers switched).
+   ✅ Phase 1 built 2026-07-14: `section` table + `Section` model, `db::migrate_sections`
+   (runs on every open; per-song idempotent; rewrites current artifacts in place — ids +
+   `spine_snapshot` added ADDITIVELY, labels kept, legacy revisions untouched), CRUD
+   (`list/create/update/delete/reorder_sections`) as Tauri commands + MCP tools + mock parity.
+   App behavior unchanged — no consumer reads the spine yet.
 2. Readers switch (render/prompts/Ableton/frontend read spine; label fallback for legacy).
 3. Writers switch (editors, run_stage reconciliation, imports, Composer, freeze-by-id).
 4. Cleanup: structure artifact drops sections; UI polish; docs.

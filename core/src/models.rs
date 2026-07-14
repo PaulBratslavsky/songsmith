@@ -105,6 +105,28 @@ pub struct Artifact {
     pub label: Option<String>,
 }
 
+/// One row of a song's SECTION SPINE — the single source of truth for section
+/// identity, order, and form (docs/SECTION-SPINE-SPEC.md). The spine owns
+/// label/type/bars/role; stage artifacts key their per-section CONTENT to `id`.
+/// Phase 1: ids are attached to artifacts additively (labels remain and all
+/// consumers still read them); readers/writers switch in Phases 2–3.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/ipc/generated/")]
+pub struct Section {
+    pub id: String,
+    pub song_id: String,
+    /// 0-based order within the song
+    pub position: i64,
+    pub label: String,
+    /// section type ("verse", "chorus", …) — free text, may be empty
+    pub r#type: String,
+    pub bars: i64,
+    /// arc role ("opens the story", "peak", …) — free text, may be empty
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../frontend/src/ipc/generated/")]
 pub struct Skill {

@@ -2,7 +2,7 @@
 // browser (no Tauri). Every registry command must exist here (mock-parity).
 
 import { STAGE_ORDER, type CommandArgs, type CommandMap, type CommandResult } from "./api";
-import type { Artifact, CompositionMeta, Song, Stage } from "./generated";
+import type { Artifact, CompositionMeta, Section, Song, Stage } from "./generated";
 
 type Any = Record<string, any>;
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -451,6 +451,14 @@ function toArtifact(art: Any | null) {
 // `intent ?? ""` migrates mock DBs persisted before the North Star field existed
 const toSong = (v: Any): Song => ({ ...v, intent: v.intent ?? "", bpm: BigInt(v.bpm) } as Song);
 const toStage = (s: Any): Stage => ({ ...s, ordinal: BigInt(s.ordinal) } as Stage);
+const toSection = (s: Any): Section => ({ ...s, position: BigInt(s.position), bars: BigInt(s.bars) } as Section);
+
+// ---- Section spine (docs/SECTION-SPINE-SPEC.md — Phase 1) — mirrors db.rs ---
+// `db.sections ??= []` back-fills mock DBs persisted before the spine existed.
+function songSections(songId: string): Any[] {
+  db.sections ??= [];
+  return db.sections.filter((x: Any) => x.song_id === songId).sort((x: Any, y: Any) => x.position - y.position);
+}
 
 /** One handler per CommandMap command — a missing or mistyped handler is a
  *  COMPILE error (audit Tier-2 #7: api/mock parity by construction). */
@@ -489,12 +497,48 @@ const handlers: MockHandlers = {
   update_song_intent: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.intent = a.intent; v.updated_at = now(); return toSong(v); },
   update_song_key: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.key_root = a.root; v.key_mode = a.mode; v.bpm = a.bpm; v.updated_at = now(); return toSong(v); },
   update_song_voicings: (a) => { const v = db.songs.find((x: Any) => x.id === a.id); v.voicings = a.voicings; v.updated_at = now(); return toSong(v); },
+  // section spine (Phase 1 CRUD) — mirrors db.rs semantics
+  list_sections: (a) => songSections(a.songId).map(toSection),
+  create_section: (a) => {
+    const rows = songSections(a.songId);
+    const end = rows.length ? rows[rows.length - 1].position + 1 : 0;
+    const pos = a.position == null ? end : Math.max(0, Math.min(a.position, end));
+    rows.filter((x) => x.position >= pos).forEach((x) => (x.position += 1));
+    const sec = { id: uid(), song_id: a.songId, position: pos, label: a.label, type: a.sectionType,
+      bars: Math.max(1, a.bars), role: a.role, created_at: now(), updated_at: now() };
+    db.sections.push(sec);
+    return toSection(sec);
+  },
+  update_section: (a) => {
+    const sec = (db.sections ?? []).find((x: Any) => x.id === a.id);
+    if (!sec) throw new Error("section not found");
+    Object.assign(sec, { label: a.label, type: a.sectionType, bars: Math.max(1, a.bars), role: a.role, updated_at: now() });
+    return toSection(sec);
+  },
+  delete_section: (a) => {
+    const sec = (db.sections ?? []).find((x: Any) => x.id === a.id);
+    if (!sec) throw new Error("section not found");
+    db.sections = db.sections.filter((x: Any) => x.id !== a.id);
+    songSections(sec.song_id).filter((x) => x.position > sec.position).forEach((x) => (x.position -= 1));
+  },
+  reorder_sections: (a) => {
+    const rows = songSections(a.songId);
+    const have = new Set(rows.map((x) => x.id));
+    if (a.sectionIds.length !== rows.length || a.sectionIds.some((id) => !have.has(id)) || new Set(a.sectionIds).size !== a.sectionIds.length)
+      throw new Error(`reorder_sections needs every section id of the song exactly once (${rows.length} sections)`);
+    a.sectionIds.forEach((id, pos) => {
+      const sec = rows.find((x) => x.id === id)!;
+      sec.position = pos; sec.updated_at = now();
+    });
+    return songSections(a.songId).map(toSection);
+  },
   refine_field: (a) => `(mock) ${a.fieldLabel}: ${a.instruction}`,
   delete_song: (a) => {
     db.songs = db.songs.filter((v: Any) => v.id !== a.id);
     const sids = db.stages.filter((s: Any) => s.song_id === a.id).map((s: Any) => s.id);
     db.stages = db.stages.filter((s: Any) => s.song_id !== a.id);
     db.artifacts = db.artifacts.filter((ar: Any) => !sids.includes(ar.stage_id));
+    db.sections = (db.sections ?? []).filter((x: Any) => x.song_id !== a.id);
   },
   get_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.id);
@@ -671,6 +715,7 @@ export async function mockCall<C extends keyof CommandMap>(cmd: C, a: CommandArg
 const MOCK_TOOLS = [
   "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset",
   "create_song","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
+  "list_sections","create_section","update_section","delete_section","reorder_sections",
   "get_stage","run_stage","approve_stage","advance_stage",
   "get_artifact","save_artifact","list_artifact_revisions","revert_artifact","set_artifact_label",
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",
@@ -679,4 +724,4 @@ const MOCK_TOOLS = [
   "list_renders","add_render","set_render_pick","delete_render",
   "ableton_build_song","analyze_reference",
   "get_settings","set_settings",
-].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" }));
+].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" || name === "delete_section" }));

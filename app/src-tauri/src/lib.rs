@@ -118,6 +118,32 @@ async fn delete_song(state: State<'_, AppState>, id: String) -> R<()> {
     db::delete_song(&state.conn, &id).await.map_err(e2s)
 }
 
+// ---- Section spine (docs/SECTION-SPINE-SPEC.md — Phase 1: CRUD only) --------
+
+#[tauri::command]
+async fn list_sections(state: State<'_, AppState>, song_id: String) -> R<Vec<Section>> {
+    db::list_sections(&state.conn, &song_id).await.map_err(e2s)
+}
+/// `position: None` appends at the end; `Some(p)` inserts at `p` (clamped).
+#[tauri::command]
+async fn create_section(state: State<'_, AppState>, song_id: String, label: String, section_type: String, bars: i64, role: String, position: Option<i64>) -> R<Section> {
+    db::create_section(&state.conn, &song_id, &label, &section_type, bars, &role, position).await.map_err(e2s)
+}
+/// Form only (label/type/bars/role) — order changes go through `reorder_sections`.
+#[tauri::command]
+async fn update_section(state: State<'_, AppState>, id: String, label: String, section_type: String, bars: i64, role: String) -> R<Section> {
+    db::update_section(&state.conn, &id, &label, &section_type, bars, &role).await.map_err(e2s)
+}
+#[tauri::command]
+async fn delete_section(state: State<'_, AppState>, id: String) -> R<()> {
+    db::delete_section(&state.conn, &id).await.map_err(e2s)
+}
+/// `section_ids` must be every section id of the song, each once, in the new order.
+#[tauri::command]
+async fn reorder_sections(state: State<'_, AppState>, song_id: String, section_ids: Vec<String>) -> R<Vec<Section>> {
+    db::reorder_sections(&state.conn, &song_id, &section_ids).await.map_err(e2s)
+}
+
 // ---- Paste-lyrics import (spec Feature B — words kept verbatim) -------------
 
 /// Dry-run parse of pasted lyrics (drives the preview modal — saves nothing).
@@ -989,6 +1015,11 @@ pub fn run() {
             update_song_intent,
             update_song_key,
             update_song_voicings,
+            list_sections,
+            create_section,
+            update_section,
+            delete_section,
+            reorder_sections,
             import_reference,
             parse_pasted_lyrics,
             import_lyrics,

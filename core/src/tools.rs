@@ -39,6 +39,11 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "update_song_title", description: "Rename a song (set its title).", destructive: false, input_schema: obj(json!({"id": s(""),"title": s("")}), &["id","title"]) },
         ToolSpec { name: "update_song_intent", description: "Set a song's intent — the producer's one-line brief every stage honors alongside the title (the north star).", destructive: false, input_schema: obj(json!({"id": s(""),"intent": s("one line — what this song is about")}), &["id","intent"]) },
         ToolSpec { name: "delete_song", description: "Delete a song and all its stages/artifacts.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
+        ToolSpec { name: "list_sections", description: "List a song's section spine (the single source of truth for section identity/order/label/type/bars/role), ordered by position.", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
+        ToolSpec { name: "create_section", description: "Add a section to a song's spine. Appends at the end unless `position` (0-based insert index) is given.", destructive: false, input_schema: obj(json!({"song_id": s(""),"label": s("e.g. \"Verse 1\""),"type": s("optional section type, e.g. verse/chorus/bridge"),"bars": {"type":"integer","description":"bar count (default 8)"},"role": s("optional arc role, e.g. \"opens the story\""),"position": {"type":"integer","description":"0-based insert index (omit to append)"}}), &["song_id","label"]) },
+        ToolSpec { name: "update_section", description: "Update a spine section's form (label/type/bars/role) — omitted fields keep their current value. Order changes go through reorder_sections.", destructive: false, input_schema: obj(json!({"id": s("section id"),"label": s(""),"type": s(""),"bars": {"type":"integer"},"role": s("")}), &["id"]) },
+        ToolSpec { name: "delete_section", description: "Delete a section from a song's spine (stage content keyed to it is orphaned — deletion of a content-bearing section is a user decision).", destructive: true, input_schema: obj(json!({"id": s("section id")}), &["id"]) },
+        ToolSpec { name: "reorder_sections", description: "Reorder a song's spine: pass EVERY section id of the song, each exactly once, in the new order.", destructive: false, input_schema: obj(json!({"song_id": s(""),"section_ids": {"type":"array","items":{"type":"string"},"description":"all of the song's section ids in the new order"}}), &["song_id","section_ids"]) },
         ToolSpec { name: "get_stage", description: "Get a stage with its current artifact and active skill.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "run_stage", description: "Run a stage: load skill + style preset + prior approved artifacts, call Claude, write the artifact.", destructive: false, input_schema: obj(json!({"stage_id": s(""),"user_input": s("optional seed (your own chords/lyrics/title)")}), &["stage_id"]) },
         ToolSpec { name: "approve_stage", description: "Approve a stage's current artifact, mark it done, advance the song.", destructive: false, input_schema: obj(json!({"stage_id": s("")}), &["stage_id"]) },
@@ -194,6 +199,36 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "update_song_title" => v(db::update_song_title(conn, arg(args, "id")?, arg(args, "title")?).await?),
         "update_song_intent" => v(db::update_song_intent(conn, arg(args, "id")?, arg(args, "intent")?).await?),
         "delete_song" => { db::delete_song(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "list_sections" => v(db::list_sections(conn, arg(args, "song_id")?).await?),
+        "create_section" => v(db::create_section(
+            conn,
+            arg(args, "song_id")?,
+            arg(args, "label")?,
+            arg_opt(args, "type").unwrap_or(""),
+            args.get("bars").and_then(|b| b.as_i64()).unwrap_or(8),
+            arg_opt(args, "role").unwrap_or(""),
+            args.get("position").and_then(|p| p.as_i64()),
+        ).await?),
+        "update_section" => {
+            // partial update: omitted fields keep the row's current value
+            let id = arg(args, "id")?;
+            let cur = db::get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found"))?;
+            v(db::update_section(
+                conn,
+                id,
+                arg_opt(args, "label").unwrap_or(&cur.label),
+                arg_opt(args, "type").unwrap_or(&cur.r#type),
+                args.get("bars").and_then(|b| b.as_i64()).unwrap_or(cur.bars),
+                arg_opt(args, "role").unwrap_or(&cur.role),
+            ).await?)
+        }
+        "delete_section" => { db::delete_section(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "reorder_sections" => {
+            let ids: Vec<String> = args.get("section_ids").and_then(|c| c.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            v(db::reorder_sections(conn, arg(args, "song_id")?, &ids).await?)
+        }
         "get_stage" => v(db::get_stage_detail(conn, arg(args, "id")?).await?),
         "run_stage" => v(agent::run_stage(conn, settings, arg(args, "stage_id")?, arg_opt(args, "user_input").map(String::from), |_| {}, None).await?.artifact),
         "approve_stage" => approve_stage(conn, arg(args, "stage_id")?).await,
@@ -244,6 +279,51 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The five spine tools round-trip through `dispatch` (the UI/agent/MCP
+    /// surface): create appends + inserts, update is PARTIAL (omitted fields
+    /// keep their value), reorder takes the full permutation, delete removes.
+    #[tokio::test]
+    async fn section_tools_dispatch_round_trip() {
+        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        let settings = Settings::default();
+        let preset = dispatch(&conn, &settings, "create_style_preset", &json!({ "name": "P" })).await.unwrap();
+        let song = dispatch(&conn, &settings, "create_song", &json!({ "style_preset_id": preset["id"], "title": "S" })).await.unwrap();
+        let song_id = song["id"].as_str().unwrap().to_string();
+
+        let verse = dispatch(&conn, &settings, "create_section",
+            &json!({ "song_id": song_id, "label": "Verse 1", "type": "verse", "bars": 16, "role": "opens" })).await.unwrap();
+        let chorus = dispatch(&conn, &settings, "create_section",
+            &json!({ "song_id": song_id, "label": "Chorus" })).await.unwrap();
+        assert_eq!(chorus["bars"], json!(8), "bars defaults to 8");
+        let intro = dispatch(&conn, &settings, "create_section",
+            &json!({ "song_id": song_id, "label": "Intro", "position": 0 })).await.unwrap();
+
+        let list = dispatch(&conn, &settings, "list_sections", &json!({ "song_id": song_id })).await.unwrap();
+        let labels: Vec<&str> = list.as_array().unwrap().iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, vec!["Intro", "Verse 1", "Chorus"]);
+
+        // partial update: only bars given — label/type/role must survive
+        let updated = dispatch(&conn, &settings, "update_section",
+            &json!({ "id": verse["id"], "bars": 12 })).await.unwrap();
+        assert_eq!(updated["label"], json!("Verse 1"));
+        assert_eq!(updated["type"], json!("verse"));
+        assert_eq!(updated["bars"], json!(12));
+        assert_eq!(updated["role"], json!("opens"));
+
+        let reordered = dispatch(&conn, &settings, "reorder_sections",
+            &json!({ "song_id": song_id, "section_ids": [chorus["id"], intro["id"], verse["id"]] })).await.unwrap();
+        let labels: Vec<&str> = reordered.as_array().unwrap().iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, vec!["Chorus", "Intro", "Verse 1"]);
+
+        let gone = dispatch(&conn, &settings, "delete_section", &json!({ "id": intro["id"] })).await.unwrap();
+        assert_eq!(gone["ok"], json!(true));
+        let list = dispatch(&conn, &settings, "list_sections", &json!({ "song_id": song_id })).await.unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 2);
+    }
+
     #[test]
     fn mock_has_every_tool() {
         let mock = include_str!("../../frontend/src/ipc/mockApi.ts");
