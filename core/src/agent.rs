@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 pub use crate::engine::{extract_json, CancelToken};
 pub use crate::freeze::{merge_frozen_sections, revert_artifact_guarded, save_artifact_guarded};
 use crate::engine::call_claude;
-use crate::freeze::{build_merged_content, frozen_labels, frozen_prompt_block, norm_label, section_label};
+use crate::freeze::{frozen_labels, frozen_prompt_block, norm_label, section_label};
 use crate::render::{chords_editor_text, lyrics_text, render_stage_text, structure_editor_text};
 
 /// The artifact `kind` produced by each stage type.
@@ -94,8 +94,12 @@ where
         }
 
         let text = call_claude(settings, &system, &user, &on_token, cancel.as_ref()).await?;
-        let content = build_merged_content(&stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str()))?;
-        let content = enforce_song_key_tempo(&song, &stage.r#type, &content);
+        // Phase-3 write pipeline (docs/SECTION-SPINE-SPEC.md): frozen merge
+        // (id-first) + spine reconciliation (structure creates/renames/deletes;
+        // other stages map labels → section ids, dropping invented ones) +
+        // key/tempo enforcement. Byte-identical to the legacy path for songs
+        // without spine rows.
+        let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str())).await?;
 
         let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
         Ok::<RunOutcome, anyhow::Error>(RunOutcome { artifact, raw_output: text })
@@ -168,8 +172,8 @@ Return ONLY the revised result as the single fenced ```json block your skill spe
         }
 
         let text = call_claude(settings, &system, &user, &|_| {}, None).await?;
-        let content = build_merged_content(&stage.r#type, &text, Some(&current.content))?;
-        let content = enforce_song_key_tempo(&song, &stage.r#type, &content);
+        // same Phase-3 write pipeline as run_stage (spine reconciliation + frozen merge)
+        let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, Some(current.content.as_str())).await?;
         let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
         Ok::<Artifact, anyhow::Error>(artifact)
     };
@@ -411,7 +415,9 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
 /// reset them to A minor / 138). Deterministic guarantee, freeze-style: splice
 /// the song's current key/bpm into any structure artifact before save and
 /// re-render its text. Skills may only SUGGEST changes in prose notes.
-fn enforce_song_key_tempo(song: &Song, stage_type: &str, content: &str) -> String {
+/// (Called by `spine::build_run_content`'s legacy path; the spine path splices
+/// the same values directly into the reconciled data.)
+pub(crate) fn enforce_song_key_tempo(song: &Song, stage_type: &str, content: &str) -> String {
     if stage_type != "structure" {
         return content.to_string();
     }
@@ -864,49 +870,67 @@ pub async fn parse_pasted_lyrics(settings: &Settings, text: &str) -> Result<Pars
 /// mark both stages done. Pasting is the USER's deliberate action, so it
 /// replaces everything including locked sections (the UI warns first) and
 /// carries no frozen flags into the new Lyrics artifact.
+///
+/// Phase 3 (docs/SECTION-SPINE-SPEC.md): the paste is a user-authority spine
+/// writer — the SPINE is replaced to the pasted labels/order (existing rows
+/// matched by norm-label keep their ids + bars/role/type; new sections get
+/// rows) and every saved artifact entry carries its `section_id`.
 async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyrics) -> Result<()> {
     let stages = db::list_stages(conn, &song.id).await?;
     let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").ok_or_else(|| anyhow!("song has no lyrics stage"))?;
     let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
 
-    // Lyrics artifact — the pasted words verbatim, text rendered like the editor
-    let lyrics_data = json!({
-        "sections": parsed.sections.iter().map(|s| json!({ "label": s.label, "lines": s.lines })).collect::<Vec<_>>()
-    });
-    let content = json!({ "kind": "lyrics", "text": lyrics_text(&lyrics_data), "data": lyrics_data }).to_string();
-    db::save_artifact(conn, &song.id, Some(&lyrics_stage.id), "lyrics", &content).await?;
-    db::set_stage_status(conn, &lyrics_stage.id, "done").await?;
-
     // Structure back-fill — the pasted labels/order become the section map;
-    // bars/role/type (and an existing lock) survive where a label matches,
-    // new sections get the editor defaults (bars=8, role="").
+    // bars/role/type (and an existing lock) survive where a label matches —
+    // the SPINE row is the preferred form source, the prior artifact entry the
+    // legacy fallback; new sections get the editor defaults (bars=8, role="").
     let prior_data = match db::current_artifact(conn, &structure_stage.id).await? {
         Some(a) => serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned()).unwrap_or(Value::Null),
         None => Value::Null,
     };
     let prior_secs: Vec<Value> = prior_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let new_secs: Vec<Value> = parsed
+    let spine = db::list_sections(conn, &song.id).await?;
+    let mut new_secs: Vec<Value> = parsed
         .sections
         .iter()
         .map(|p| {
             let old = prior_secs.iter().find(|s| norm_label(&section_label("structure", s)) == norm_label(&p.label));
-            match old {
-                Some(old) => {
-                    let mut o = json!({
-                        "type": old.get("type").and_then(|v| v.as_str()).unwrap_or(""),
-                        "label": p.label,
-                        "bars": old.get("bars").and_then(|b| b.as_i64()).unwrap_or(8),
-                        "role": old.get("role").and_then(|v| v.as_str()).unwrap_or(""),
-                    });
-                    if old.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false) {
-                        o["frozen"] = json!(true);
-                    }
-                    o
-                }
-                None => json!({ "type": "", "label": p.label, "bars": 8, "role": "" }),
+            let frozen = old.is_some_and(|o| o.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false));
+            let row = spine.iter().find(|r| norm_label(&r.label) == norm_label(&p.label));
+            let mut o = match (row, old) {
+                // the spine owns the form when the song has a row for this label
+                (Some(row), _) => json!({
+                    "section_id": row.id, "type": row.r#type, "label": p.label, "bars": row.bars, "role": row.role,
+                }),
+                (None, Some(old)) => json!({
+                    "type": old.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+                    "label": p.label,
+                    "bars": old.get("bars").and_then(|b| b.as_i64()).unwrap_or(8),
+                    "role": old.get("role").and_then(|v| v.as_str()).unwrap_or(""),
+                }),
+                (None, None) => json!({ "type": "", "label": p.label, "bars": 8, "role": "" }),
+            };
+            if frozen {
+                o["frozen"] = json!(true);
             }
+            o
         })
         .collect();
+
+    // SPINE replace (user authority): pasted labels/order become the spine;
+    // matched rows keep their ids, the rest are created/deleted. `ids` aligns
+    // 1:1 with `parsed.sections`, keying every artifact entry below.
+    let ids = crate::spine::sync_spine(conn, &song.id, &mut new_secs).await?;
+    let snapshot = crate::spine::spine_snapshot(conn, &song.id).await?;
+
+    // Lyrics artifact — the pasted words verbatim, text rendered like the editor
+    let lyrics_data = json!({
+        "sections": parsed.sections.iter().zip(&ids).map(|(s, id)| json!({ "section_id": id, "label": s.label, "lines": s.lines })).collect::<Vec<_>>()
+    });
+    let content = json!({ "kind": "lyrics", "text": lyrics_text(&lyrics_data), "data": lyrics_data, "spine_snapshot": snapshot }).to_string();
+    db::save_artifact(conn, &song.id, Some(&lyrics_stage.id), "lyrics", &content).await?;
+    db::set_stage_status(conn, &lyrics_stage.id, "done").await?;
+
     // The SONG owns key/tempo (docs/SONG-FACTS.md) — the back-fill no longer
     // copies them into the artifact (legacy embedded values are dropped here,
     // harmlessly migrating old rows); only the prose notes carry over.
@@ -915,7 +939,7 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
         "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
         "sections": new_secs,
     });
-    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data }).to_string();
+    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -930,12 +954,13 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
     if tag_seqs.iter().any(|t| !t.is_empty()) {
         if let Some(chords_stage) = stages.iter().find(|s| s.r#type == "chords") {
             let chords_data = json!({
-                "sections": parsed.sections.iter().zip(&tag_seqs).map(|(p, tags)| json!({
+                "sections": parsed.sections.iter().zip(&tag_seqs).zip(&ids).map(|((p, tags), id)| json!({
+                    "section_id": id,
                     "label": p.label,
                     "chords": collapse_progression(tags).iter().map(|n| json!({ "name": n, "beats": 4 })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>()
             });
-            let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data }).to_string();
+            let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot }).to_string();
             db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
             db::set_stage_status(conn, &chords_stage.id, "done").await?;
         }
@@ -1010,6 +1035,11 @@ pub struct ResolvedSection {
     pub bars: i64,
     #[serde(default)]
     pub chords: Vec<ResolvedChord>,
+    /// The song's spine row this section came from (docs/SECTION-SPINE-SPEC.md
+    /// Phase 3 — `Composition.sections` carries it since Phase 2), so the
+    /// export maps back losslessly even across renames. Absent on sketches.
+    #[serde(default)]
+    pub section_id: Option<String>,
 }
 fn default_bars() -> i64 {
     8
@@ -1024,42 +1054,63 @@ fn parse_resolved_sections(sections_json: &str) -> Result<Vec<ResolvedSection>> 
     Ok(sections)
 }
 
-/// The Chords-stage `data` for a set of resolved sections.
+/// The Chords-stage `data` for a set of resolved sections (each entry carries
+/// its `section_id` when the resolved section has one).
 fn chords_data_from_resolved(sections: &[ResolvedSection]) -> Value {
     json!({
-        "sections": sections.iter().map(|s| json!({
-            "label": s.label,
-            "chords": s.chords.iter().map(|c| json!({ "name": c.name, "beats": c.beats.max(1) })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>()
+        "sections": sections.iter().map(|s| {
+            let mut o = json!({
+                "label": s.label,
+                "chords": s.chords.iter().map(|c| json!({ "name": c.name, "beats": c.beats.max(1) })).collect::<Vec<_>>(),
+            });
+            if let Some(id) = &s.section_id {
+                o["section_id"] = json!(id);
+            }
+            o
+        }).collect::<Vec<_>>()
     })
 }
 
 /// The Structure-stage `data` for resolved sections, back-filled against the
 /// prior structure exactly like `apply_parsed_lyrics`: labels/order come from
-/// the export; `type`/`bars`/`role` (and a 🔒 lock) survive where a label
-/// matches; NEW sections take the exported bar count (the Composer knows it,
-/// unlike a lyric paste).
-fn structure_data_from_resolved(sections: &[ResolvedSection], prior_data: &Value) -> Value {
+/// the export; `type`/`role` survive where a section matches — the SPINE row
+/// (by `section_id`) is the preferred form source, the prior artifact entry
+/// (id first, label fallback) the legacy one; a 🔒 lock carries over from the
+/// prior entry. BARS: when the song has a spine the EXPORTED bar counts win
+/// (D4 — the dialog shows the changes before confirm); the legacy (spineless)
+/// path keeps the prior bars on label match, byte-identical to before. NEW
+/// sections take the exported bar count.
+fn structure_data_from_resolved(sections: &[ResolvedSection], prior_data: &Value, spine: &[Section], export_bars_win: bool) -> Value {
     let prior_secs: Vec<Value> = prior_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let new_secs: Vec<Value> = sections
         .iter()
         .map(|p| {
-            let old = prior_secs.iter().find(|s| norm_label(&section_label("structure", s)) == norm_label(&p.label));
-            match old {
-                Some(old) => {
-                    let mut o = json!({
-                        "type": old.get("type").and_then(|v| v.as_str()).unwrap_or(""),
-                        "label": p.label,
-                        "bars": old.get("bars").and_then(|b| b.as_i64()).unwrap_or(p.bars.max(1)),
-                        "role": old.get("role").and_then(|v| v.as_str()).unwrap_or(""),
-                    });
-                    if old.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false) {
-                        o["frozen"] = json!(true);
-                    }
-                    o
-                }
-                None => json!({ "type": "", "label": p.label, "bars": p.bars.max(1), "role": "" }),
+            let row = p.section_id.as_deref().and_then(|id| spine.iter().find(|r| r.id == id));
+            let old = prior_secs.iter().find(|s| {
+                let by_id = p.section_id.as_deref().is_some_and(|id| s.get("section_id").and_then(|v| v.as_str()) == Some(id));
+                by_id || norm_label(&section_label("structure", s)) == norm_label(&p.label)
+            });
+            let ty = row
+                .map(|r| r.r#type.clone())
+                .or_else(|| old.and_then(|o| o.get("type").and_then(|v| v.as_str()).map(String::from)))
+                .unwrap_or_default();
+            let role = row
+                .map(|r| r.role.clone())
+                .or_else(|| old.and_then(|o| o.get("role").and_then(|v| v.as_str()).map(String::from)))
+                .unwrap_or_default();
+            let bars = if export_bars_win {
+                p.bars.max(1)
+            } else {
+                old.and_then(|o| o.get("bars").and_then(|b| b.as_i64())).unwrap_or(p.bars.max(1))
+            };
+            let mut o = json!({ "type": ty, "label": p.label, "bars": bars, "role": role });
+            if let Some(id) = &p.section_id {
+                o["section_id"] = json!(id);
             }
+            if old.is_some_and(|o| o.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false)) {
+                o["frozen"] = json!(true);
+            }
+            o
         })
         .collect();
     // The SONG owns key/tempo (docs/SONG-FACTS.md) — no embedded copies; only
@@ -1089,28 +1140,62 @@ async fn current_stage_data(conn: &Connection, stage_id: &str) -> Result<Value> 
 /// structure section byte-identical (and re-inserts dropped ones) — the
 /// export only lands on unlocked sections. Returns
 /// `{ ok, skipped_frozen: [labels] }` so the UI can report what was kept.
+///
+/// Phase 3 (docs/SECTION-SPINE-SPEC.md): the export is a user-authority spine
+/// writer — resolved sections map back through `section_id` (Phase 2 carries
+/// it on `Composition.sections`; label fallback otherwise), matched rows take
+/// the exported BARS (D4 — the dialog shows the changes first), genuinely new
+/// sections get rows, and both saved artifacts carry `section_id`s.
 pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sections_json: &str) -> Result<Value> {
     let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
-    let sections = parse_resolved_sections(sections_json)?;
+    let mut sections = parse_resolved_sections(sections_json)?;
     let stages = db::list_stages(conn, &song.id).await?;
     let chords_stage = stages.iter().find(|s| s.r#type == "chords").ok_or_else(|| anyhow!("song has no chords stage"))?;
     let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
 
-    // Chords: the export, with prior frozen sections spliced back verbatim.
+    // attach existing spine ids to resolved sections that lack one (norm-label,
+    // consume-once) — renamed rows still match through the id the Composer kept
+    let spine = db::list_sections(conn, &song.id).await?;
+    let had_spine = !spine.is_empty();
+    let mut consumed: Vec<bool> = spine.iter().map(|r| sections.iter().any(|s| s.section_id.as_deref() == Some(r.id.as_str()))).collect();
+    for s in sections.iter_mut().filter(|s| s.section_id.is_none()) {
+        if let Some(ri) = spine
+            .iter()
+            .enumerate()
+            .find(|(ri, r)| !consumed[*ri] && norm_label(&r.label) == norm_label(&s.label))
+            .map(|(ri, _)| ri)
+        {
+            consumed[ri] = true;
+            s.section_id = Some(spine[ri].id.clone());
+        }
+    }
+
+    // Structure FIRST (it drives the spine): back-fill (labels/order from the
+    // export; type/role/🔒 preserved on match; exported bars win once the song
+    // has a spine — D4), frozen guard re-inserts dropped locked sections, then
+    // the SPINE is replaced to the merged list (matched rows keep ids).
+    let prior_structure = current_stage_data(conn, &structure_stage.id).await?;
+    let new_structure = structure_data_from_resolved(&sections, &prior_structure, &spine, had_spine);
+    let mut merged_structure = merge_frozen_sections("structure", &prior_structure, &new_structure);
+    let mut s_entries = merged_structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    crate::spine::sync_spine(conn, &song.id, &mut s_entries).await?;
+    merged_structure["sections"] = Value::Array(s_entries);
+    let snapshot = crate::spine::spine_snapshot(conn, &song.id).await?;
+
+    // Chords: the export (entries keyed to the fresh spine — new rows included),
+    // with prior frozen sections spliced back verbatim (id-first).
+    let fresh = db::list_sections(conn, &song.id).await?;
+    for s in sections.iter_mut().filter(|s| s.section_id.is_none()) {
+        s.section_id = fresh.iter().find(|r| norm_label(&r.label) == norm_label(&s.label)).map(|r| r.id.clone());
+    }
     let prior_chords = current_stage_data(conn, &chords_stage.id).await?;
     let skipped = frozen_labels("chords", &prior_chords);
     let merged_chords = merge_frozen_sections("chords", &prior_chords, &chords_data_from_resolved(&sections));
-    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&merged_chords), "data": merged_chords }).to_string();
+    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&merged_chords), "data": merged_chords, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
-    // Structure: back-fill (labels/order from the export; bars/role/type/🔒
-    // preserved on label match), then the same frozen guard re-inserts any
-    // locked section the export dropped.
-    let prior_structure = current_stage_data(conn, &structure_stage.id).await?;
-    let new_structure = structure_data_from_resolved(&sections, &prior_structure);
-    let merged_structure = merge_frozen_sections("structure", &prior_structure, &new_structure);
-    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&merged_structure), "data": merged_structure }).to_string();
+    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&merged_structure), "data": merged_structure, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -1132,20 +1217,34 @@ pub async fn create_song_from_composition(
     sections_json: &str,
 ) -> Result<Song> {
     // validate BEFORE creating, so a bad export never leaves an empty song
-    let sections = parse_resolved_sections(sections_json)?;
+    let mut sections = parse_resolved_sections(sections_json)?;
+    // a NEW song gets fresh spine rows — ids from the source composition (if
+    // any) belong to another song and must not leak in
+    for s in sections.iter_mut() {
+        s.section_id = None;
+    }
     let song = db::create_song(conn, style_preset_id, title).await?;
     let song = db::update_song_key(conn, &song.id, key_root, key_mode, bpm).await?;
     let stages = db::list_stages(conn, &song.id).await?;
     let chords_stage = stages.iter().find(|s| s.r#type == "chords").ok_or_else(|| anyhow!("song has no chords stage"))?;
     let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
 
+    // the resolved sections BECOME the new song's spine (user authority)
+    let mut structure_data = structure_data_from_resolved(&sections, &Value::Null, &[], true);
+    let mut s_entries = structure_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let ids = crate::spine::sync_spine(conn, &song.id, &mut s_entries).await?;
+    structure_data["sections"] = Value::Array(s_entries);
+    for (s, id) in sections.iter_mut().zip(&ids) {
+        s.section_id = Some(id.clone());
+    }
+    let snapshot = crate::spine::spine_snapshot(conn, &song.id).await?;
+
     let chords_data = chords_data_from_resolved(&sections);
-    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data }).to_string();
+    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
-    let structure_data = structure_data_from_resolved(&sections, &Value::Null);
-    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data }).to_string();
+    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -1214,6 +1313,25 @@ mod tests {
         let new = json!({ "sections": [ { "label": "A", "chords": [{"name":"C","beats":4}] } ] });
         let merged = merge_frozen_sections("chords", &prior, &new);
         assert_eq!(merged, new); // identical to today
+    }
+
+    /// Phase 3 (docs/SECTION-SPINE-SPEC.md): frozen sections match by
+    /// `section_id` BEFORE the label — a renamed section (spine rename → the
+    /// model outputs the new label) still merges onto its own entry instead of
+    /// being duplicated by the label mismatch.
+    #[test]
+    fn merge_frozen_matches_by_section_id_before_label() {
+        let prior = json!({ "sections": [
+            { "section_id": "sec-x", "label": "Verse 1", "chords": [{"name":"Am","beats":4}], "frozen": true }
+        ]});
+        let new = json!({ "sections": [
+            { "section_id": "sec-x", "label": "Verso Uno", "chords": [{"name":"G","beats":4}] }
+        ]});
+        let merged = merge_frozen_sections("chords", &prior, &new);
+        let secs = merged["sections"].as_array().unwrap();
+        assert_eq!(secs.len(), 1, "id match must not duplicate the renamed section");
+        assert_eq!(secs[0]["chords"][0]["name"], "Am", "frozen content wins");
+        assert_eq!(secs[0]["label"], "Verse 1", "frozen entry stays byte-verbatim");
     }
 
     #[test]

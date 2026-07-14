@@ -12,6 +12,7 @@ pub mod freeze;
 pub mod midi;
 pub mod models;
 pub mod render;
+pub mod spine;
 pub mod tools;
 
 pub use models::*;

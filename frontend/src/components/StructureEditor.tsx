@@ -35,8 +35,8 @@ export function parseStructure(content: string, song: { keyRoot: string; keyMode
  *  comes from the SPINE when the song has rows — label/type/bars/role in spine
  *  order, frozen flags carried over from the artifact entry (matched by
  *  section_id, label fallback); artifact-only sections are appended so nothing
- *  disappears during the Phase-2 write window. The SAVE path is untouched (it
- *  still writes label-keyed artifact data — writers switch in Phase 3). */
+ *  disappears. Since Phase 3 the SAVE path writes the spine (D1: this editor
+ *  IS the spine editor) and the artifact entries carry section_id + label. */
 export function spineSeededStructure(base: StructureData, spine: readonly SpineSection[]): StructureData {
   if (!spine.length) return base;
   const used = new Set<Section>();
@@ -88,16 +88,46 @@ export function StructureEditor({
 
   const save = useMutation({
     mutationFn: async () => {
-      // persist `frozen` only when set, so unfrozen sections stay as before
-      const sections = d.sections.map((s) => ({ type: s.type, label: s.label, bars: s.bars, role: s.role, ...(s.frozen ? { frozen: true } : {}) }));
+      // Phase 3 (docs/SECTION-SPINE-SPEC.md, D1): this editor IS the spine
+      // editor — add/remove/reorder/rename/bars/role land on the `section`
+      // table first (rows matched by id keep their identity; removed rows are
+      // deleted — the user's authority), then the artifact save mirrors it.
+      const rows = spineSections ?? [];
+      const keptIds = new Set(d.sections.map((s) => s.section_id).filter(Boolean));
+      for (const r of rows) {
+        if (!keptIds.has(r.id)) await api.deleteSection(r.id);
+      }
+      const orderedIds: string[] = [];
+      const withIds: Section[] = [];
+      for (const s of d.sections) {
+        const bars = Math.max(1, Number(s.bars) || 8);
+        const row = rows.find((r) => r.id === s.section_id);
+        if (row) {
+          if (row.label !== s.label || Number(row.bars) !== bars || row.role !== s.role || row.type !== (s.type ?? "")) {
+            await api.updateSection(row.id, s.label, s.type ?? "", bars, s.role);
+          }
+          orderedIds.push(row.id);
+          withIds.push({ ...s, bars });
+        } else {
+          const created = await api.createSection(songId, s.label, s.type ?? "", bars, s.role);
+          orderedIds.push(created.id);
+          withIds.push({ ...s, bars, section_id: created.id });
+        }
+      }
+      if (orderedIds.length) await api.reorderSections(songId, orderedIds);
+      // persist `frozen` only when set, so unfrozen sections stay as before;
+      // every entry carries its spine `section_id` (labels stay for Phase-3
+      // compat — readers still label-fallback until Phase 4)
+      const sections = withIds.map((s) => ({ section_id: s.section_id, type: s.type, label: s.label, bars: s.bars, role: s.role, ...(s.frozen ? { frozen: true } : {}) }));
       // The artifact carries NO key/bpm (docs/SONG-FACTS.md) — only the prose
       // notes and the section map. Saving also migrates legacy embedded copies away.
       await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: structureToMarkdown(d), data: { keyNote: d.keyNote, tempoNote: d.tempoNote, sections } }));
       // The SONG owns key/tempo — the pickers write it song-level, the single
       // source the Chords palette, Sheet, prompts, and Ableton all read.
       await api.updateSongKey(songId, d.root, d.mode, d.bpm);
+      return withIds;
     },
-    onSuccess: () => { setSaved("Saved — key/tempo synced to the song."); onChanged(); },
+    onSuccess: (withIds) => { setD((c) => ({ ...c, sections: withIds })); setSaved("Saved — key/tempo synced to the song."); onChanged(); },
   });
 
   return (

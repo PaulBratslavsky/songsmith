@@ -66,8 +66,10 @@ pub(crate) fn has_frozen_sections(stage_type: &str, data: &Value) -> bool {
 }
 
 /// Deterministically splice prior **frozen** sections into the regenerated
-/// artifact's `data`. Match by label (case/space-insensitive); if Claude dropped
-/// a frozen section, re-insert it at its original index; always carry `frozen:true`.
+/// artifact's `data`. Match by `section_id` FIRST (docs/SECTION-SPINE-SPEC.md
+/// Phase 3 — rename-proof once entries carry spine ids), then by label
+/// (case/space-insensitive) for legacy artifacts; if Claude dropped a frozen
+/// section, re-insert it at its original index; always carry `frozen:true`.
 /// Returns the merged `data` Value. Non-section stages return `new_data` unchanged.
 pub fn merge_frozen_sections(stage_type: &str, prior_data: &Value, new_data: &Value) -> Value {
     if !is_section_stage(stage_type) {
@@ -77,8 +79,10 @@ pub fn merge_frozen_sections(stage_type: &str, prior_data: &Value, new_data: &Va
     let prior_secs = prior_data.get(arr_key).and_then(|v| v.as_array());
     let Some(prior_secs) = prior_secs else { return new_data.clone() };
 
-    // collect (original_index, label, section) for each prior-frozen section
-    let frozen: Vec<(usize, String, Value)> = prior_secs
+    let sec_id = |s: &Value| s.get("section_id").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).map(String::from);
+
+    // collect (original_index, section_id?, label, section) per prior-frozen section
+    let frozen: Vec<(usize, Option<String>, String, Value)> = prior_secs
         .iter()
         .enumerate()
         .filter(|(_, s)| s.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false))
@@ -88,7 +92,7 @@ pub fn merge_frozen_sections(stage_type: &str, prior_data: &Value, new_data: &Va
             if let Some(obj) = s.as_object_mut() {
                 obj.insert("frozen".into(), Value::Bool(true));
             }
-            (i, norm_label(&section_label(stage_type, &s)), s)
+            (i, sec_id(&s), norm_label(&section_label(stage_type, &s)), s)
         })
         .collect();
 
@@ -107,12 +111,13 @@ pub fn merge_frozen_sections(stage_type: &str, prior_data: &Value, new_data: &Va
         .unwrap_or_default();
     let mut out = new_secs.clone();
 
-    for (orig_idx, flabel, fsec) in &frozen {
-        // overwrite the matching new section verbatim …
-        if let Some(pos) = out
-            .iter()
-            .position(|s| norm_label(&section_label(stage_type, s)) == *flabel)
-        {
+    for (orig_idx, fid, flabel, fsec) in &frozen {
+        // overwrite the matching new section verbatim — id first, label fallback …
+        let pos = fid
+            .as_ref()
+            .and_then(|fid| out.iter().position(|s| sec_id(s).as_ref() == Some(fid)))
+            .or_else(|| out.iter().position(|s| norm_label(&section_label(stage_type, s)) == *flabel));
+        if let Some(pos) = pos {
             out[pos] = fsec.clone();
         } else {
             // … or re-insert it at (close to) its original position if dropped.

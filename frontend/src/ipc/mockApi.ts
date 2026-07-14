@@ -329,6 +329,40 @@ function inferKeyFromTags(tags: string[]): { root: string; mode: string } | null
   const s = stats.get(best)!;
   return { root: best, mode: s.minor * 2 > s.total ? "minor" : "major" };
 }
+// ---- Section spine writers (docs/SECTION-SPINE-SPEC.md, Phase 3) -----------
+// Mirrors core/src/spine.rs `sync_spine`: user-authority REPLACE — the spine
+// becomes exactly `entries` (matched rows keep ids by section_id then
+// norm-label; the rest created/deleted; frozen entries never mutated). Ids are
+// attached to non-frozen entries in place and returned aligned 1:1.
+function syncMockSpine(songId: string, entries: Any[]): string[] {
+  db.sections ??= [];
+  const rows = songSections(songId);
+  const consumed = new Set<Any>();
+  const rowOf: (Any | null)[] = entries.map((e) =>
+    (e.section_id && rows.find((r) => !consumed.has(r) && r.id === e.section_id && consumed.add(r))) || null,
+  );
+  entries.forEach((e, i) => {
+    if (rowOf[i]) return;
+    const row = rows.find((r) => !consumed.has(r) && normLabel(r.label) === normLabel(e.label ?? e.type ?? ""));
+    if (row) { consumed.add(row); rowOf[i] = row; }
+  });
+  const ids = entries.map((e, i) => {
+    const form = { label: e.label ?? "Section", type: e.type ?? "", bars: Math.max(1, Number(e.bars) || 8), role: e.role ?? "" };
+    const row = rowOf[i];
+    if (row) {
+      if (!e.frozen) Object.assign(row, form, { updated_at: now() });
+      return row.id as string;
+    }
+    const sec = { id: uid(), song_id: songId, position: 0, ...form, created_at: now(), updated_at: now() };
+    db.sections.push(sec);
+    return sec.id as string;
+  });
+  db.sections = db.sections.filter((r: Any) => r.song_id !== songId || ids.includes(r.id));
+  ids.forEach((id, pos) => { const r = db.sections.find((x: Any) => x.id === id); if (r) { r.position = pos; } });
+  entries.forEach((e, i) => { if (!e.frozen) e.section_id = ids[i]; });
+  return ids;
+}
+
 /** Replace the Lyrics artifact + back-fill Structure to the pasted sections (labels/order). */
 function importLyricsIntoSong(songId: string, text: string) {
   const parsed = parsePastedLyrics(text);
@@ -343,20 +377,28 @@ function importLyricsIntoSong(songId: string, text: string) {
     db.artifacts.push({ id: uid(), song_id: songId, stage_id: stage.id, kind, content, version: ver, approved: false, created_at: now() });
     stage.status = "done"; stage.updated_at = now();
   };
-  // Lyrics — pasted words verbatim, editor-style text, no frozen flags carried
-  const lyricsData = { sections: parsed.sections.map((s) => ({ label: s.label, lines: s.lines })) };
-  const lyricsText = parsed.sections.map((s) => `[${s.label}]\n${s.lines.join("\n")}`).join("\n\n");
-  push(lyricsStage, "lyrics", JSON.stringify({ kind: "lyrics", text: lyricsText, data: lyricsData }));
-  // Structure — back-fill labels/order; keep bars/role (+ lock) on label match
+  // Structure — back-fill labels/order; keep bars/role (+ lock) where a label
+  // matches (the SPINE row wins over the prior artifact entry — Phase 3)
   let prior: Any | null = null;
   try { prior = JSON.parse(currentArtifact(structureStage.id)?.content ?? "")?.data ?? null; } catch {}
   const priorSecs: Any[] = Array.isArray(prior?.sections) ? prior.sections : [];
+  const spineRows = songSections(songId);
   const sections = parsed.sections.map((p) => {
+    const row = spineRows.find((r) => normLabel(r.label) === normLabel(p.label));
     const old = priorSecs.find((s) => normLabel(s.label ?? s.type ?? "") === normLabel(p.label));
+    const frozen = old?.frozen ? { frozen: true } : {};
+    if (row) return { section_id: row.id, type: row.type ?? "", label: p.label, bars: Number(row.bars) || 8, role: row.role ?? "", ...frozen };
     return old
-      ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? 8), role: old.role ?? "", ...(old.frozen ? { frozen: true } : {}) }
+      ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? 8), role: old.role ?? "", ...frozen }
       : { type: "", label: p.label, bars: 8, role: "" };
   });
+  // Phase 3: the paste is a user-authority SPINE writer — rows replaced to the
+  // pasted labels/order; ids key every artifact entry below.
+  const ids = syncMockSpine(songId, sections);
+  // Lyrics — pasted words verbatim, editor-style text, no frozen flags carried
+  const lyricsData = { sections: parsed.sections.map((s, i) => ({ section_id: ids[i], label: s.label, lines: s.lines })) };
+  const lyricsText = parsed.sections.map((s) => `[${s.label}]\n${s.lines.join("\n")}`).join("\n\n");
+  push(lyricsStage, "lyrics", JSON.stringify({ kind: "lyrics", text: lyricsText, data: lyricsData }));
   // The SONG owns key/tempo (docs/SONG-FACTS.md) — no embedded copies; only
   // the prose notes carry over (mirrors core agent.rs apply_parsed_lyrics).
   const sData = { keyNote: prior?.keyNote ?? "", tempoNote: prior?.tempoNote ?? "", sections };
@@ -369,6 +411,7 @@ function importLyricsIntoSong(songId: string, text: string) {
     const chordsStage = stageOf("chords");
     if (chordsStage) {
       const cSecs = parsed.sections.map((p, i) => ({
+        section_id: ids[i],
         label: p.label,
         chords: collapseProgression(tagSeqs[i]).map((name) => ({ name, beats: 4 })),
       }));
@@ -382,13 +425,15 @@ function importLyricsIntoSong(songId: string, text: string) {
 // chord/structure sections are skipped and preserved (re-inserted if dropped).
 
 function mergeFrozen(priorSecs: Any[], newSecs: Any[]): Any[] {
+  // id-first match (Phase 3 — rename-proof), label fallback for legacy entries
   const frozen = priorSecs
     .map((s, i) => ({ i, s }))
     .filter(({ s }) => !!s.frozen)
-    .map(({ i, s }) => ({ i, label: normLabel(s.label ?? s.type ?? ""), sec: { ...s, frozen: true } }));
+    .map(({ i, s }) => ({ i, id: s.section_id, label: normLabel(s.label ?? s.type ?? ""), sec: { ...s, frozen: true } }));
   const out = [...newSecs];
   for (const f of frozen) {
-    const pos = out.findIndex((s) => normLabel(s.label ?? s.type ?? "") === f.label);
+    let pos = f.id ? out.findIndex((s) => s.section_id === f.id) : -1;
+    if (pos < 0) pos = out.findIndex((s) => normLabel(s.label ?? s.type ?? "") === f.label);
     if (pos >= 0) out[pos] = f.sec;
     else out.splice(Math.min(f.i, out.length), 0, f.sec);
   }
@@ -421,28 +466,62 @@ function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
     db.artifacts.push({ id: uid(), song_id: songId, stage_id: stage.id, kind, content, version: ver, approved: false, created_at: now() });
     stage.status = "done"; stage.updated_at = now();
   };
-  // Chords: the export, with prior frozen sections spliced back verbatim
-  let priorC: Any | null = null;
-  try { priorC = JSON.parse(currentArtifact(chordsStage.id)?.content ?? "")?.data ?? null; } catch {}
-  const priorCSecs: Any[] = Array.isArray(priorC?.sections) ? priorC.sections : [];
-  const skipped = priorCSecs.filter((s) => !!s.frozen).map((s) => s.label ?? s.type ?? "");
-  const newCSecs = sections.map((s) => ({ label: s.label, chords: (s.chords ?? []).map((c: Any) => ({ name: c.name, beats: Math.max(1, Number(c.beats) || 4) })) }));
-  const cData = { sections: mergeFrozen(priorCSecs, newCSecs) };
-  push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cData.sections), data: cData }));
-  // Structure: back-fill labels/order; bars/role/type (+ 🔒) preserved on match
+  // Phase 3 (docs/SECTION-SPINE-SPEC.md): the export is a user-authority spine
+  // writer — resolved sections map back through section_id (label fallback),
+  // matched rows take the EXPORTED bars (D4), new sections get rows.
+  const spineRows = songSections(songId);
+  const hadSpine = spineRows.length > 0;
+  const consumed = new Set<Any>();
+  for (const s of sections) {
+    if (s.section_id) { const r = spineRows.find((x) => x.id === s.section_id); if (r) consumed.add(r); }
+  }
+  for (const s of sections) {
+    if (s.section_id) continue;
+    const r = spineRows.find((x) => !consumed.has(x) && normLabel(x.label) === normLabel(s.label ?? ""));
+    if (r) { consumed.add(r); s.section_id = r.id; }
+  }
+  // Structure FIRST (it drives the spine): back-fill labels/order; type/role
+  // (+ 🔒) preserved on match — spine row preferred; exported bars win once
+  // the song has a spine (legacy keeps prior bars on match, as before).
   let priorS: Any | null = null;
   try { priorS = JSON.parse(currentArtifact(structureStage.id)?.content ?? "")?.data ?? null; } catch {}
   const priorSSecs: Any[] = Array.isArray(priorS?.sections) ? priorS.sections : [];
   const newSSecs = sections.map((p) => {
-    const old = priorSSecs.find((s) => normLabel(s.label ?? s.type ?? "") === normLabel(p.label));
-    return old
-      ? { type: old.type ?? "", label: p.label, bars: Number(old.bars ?? Math.max(1, Number(p.bars) || 8)), role: old.role ?? "", ...(old.frozen ? { frozen: true } : {}) }
-      : { type: "", label: p.label, bars: Math.max(1, Number(p.bars) || 8), role: "" };
+    const row = p.section_id ? spineRows.find((x) => x.id === p.section_id) : undefined;
+    const old = priorSSecs.find((s) => (p.section_id && s.section_id === p.section_id) || normLabel(s.label ?? s.type ?? "") === normLabel(p.label));
+    const exportBars = Math.max(1, Number(p.bars) || 8);
+    return {
+      ...(p.section_id ? { section_id: p.section_id } : {}),
+      type: row?.type ?? old?.type ?? "",
+      label: p.label,
+      bars: hadSpine ? exportBars : Number(old?.bars ?? exportBars),
+      role: row?.role ?? old?.role ?? "",
+      ...(old?.frozen ? { frozen: true } : {}),
+    };
   });
+  const mergedSSecs = mergeFrozen(priorSSecs, newSSecs);
+  syncMockSpine(songId, mergedSSecs);
+  // Chords: the export (entries keyed to the fresh spine — new rows included),
+  // with prior frozen sections spliced back verbatim.
+  const fresh = songSections(songId);
+  for (const s of sections) {
+    if (!s.section_id) s.section_id = fresh.find((x) => normLabel(x.label) === normLabel(s.label ?? ""))?.id;
+  }
+  let priorC: Any | null = null;
+  try { priorC = JSON.parse(currentArtifact(chordsStage.id)?.content ?? "")?.data ?? null; } catch {}
+  const priorCSecs: Any[] = Array.isArray(priorC?.sections) ? priorC.sections : [];
+  const skipped = priorCSecs.filter((s) => !!s.frozen).map((s) => s.label ?? s.type ?? "");
+  const newCSecs = sections.map((s) => ({
+    ...(s.section_id ? { section_id: s.section_id } : {}),
+    label: s.label,
+    chords: (s.chords ?? []).map((c: Any) => ({ name: c.name, beats: Math.max(1, Number(c.beats) || 4) })),
+  }));
+  const cData = { sections: mergeFrozen(priorCSecs, newCSecs) };
+  push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cData.sections), data: cData }));
   // No embedded key/bpm — the SONG owns them (docs/SONG-FACTS.md); notes carry over.
   const sData = {
     keyNote: priorS?.keyNote ?? "", tempoNote: priorS?.tempoNote ?? "",
-    sections: mergeFrozen(priorSSecs, newSSecs),
+    sections: mergedSSecs,
   };
   push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData), data: sData }));
   return skipped;
@@ -666,6 +745,9 @@ const handlers: MockHandlers = {
   create_song_from_composition: (a) => {
     const sections = JSON.parse(a.sectionsJson ?? "[]");
     if (!Array.isArray(sections) || !sections.length) throw new Error("nothing to export — the composition has no sections");
+    // a NEW song gets fresh spine rows — ids from the source composition
+    // belong to another song and must not leak in (mirrors core)
+    for (const s of sections) delete s.section_id;
     const id = uid();
     const v = { id, style_preset_id: a.stylePresetId, title: a.title || "Untitled song", status: "in_progress",
       current_stage: "concept", key_root: a.keyRoot || "A", key_mode: a.keyMode || "minor", bpm: Number(a.bpm) || 120, voicings: "{}", created_at: now(), updated_at: now() };

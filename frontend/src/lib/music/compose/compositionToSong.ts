@@ -26,12 +26,16 @@ import { getDiatonicChords } from '../theory/diatonic';
 import { triadLabel, seventhLabel } from './labels';
 import type { PitchClass, ScaleType } from '../types';
 
-/** One Chords-stage section, fully resolved (what the backend receives). */
+/** One Chords-stage section, fully resolved (what the backend receives).
+ *  `section_id` is the song's spine row the section came from (docs/SECTION-
+ *  SPINE-SPEC.md — carried by full-song imports since Phase 2) so the export
+ *  maps back losslessly even across renames; absent on sketches. */
 export type ResolvedChord = { name: string; beats: number };
 export type ResolvedSection = {
   label: string;
   bars: number;
   chords: ResolvedChord[];
+  section_id?: string;
 };
 
 function modeToScaleType(mode: KeyMode): ScaleType {
@@ -95,6 +99,7 @@ export function resolveCompositionSections(comp: Composition): ResolvedSection[]
     label: s.name || 'Section',
     bars: Math.max(1, Math.round(s.lengthTicks / TICKS_PER_BAR)),
     chords: [],
+    ...(s.section_id ? { section_id: s.section_id } : {}),
   }));
   for (const span of chords) {
     let idx = sections.findIndex(

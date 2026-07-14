@@ -18,7 +18,9 @@ export { parseLine as parseChordProLine } from "../lib/music/chordpro";
 // ChordPro model (see lib/music/chordpro): a lyric line is a sequence of words,
 // each optionally carrying a chord that lands on its first syllable. Stored
 // back as inline "[C]word" text so the chord stays anchored to its word.
-type Section = { label: string; lines: Word[][]; frozen?: boolean };
+// `section_id` links the section to its spine row (docs/SECTION-SPINE-SPEC.md)
+// and is carried through every save.
+type Section = { section_id?: string; label: string; lines: Word[][]; frozen?: boolean };
 
 /** The words this stage holds, keyed by section label (parsed from inline ChordPro). */
 function wordsByLabel(content: string): Record<string, Word[][]> {
@@ -68,11 +70,11 @@ function buildSections(content: string, chordsData: ChordsData | null | undefine
   const prog = progressionsByLabel(chordsData);
   const out: Section[] = [];
   const seen = new Set<string>();
-  const add = (label: string, lines: Word[][], isFrozen?: boolean) => {
+  const add = (label: string, lines: Word[][], isFrozen?: boolean, sectionId?: string) => {
     const hasWords = lines.some((l) => l.some((w) => w.text.trim()));
     const hasChords = lines.some((l) => l.some((w) => w.chord));
     if (hasWords && !hasChords && prog[label]?.length) autoPlaceSection(lines, prog[label]);
-    out.push({ label, lines, ...(isFrozen ?? frozen[label] ? { frozen: true } : {}) });
+    out.push({ ...(sectionId ? { section_id: sectionId } : {}), label, lines, ...(isFrozen ?? frozen[label] ? { frozen: true } : {}) });
   };
 
   if (spine.length) {
@@ -96,7 +98,7 @@ function buildSections(content: string, chordsData: ChordsData | null | undefine
       const c = matchBySpineRow(chordsData?.sections ?? [], row, usedC);
       if (c) usedC.add(c);
       seen.add(normLabel(row.label));
-      add(row.label, e?.lines ?? [], e?.frozen);
+      add(row.label, e?.lines ?? [], e?.frozen, row.id);
     }
     // Phase-2 window: artifact sections not (yet) in the spine still render —
     // chords-stage sections first (empty words), then lyric-only ones.
@@ -105,12 +107,12 @@ function buildSections(content: string, chordsData: ChordsData | null | undefine
       seen.add(normLabel(cs.label));
       const e = entries.find((x) => !usedE.has(x) && normLabel(x.label) === normLabel(cs.label));
       if (e) usedE.add(e);
-      add(cs.label, e?.lines ?? [], e?.frozen);
+      add(cs.label, e?.lines ?? [], e?.frozen, e?.section_id);
     }
     for (const e of entries) {
       if (usedE.has(e) || seen.has(normLabel(e.label))) continue;
       seen.add(normLabel(e.label));
-      add(e.label, e.lines, e.frozen);
+      add(e.label, e.lines, e.frozen, e.section_id);
     }
     return out.length ? out : [{ label: "Lyrics", lines: [[]] }];
   }
@@ -280,7 +282,9 @@ export function LyricsEditor({
 
   const save = useMutation({
     mutationFn: () => {
-      const data = { sections: sections.map((s) => ({ label: s.label, lines: s.lines.map(lineToChordPro), ...(s.frozen ? { frozen: true } : {}) })) };
+      // entries carry their spine section_id (docs/SECTION-SPINE-SPEC.md,
+      // Phase 3) alongside the label so renames can't detach the words
+      const data = { sections: sections.map((s) => ({ ...(s.section_id ? { section_id: s.section_id } : {}), label: s.label, lines: s.lines.map(lineToChordPro), ...(s.frozen ? { frozen: true } : {}) })) };
       const text = sections.map((s) => `[${s.label}]\n${s.lines.map(lineToChordPro).join("\n")}`).join("\n\n");
       return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data }));
     },

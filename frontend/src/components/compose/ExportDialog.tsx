@@ -17,9 +17,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../../ipc/api';
-import type { StylePreset } from '../../ipc/generated';
+import type { Section as SpineSection, StylePreset } from '../../ipc/generated';
 import type { Composition } from '../../lib/music/compose/types';
 import { resolveCompositionSections } from '../../lib/music/compose/compositionToSong';
+import { normLabel } from '../../lib/sections';
 
 export function ExportDialog({
   comp,
@@ -45,15 +46,18 @@ export function ExportDialog({
   const [presetId, setPresetId] = useState('');
   const [songTitle, setSongTitle] = useState<string | null>(null);
   const [frozen, setFrozen] = useState<string[]>([]);
+  const [spineRows, setSpineRows] = useState<SpineSection[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Presets for the create form + the linked song's title and its 🔒 frozen
-  // chord/structure section labels (surfaced before the user confirms).
+  // Presets for the create form + the linked song's title, its 🔒 frozen
+  // chord/structure section labels, and its section SPINE (the export updates
+  // matched rows' bars — D4: bar changes are surfaced before the user confirms).
   useEffect(() => {
     let alive = true;
     api.listStylePresets().then((p) => alive && setPresets(p)).catch(() => {});
     if (!songId) return () => { alive = false; };
+    api.listSections(songId).then((r) => alive && setSpineRows(r)).catch(() => {});
     (async () => {
       try {
         const detail = await api.getSong(songId);
@@ -77,12 +81,30 @@ export function ExportDialog({
     return () => { alive = false; };
   }, [songId]);
 
+  // D4 (docs/SECTION-SPINE-SPEC.md): the export updates matched spine rows'
+  // bars — list every change ("Verse 1: 8 → 12 bars") before the confirm.
+  const barChanges = useMemo(() => {
+    if (!songId || mode !== 'update' || !spineRows.length) return [];
+    const used = new Set<SpineSection>();
+    const out: { label: string; from: number; to: number }[] = [];
+    for (const s of sections) {
+      const row = spineRows.find(
+        (r) => !used.has(r) && (s.section_id ? r.id === s.section_id : normLabel(r.label) === normLabel(s.label)),
+      );
+      if (!row) continue;
+      used.add(row);
+      if (Number(row.bars) !== s.bars) out.push({ label: row.label, from: Number(row.bars), to: s.bars });
+    }
+    return out;
+  }, [songId, mode, sections, spineRows]);
+
   const goToSong = (id: string) => {
-    // the export just rewrote stage artifacts — drop the cached queries so
-    // the workspace (and any composer rebuild) reads the new revisions
+    // the export just rewrote stage artifacts + the section spine — drop the
+    // cached queries so the workspace (and any composer rebuild) reads fresh
     qc.invalidateQueries({ queryKey: ['song'] });
     qc.invalidateQueries({ queryKey: ['songs'] });
     qc.invalidateQueries({ queryKey: ['stage'] });
+    qc.invalidateQueries({ queryKey: ['sections'] });
     onClose();
     nav({ to: '/song/$id', params: { id } });
   };
@@ -154,6 +176,17 @@ export function ExportDialog({
               <div className="banner warn" style={{ marginLeft: 22 }}>
                 🔒 Locked sections are kept as they are (skipped, never overwritten):{' '}
                 <b>{frozen.join(', ')}</b>. Unlock them in the song to export over them.
+              </div>
+            )}
+            {mode === 'update' && barChanges.length > 0 && (
+              <div className="banner" style={{ marginLeft: 22 }}>
+                Bars will change:{' '}
+                {barChanges.map((c, i) => (
+                  <span key={c.label}>
+                    {i > 0 && ' · '}
+                    <b>{c.label}</b>: {c.from} → {c.to} bars
+                  </span>
+                ))}
               </div>
             )}
             <label className="row" style={{ gap: 8, alignItems: 'center', margin: 0, textTransform: 'none', cursor: 'pointer' }}>

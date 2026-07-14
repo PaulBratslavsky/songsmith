@@ -116,6 +116,29 @@ self-contained without making the spine itself versioned.
    browser parity. Writers unchanged: label-keyed saves may lag the spine until Phase 3 (readers
    union unmatched artifact sections in, so nothing disappears). Freeze merge stays label-based.
 3. Writers switch (editors, run_stage reconciliation, imports, Composer, freeze-by-id).
+   ✅ Phase 3 built 2026-07-14: every writer lands on the spine; labels stay in artifact
+   data ALONGSIDE `section_id` (removal is Phase 4). Core (`core/src/spine.rs`):
+   `build_run_content` replaces the run_stage/self_check save pipeline — a STRUCTURE run
+   reconciles into the spine exactly per §Reconciliation (id → exact norm-label →
+   same-position+same-NON-EMPTY-type → create at output position; missing rows deleted
+   only when content-free, else kept with a ⚠ line in the artifact text — D2; frozen
+   sections keep row+entry verbatim; a fresh song's first structure run births the
+   spine); NON-structure runs map labels → section_id with create=NEVER (D3, unmatched
+   output dropped + ⚠ line); `freeze::merge_frozen_sections` (and through it the MCP
+   save/revert guards) matches by section_id FIRST, label fallback — a spine rename no
+   longer detaches or duplicates frozen content (the marquee test). Imports
+   (`apply_parsed_lyrics`) and the Composer export/create (`sync_spine`) are
+   user-authority spine REPLACEs (matched rows keep ids/bars/role; export bars WIN once
+   a spine exists — D4); every Phase-3 core write embeds a `spine_snapshot`. Frontend:
+   StructureEditor IS the spine editor (D1 — save diffs into create/update/delete/
+   reorder_sections, then mirrors into the artifact with ids); SectionChordsEditor's
+   add/remove/rename/reorder are the same spine ops (form values kept from the row);
+   LyricsEditor/LyricSpecEditor saves carry section_id through; ExportDialog shows
+   "Verse 1: 8 → 12 bars" before confirm (D4); mock mirrors sync/attach for import +
+   export + id-first frozen merge. Songs with no spine rows keep every legacy path
+   byte-identical (all pre-Phase-3 tests unchanged; 93 core + 2 app green). Deferred to
+   Phase 4: dropping labels/sections from structure data, snapshot-based restore,
+   editor saves embedding snapshots, MCP save_artifact label→id normalization.
 4. Cleanup: structure artifact drops sections; UI polish; docs.
 
 ## USER DECISIONS — ✅ RESOLVED 2026-07-13: user accepted all four recommendations

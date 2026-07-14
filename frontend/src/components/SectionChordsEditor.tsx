@@ -4,6 +4,8 @@ import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, us
 import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, arrayMove, useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { api } from "../ipc/api";
+import type { Section as SpineSection } from "../ipc/generated";
+import { matchBySpineRow } from "../lib/sections";
 import { diatonicChords, pitchClassOf, NOTE_NAMES } from "../music/theory";
 import { isValidName, chordMidisByName, chordPcsByName, voicedMidisByName, voicedNotesByName, chordSizeByName } from "../music/engineAdapter";
 import { pianoVoicedSvg } from "../music/diagrams";
@@ -31,7 +33,7 @@ function keyCheck(names: string[], root: string, mode: string): { out: string[];
 }
 
 type Chord = { id: string; name: string; beats: number };
-type Section = { id: string; label: string; chords: Chord[]; feel?: string; frozen?: boolean };
+type Section = { id: string; section_id?: string; label: string; chords: Chord[]; feel?: string; frozen?: boolean };
 
 /** A pointer/keyboard-draggable wrapper (dnd-kit) — works in the Tauri WebView,
  *  unlike HTML5 drag. Hands the drag handle props to its render child. */
@@ -47,36 +49,60 @@ function fromData(data: ChordsData | null): Section[] {
   if (!data) return [];
   return data.sections.map((s) => ({
     id: uid(),
+    section_id: s.section_id,
     label: s.label || "Section",
     feel: s.feel,
     frozen: s.frozen === true,
     chords: s.chords.map((c) => ({ id: uid(), name: c.name, beats: c.beats })),
   }));
 }
+/** Phase 3 (docs/SECTION-SPINE-SPEC.md): with spine rows, the section LIST is
+ *  the SPINE — each row picks up its artifact content by section_id (label
+ *  fallback); artifact-only leftovers are appended so nothing disappears. */
+function seedFromSpine(secs: Section[], spine: readonly SpineSection[]): Section[] {
+  if (!spine.length) return secs;
+  const used = new Set<Section>();
+  const out: Section[] = spine.map((row) => {
+    const m = matchBySpineRow(secs, row, used);
+    if (m) used.add(m);
+    return m
+      ? { ...m, section_id: row.id, label: row.label }
+      : { id: uid(), section_id: row.id, label: row.label, chords: [] };
+  });
+  for (const s of secs) {
+    if (!used.has(s)) out.push(s);
+  }
+  return out;
+}
 function toData(sections: Section[]) {
-  // persist `frozen` only when set, so unfrozen sections stay byte-identical to before
-  return { sections: sections.map((s) => ({ label: s.label, feel: s.feel, ...(s.frozen ? { frozen: true } : {}), chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })) })) };
+  // persist `frozen` only when set, so unfrozen sections stay byte-identical to
+  // before; entries carry their spine section_id (+ label, Phase-3 compat)
+  return { sections: sections.map((s) => ({ ...(s.section_id ? { section_id: s.section_id } : {}), label: s.label, feel: s.feel, ...(s.frozen ? { frozen: true } : {}), chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })) })) };
 }
 
 /** Per-section chord editor for the CHORDS STAGE (labels, chords+beats,
  *  🔒 freeze, drag-reorder, key check) — distinct from the visual timeline
  *  Sketchpad (components/compose/Sketchpad.tsx) behind the /composer route. */
 export function SectionChordsEditor({
-  songId, stageId, kind, artifactId, keyRoot, keyMode, initialData, onChanged,
+  songId, stageId, kind, artifactId, keyRoot, keyMode, initialData, onChanged, spineSections,
 }: {
   songId: string; stageId: string; kind: string; artifactId: string;
   keyRoot: string; keyMode: string; initialData: ChordsData | null; onChanged: () => void;
+  /** the song's section spine — the section list rendered when non-empty ([] = legacy artifact list) */
+  spineSections?: SpineSection[];
 }) {
-  const [sections, setSections] = useState<Section[]>(() => fromData(initialData));
+  const spine = spineSections ?? [];
+  const [sections, setSections] = useState<Section[]>(() => seedFromSpine(fromData(initialData), spine));
   const [selected, setSelected] = useState<{ s: number; c: number } | null>(null);
   const [playingIdx, setPlayingIdx] = useState<{ s: number; c: number } | null>(null);
   const [dirty, setDirty] = useState(false);
 
-  // reload from a newer revision (e.g. after Claude edits via the stage chat),
-  // unless the user has unsaved manual edits in progress
+  // reload from a newer revision (e.g. after Claude edits via the stage chat)
+  // or when the spine rows load/change, unless the user has unsaved edits
+  const spineSig = spine.map((s) => `${s.id}:${s.label}`).join("|");
   useEffect(() => {
-    if (!dirty) setSections(fromData(initialData));
-  }, [artifactId]);
+    if (!dirty) setSections(seedFromSpine(fromData(initialData), spine));
+  }, [artifactId, spineSig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // palette scale — defaults to the song's key, selectable to explore other scales
   const songRoot = NOTE_NAMES[pitchClassOf(keyRoot) ?? 0];
@@ -128,11 +154,38 @@ export function SectionChordsEditor({
   };
 
   const save = useMutation({
-    mutationFn: () => {
-      const text = sections.map((s) => `${s.label}: ${s.chords.map((c) => c.name).join(" ")}`).join("\n");
-      return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data: toData(sections) }));
+    mutationFn: async () => {
+      // Phase 3 (docs/SECTION-SPINE-SPEC.md): add/remove/reorder/rename here
+      // are SPINE ops — same commands as the Structure editor (bars/role/type
+      // keep the row's current values; new sections take the defaults). Songs
+      // without spine rows keep the legacy label-keyed save untouched.
+      let final = sections;
+      if (spine.length) {
+        const keptIds = new Set(sections.map((s) => s.section_id).filter(Boolean));
+        for (const r of spine) {
+          if (!keptIds.has(r.id)) await api.deleteSection(r.id);
+        }
+        const orderedIds: string[] = [];
+        final = [];
+        for (const s of sections) {
+          const row = spine.find((r) => r.id === s.section_id);
+          if (row) {
+            if (row.label !== s.label) await api.updateSection(row.id, s.label, row.type, Number(row.bars), row.role);
+            orderedIds.push(row.id);
+            final.push(s);
+          } else {
+            const created = await api.createSection(songId, s.label);
+            orderedIds.push(created.id);
+            final.push({ ...s, section_id: created.id });
+          }
+        }
+        if (orderedIds.length) await api.reorderSections(songId, orderedIds);
+      }
+      const text = final.map((s) => `${s.label}: ${s.chords.map((c) => c.name).join(" ")}`).join("\n");
+      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data: toData(final) }));
+      return final;
     },
-    onSuccess: () => { setDirty(false); onChanged(); },
+    onSuccess: (final) => { setSections(final); setDirty(false); onChanged(); },
   });
 
   // NOTE: all hooks must run before this early return — adding/removing the last

@@ -89,7 +89,18 @@ export function LyricSpecEditor({
   const rmBeat = (i: number) => set({ beats: d.beats.filter((_, j) => j !== i) });
 
   const save = useMutation({
-    mutationFn: () => api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: specToMarkdown(d), data: d })),
+    mutationFn: () => {
+      // Phase 3 (docs/SECTION-SPINE-SPEC.md): beats carry their spine
+      // section_id through the save — parsed ids are kept, and a beat typed
+      // against a known section label picks its row's id up here.
+      const rows = spineSections ?? [];
+      const beats = d.beats.map((b) => {
+        if (b.section_id) return b;
+        const row = rows.find((r) => normLabel(r.label) === normLabel(b.section));
+        return row ? { ...b, section_id: row.id } : b;
+      });
+      return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: specToMarkdown(d), data: { ...d, beats } }));
+    },
     onSuccess: () => { setSaved("Saved — the Lyricist writes from this plan."); onChanged(); },
   });
 

@@ -80,6 +80,8 @@ export function SongWorkspace() {
     qc.invalidateQueries({ queryKey: ["song", id] });
     qc.invalidateQueries({ queryKey: ["stage", activeStageId] });
     qc.invalidateQueries({ queryKey: ["songs"] });
+    // Phase 3: editors/imports/runs WRITE the spine — refetch it on any change
+    qc.invalidateQueries({ queryKey: ["sections", id] });
   };
   const setStatus = useMutation({ mutationFn: (s: string) => api.updateSongStatus(id, s), onSuccess: invalidate });
   const setTitle = useMutation({ mutationFn: (t: string) => api.updateSongTitle(id, t), onSuccess: invalidate });
@@ -256,6 +258,7 @@ export function SongWorkspace() {
               keyMode={v.key_mode}
               initialData={parseArtifact("chords", sd.artifact.content).data}
               onChanged={invalidate}
+              spineSections={spineSections}
             />
           ) : sd?.artifact && sd.stage.type === "lyric_spec" ? (
             <LyricSpecEditor
