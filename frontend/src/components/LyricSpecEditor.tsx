@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
+import type { Section as SpineSection } from "../ipc/generated";
 import { FieldChat } from "./FieldChat";
+import { normLabel } from "../lib/sections";
 
-type Beat = { section: string; beat: string; frozen?: boolean };
+type Beat = { section_id?: string; section: string; beat: string; frozen?: boolean };
 export type Diction = "plain-spoken" | "balanced" | "literary";
 export type SpecData = { hook: string; premise: string; pov: string; setting: string; arc: string; diction: Diction; referenceVibe: string; beats: Beat[]; imageBank: string[]; avoid: string[] };
 
@@ -21,7 +23,14 @@ export function parseSpec(content: string): SpecData {
     arc: data?.arc ?? "",
     diction: DICTIONS.includes(data?.diction) ? data.diction : "balanced",
     referenceVibe: data?.referenceVibe ?? "",
-    beats: Array.isArray(data?.beats) ? data.beats.map((b: any) => ({ section: b.section ?? b.label ?? "", beat: b.beat ?? b.text ?? "" })) : [],
+    beats: Array.isArray(data?.beats)
+      ? data.beats.map((b: any) => ({
+          // spine link (docs/SECTION-SPINE-SPEC.md) — kept through saves
+          ...(typeof b.section_id === "string" && b.section_id ? { section_id: b.section_id } : {}),
+          section: b.section ?? b.label ?? "",
+          beat: b.beat ?? b.text ?? "",
+        }))
+      : [],
     imageBank: Array.isArray(data?.imageBank) ? data.imageBank : [],
     avoid: Array.isArray(data?.avoid) ? data.avoid : [],
   };
@@ -46,12 +55,33 @@ export function specToMarkdown(d: SpecData): string {
   return out.join("\n");
 }
 
+/** Phase 2 (docs/SECTION-SPINE-SPEC.md): show the beat sheet in SPINE order
+ *  when the song has spine rows — each beat matched by section_id first, then
+ *  by normalized label; unmatched beats keep their original relative order,
+ *  appended after. [] (legacy / no spine) leaves the order untouched. */
+export function orderBeatsBySpine(beats: Beat[], spine: readonly SpineSection[]): Beat[] {
+  if (!spine.length) return beats;
+  const used = new Set<number>();
+  const out: Beat[] = [];
+  for (const row of spine) {
+    const i = beats.findIndex((b, j) => !used.has(j) && (b.section_id ? b.section_id === row.id : normLabel(b.section) === normLabel(row.label)));
+    if (i >= 0) { used.add(i); out.push(beats[i]); }
+  }
+  beats.forEach((b, j) => { if (!used.has(j)) out.push(b); });
+  return out;
+}
+
 export function LyricSpecEditor({
-  songId, stageId, kind, content, onChanged,
+  songId, stageId, kind, content, onChanged, spineSections,
 }: {
   songId: string; stageId: string; kind: string; content: string; onChanged: () => void;
+  /** the song's section spine — orders the beat sheet when non-empty */
+  spineSections?: SpineSection[];
 }) {
-  const [d, setD] = useState<SpecData>(() => parseSpec(content));
+  const [d, setD] = useState<SpecData>(() => {
+    const parsed = parseSpec(content);
+    return { ...parsed, beats: orderBeatsBySpine(parsed.beats, spineSections ?? []) };
+  });
   const [saved, setSaved] = useState("");
   const set = (patch: Partial<SpecData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
   const setBeat = (i: number, patch: Partial<Beat>) => set({ beats: d.beats.map((b, j) => (j === i ? { ...b, ...patch } : b)) });

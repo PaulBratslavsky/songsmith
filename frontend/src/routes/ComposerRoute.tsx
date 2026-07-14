@@ -36,17 +36,22 @@ function useSongComposition(songId: string | null): {
   const lyricsStageId = song.data?.stages.find((s) => s.type === "lyrics")?.id;
   const chords = useQuery({ queryKey: ["stage", chordsStageId], queryFn: () => api.getStage(chordsStageId!), enabled: !!chordsStageId });
   const lyrics = useQuery({ queryKey: ["stage", lyricsStageId], queryFn: () => api.getStage(lyricsStageId!), enabled: !!lyricsStageId });
+  // the song's section spine (docs/SECTION-SPINE-SPEC.md, Phase 2): owns the
+  // Composition's section order/bars when non-empty; [] = legacy chords order
+  const sections = useQuery({ queryKey: ["sections", songId], queryFn: () => api.listSections(songId!), enabled: !!songId });
 
-  // Both stage queries must have SETTLED before we build the composition.
+  // Every query must have SETTLED before we build the composition.
   // The stage query keys are shared with SongWorkspace's cache, so chords can
   // resolve instantly from cache while lyrics is still on its first fetch —
   // building `comp` at that moment would seed the Composer lyric-less, and since
   // `comp.id` is stable it would never reload for the session (the late-lyrics
-  // race). A stage that doesn't exist counts as settled.
+  // race; the spine query joins the same settled gate for the same reason).
+  // A stage that doesn't exist counts as settled.
   const stagesSettled =
     !!song.data &&
     (!chordsStageId || chords.isFetched) &&
-    (!lyricsStageId || lyrics.isFetched);
+    (!lyricsStageId || lyrics.isFetched) &&
+    sections.isFetched;
 
   const comp = useMemo<Composition | null>(() => {
     if (!songId || !song.data || !stagesSettled) return null;
@@ -58,8 +63,8 @@ function useSongComposition(songId: string | null): {
       id: `song-${songId}`,
       name: v.title || "Imported song",
       bpm: Number(v.bpm) || undefined,
-    });
-  }, [songId, song.data, stagesSettled, chords.data, lyrics.data]);
+    }, sections.data ?? []);
+  }, [songId, song.data, stagesSettled, chords.data, lyrics.data, sections.data]);
 
   return {
     comp,

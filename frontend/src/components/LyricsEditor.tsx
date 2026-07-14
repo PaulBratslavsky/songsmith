@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type ParsedLyrics } from "../ipc/api";
+import type { Section as SpineSection } from "../ipc/generated";
 import { FieldChat } from "./FieldChat";
 import { parseArtifact, type ChordsData } from "../lib/artifacts";
+import { matchBySpineRow, normLabel } from "../lib/sections";
 import {
   parseLine as parseChordProLine,
   toLine as lineToChordPro,
@@ -42,11 +44,14 @@ function progressionsByLabel(chordsData: ChordsData | null | undefined): Record<
   return map;
 }
 
-/** Section spine = the Chords stage (labels + order); this stage only fills in words.
- *  Sections that exist only in the lyrics (legacy songs) are kept, appended after.
- *  A sung section with no saved chord placements gets the SAME derived placement the
- *  Sheet shows (auto-spread the progression), so the editor never looks empty and
- *  matches the export — without needing a manual "auto-place + save". */
+/** Section identity & order: the song's section SPINE when it has rows
+ *  (docs/SECTION-SPINE-SPEC.md, Phase 2 — this stage's words attach by
+ *  section_id, label fallback), else the Chords stage's labels exactly as
+ *  before; this stage only fills in words either way. Sections that exist
+ *  only in the artifacts (legacy songs / the Phase-2 write window) are kept,
+ *  appended after. A sung section with no saved chord placements gets the
+ *  SAME derived placement the Sheet shows (auto-spread the progression), so
+ *  the editor never looks empty and matches the export. */
 /** Which of this stage's own sections are frozen (locked), keyed by label. */
 function frozenByLabel(content: string): Record<string, boolean> {
   const { data } = parseArtifact("lyrics", content);
@@ -57,18 +62,60 @@ function frozenByLabel(content: string): Record<string, boolean> {
   return out;
 }
 
-function buildSections(content: string, chordsData: ChordsData | null | undefined): Section[] {
+function buildSections(content: string, chordsData: ChordsData | null | undefined, spine: readonly SpineSection[] = []): Section[] {
   const byLabel = wordsByLabel(content);
   const frozen = frozenByLabel(content);
   const prog = progressionsByLabel(chordsData);
   const out: Section[] = [];
   const seen = new Set<string>();
-  const add = (label: string, lines: Word[][]) => {
+  const add = (label: string, lines: Word[][], isFrozen?: boolean) => {
     const hasWords = lines.some((l) => l.some((w) => w.text.trim()));
     const hasChords = lines.some((l) => l.some((w) => w.chord));
     if (hasWords && !hasChords && prog[label]?.length) autoPlaceSection(lines, prog[label]);
-    out.push({ label, lines, ...(frozen[label] ? { frozen: true } : {}) });
+    out.push({ label, lines, ...(isFrozen ?? frozen[label] ? { frozen: true } : {}) });
   };
+
+  if (spine.length) {
+    const { data } = parseArtifact("lyrics", content);
+    const entries = (data?.sections ?? []).map((s) => ({
+      section_id: s.section_id,
+      label: s.label || "Section",
+      lines: s.lines.map(parseChordProLine),
+      frozen: s.frozen === true,
+    }));
+    // plain-text lyrics (no structured sections) keep their one "Lyrics" block
+    if (!entries.length && byLabel["Lyrics"]) {
+      entries.push({ section_id: undefined, label: "Lyrics", lines: byLabel["Lyrics"], frozen: false });
+    }
+    const usedE = new Set<(typeof entries)[number]>();
+    const usedC = new Set<NonNullable<ChordsData["sections"]>[number]>();
+    for (const row of spine) {
+      const e = matchBySpineRow(entries, row, usedE);
+      if (e) usedE.add(e);
+      // consume the matching chords section too, so leftovers don't re-append it
+      const c = matchBySpineRow(chordsData?.sections ?? [], row, usedC);
+      if (c) usedC.add(c);
+      seen.add(normLabel(row.label));
+      add(row.label, e?.lines ?? [], e?.frozen);
+    }
+    // Phase-2 window: artifact sections not (yet) in the spine still render —
+    // chords-stage sections first (empty words), then lyric-only ones.
+    for (const cs of chordsData?.sections ?? []) {
+      if (usedC.has(cs) || !cs.label || seen.has(normLabel(cs.label))) continue;
+      seen.add(normLabel(cs.label));
+      const e = entries.find((x) => !usedE.has(x) && normLabel(x.label) === normLabel(cs.label));
+      if (e) usedE.add(e);
+      add(cs.label, e?.lines ?? [], e?.frozen);
+    }
+    for (const e of entries) {
+      if (usedE.has(e) || seen.has(normLabel(e.label))) continue;
+      seen.add(normLabel(e.label));
+      add(e.label, e.lines, e.frozen);
+    }
+    return out.length ? out : [{ label: "Lyrics", lines: [[]] }];
+  }
+
+  // legacy (no spine): the Chords stage defines identity/order, unchanged
   for (const cs of chordsData?.sections ?? []) {
     const label = cs.label;
     if (!label || seen.has(label)) continue;
@@ -168,13 +215,16 @@ export function PasteLyricsModal({ songId, hasFrozen, onClose, onImported }: {
 }
 
 export function LyricsEditor({
-  songId, stageId, kind, artifactId, content, onChanged, chordsData,
+  songId, stageId, kind, artifactId, content, onChanged, chordsData, spineSections,
 }: {
   songId: string; stageId: string; kind: string; artifactId: string; content: string; onChanged: () => void;
   /** the Chords stage data — drives each section's chord palette */
   chordsData?: ChordsData | null;
+  /** the song's section spine (identity/order/labels when non-empty; [] = legacy label derivation) */
+  spineSections?: SpineSection[];
 }) {
-  const [sections, setSections] = useState<Section[]>(() => buildSections(content, chordsData));
+  const spine = spineSections ?? [];
+  const [sections, setSections] = useState<Section[]>(() => buildSections(content, chordsData, spine));
   const [dirty, setDirty] = useState(false);
   const [mode, setMode] = useState<"place" | "text">("place");
   const [sel, setSel] = useState<string>(""); // currently-armed chord to place
@@ -185,9 +235,11 @@ export function LyricsEditor({
 
   // per-section chord palette from the Chords stage (label-matched), plus all-song fallback
   const paletteBySection = useMemo(() => progressionsByLabel(chordsData), [chordsData]);
-  // rebuild the spine when a new revision loads or the Chords stage's sections change
+  // rebuild the section list when a new revision loads, the Chords stage's
+  // sections change, or the song's spine rows load/change
   const chordsSig = useMemo(() => (chordsData?.sections ?? []).map((s) => `${s.label}:${s.chords.length}`).join("|"), [chordsData]);
-  useEffect(() => { if (!dirty) setSections(buildSections(content, chordsData)); }, [artifactId, chordsSig]); // eslint-disable-line react-hooks/exhaustive-deps
+  const spineSig = useMemo(() => spine.map((s) => `${s.id}:${s.label}`).join("|"), [spine]);
+  useEffect(() => { if (!dirty) setSections(buildSections(content, chordsData, spine)); }, [artifactId, chordsSig, spineSig]); // eslint-disable-line react-hooks/exhaustive-deps
   const allChords = useMemo(() => {
     const set: string[] = [];
     Object.values(paletteBySection).flat().forEach((c) => { if (!set.includes(c)) set.push(c); });
@@ -338,7 +390,11 @@ export function LyricsEditor({
       ))}
 
       <p className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-        Sections &amp; their order come from the <b>Chords</b> stage — add, rename, and drag to reorder them there. This stage just adds the words.
+        {spine.length ? (
+          <>Sections &amp; their order come from the song's <b>section spine</b> — edit them in the <b>Structure</b> stage. This stage just adds the words.</>
+        ) : (
+          <>Sections &amp; their order come from the <b>Chords</b> stage — add, rename, and drag to reorder them there. This stage just adds the words.</>
+        )}
       </p>
 
       {pasteOpen && (

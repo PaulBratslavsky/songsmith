@@ -55,12 +55,18 @@ pub fn groove_for_genre(genre: &str) -> bool {
         .iter().any(|k| g.contains(k))
 }
 
-// ---- Structure/Chords readers (THE one section parser — was triplicated) ----
+// ---- Section readers (THE one section parser — was triplicated) -------------
 
-/// Section (label, bars) list from a song's Structure stage — the single
-/// structure-section parser (previously triplicated across the Tauri layer:
-/// chat preamble + ableton_build + song_sections).
-pub async fn song_sections(conn: &Connection, song_id: &str) -> Vec<(String, i64)> {
+/// `(section_id?, label, bars)` rows for a song: the section SPINE when it has
+/// rows (Phase 2, docs/SECTION-SPINE-SPEC.md — the spine owns identity/order/
+/// bars), else parsed from the Structure artifact exactly as before (legacy /
+/// unmigrated fallback, where entries carry no id).
+async fn section_rows(conn: &Connection, song_id: &str) -> Vec<(Option<String>, String, i64)> {
+    if let Ok(rows) = db::list_sections(conn, song_id).await {
+        if !rows.is_empty() {
+            return rows.into_iter().map(|r| (Some(r.id), r.label, r.bars)).collect();
+        }
+    }
     let mut out = Vec::new();
     if let Ok(stages) = db::list_stages(conn, song_id).await {
         if let Some(st) = stages.iter().find(|s| s.r#type == "structure") {
@@ -70,7 +76,7 @@ pub async fn song_sections(conn: &Connection, song_id: &str) -> Vec<(String, i64
                         for s in secs {
                             let label = s.get("label").and_then(|x| x.as_str()).unwrap_or("Section").to_string();
                             let bars = s.get("bars").and_then(|x| x.as_i64()).unwrap_or(8);
-                            out.push((label, bars));
+                            out.push((None, label, bars));
                         }
                     }
                 }
@@ -80,10 +86,22 @@ pub async fn song_sections(conn: &Connection, song_id: &str) -> Vec<(String, i64
     out
 }
 
-/// Structure sections enriched with each section's progression as (chord, beats).
+/// Section (label, bars) list for a song — the single section parser
+/// (previously triplicated across the Tauri layer: chat preamble +
+/// ableton_build + song_sections). Reads the SPINE when the song has one,
+/// falling back to the Structure artifact for legacy songs.
+pub async fn song_sections(conn: &Connection, song_id: &str) -> Vec<(String, i64)> {
+    section_rows(conn, song_id).await.into_iter().map(|(_, label, bars)| (label, bars)).collect()
+}
+
+/// Sections enriched with each section's progression as (chord, beats). The
+/// Chords artifact's per-section CONTENT attaches by `section_id` when both
+/// sides carry one (the migration adds ids), else by exact label — the same
+/// tolerance every Phase-2 reader keeps for legacy data.
 pub async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, Vec<(String, i64)>)> {
-    let secs = song_sections(conn, song_id).await;
-    let mut cmap: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+    let secs = section_rows(conn, song_id).await;
+    let mut by_id: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+    let mut by_label: HashMap<String, Vec<(String, i64)>> = HashMap::new();
     if let Ok(stages) = db::list_stages(conn, song_id).await {
         if let Some(st) = stages.iter().find(|s| s.r#type == "chords") {
             if let Ok(Some(art)) = db::current_artifact(conn, &st.id).await {
@@ -91,19 +109,30 @@ pub async fn song_parts(conn: &Connection, song_id: &str) -> Vec<(String, i64, V
                     if let Some(arr) = v.pointer("/data/sections").and_then(|s| s.as_array()) {
                         for s in arr {
                             let label = s.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                            let chords = s.get("chords").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|c| {
+                            let chords: Vec<(String, i64)> = s.get("chords").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|c| {
                                 let name = c.as_str().map(String::from).or_else(|| c.get("name").and_then(|n| n.as_str()).map(String::from))?;
                                 let beats = c.get("beats").and_then(|b| b.as_i64()).filter(|&b| b > 0).unwrap_or(4);
                                 Some((name, beats))
                             }).collect()).unwrap_or_default();
-                            cmap.insert(label, chords);
+                            if let Some(id) = s.get("section_id").and_then(|x| x.as_str()) {
+                                by_id.insert(id.to_string(), chords.clone());
+                            }
+                            by_label.insert(label, chords);
                         }
                     }
                 }
             }
         }
     }
-    secs.into_iter().map(|(label, bars)| { let ch = cmap.get(&label).cloned().unwrap_or_default(); (label, bars, ch) }).collect()
+    secs.into_iter().map(|(id, label, bars)| {
+        let ch = id
+            .as_deref()
+            .and_then(|i| by_id.get(i))
+            .or_else(|| by_label.get(&label))
+            .cloned()
+            .unwrap_or_default();
+        (label, bars, ch)
+    }).collect()
 }
 
 // ---- Blocking socket builders (run these on a blocking thread) --------------
@@ -358,6 +387,47 @@ mod tests {
         // a song with no structure artifact has no sections
         let bare = db::create_song(&conn, &preset.id, "Bare").await.unwrap();
         assert!(song_sections(&conn, &bare.id).await.is_empty());
+    }
+
+    /// Phase 2 (docs/SECTION-SPINE-SPEC.md): when the song has SPINE rows,
+    /// song_sections reads them (identity/order/bars) instead of the Structure
+    /// artifact, and song_parts attaches chords content by section_id first
+    /// (surviving a spine rename), with label fallback for legacy entries.
+    #[tokio::test]
+    async fn song_sections_prefers_spine_over_structure_artifact() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "T".into(), genre: "rock".into(), mood: String::new(), influences: String::new(),
+            key_tempo_feel: String::new(), vocal_range: String::new(), themes: String::new(), lyric_exemplars: String::new(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "T").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let sid = |t: &str| stages.iter().find(|s| s.r#type == t).unwrap().id.clone();
+
+        // a STALE structure artifact that disagrees with the spine on purpose
+        let s_data = json!({ "sections": [{ "label": "Old Verse", "bars": 4 }] });
+        db::save_artifact(&conn, &song.id, Some(&sid("structure")), "structure",
+            &json!({ "kind": "structure", "text": "", "data": s_data }).to_string()).await.unwrap();
+
+        let v1 = db::create_section(&conn, &song.id, "Verse 1", "verse", 16, "", None).await.unwrap();
+        db::create_section(&conn, &song.id, "Chorus", "", 8, "", None).await.unwrap();
+
+        assert_eq!(song_sections(&conn, &song.id).await,
+            vec![("Verse 1".to_string(), 16), ("Chorus".to_string(), 8)],
+            "the spine wins over the structure artifact");
+
+        // chords content: Verse 1 attaches BY ID despite a mismatched label;
+        // Chorus attaches by exact label (legacy entry, no id)
+        let c_data = json!({ "sections": [
+            { "section_id": v1.id, "label": "Renamed Verse", "chords": [{ "name": "Am", "beats": 2 }] },
+            { "label": "Chorus", "chords": ["F"] }
+        ]});
+        db::save_artifact(&conn, &song.id, Some(&sid("chords")), "chords",
+            &json!({ "kind": "chords", "text": "", "data": c_data }).to_string()).await.unwrap();
+
+        let parts = song_parts(&conn, &song.id).await;
+        assert_eq!(parts[0], ("Verse 1".to_string(), 16, vec![("Am".to_string(), 2)]), "id-matched content, spine label/bars");
+        assert_eq!(parts[1], ("Chorus".to_string(), 8, vec![("F".to_string(), 4)]), "label-matched legacy content");
     }
 
     #[test]

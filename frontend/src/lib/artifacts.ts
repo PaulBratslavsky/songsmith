@@ -38,6 +38,9 @@ const ChordsSectionSchema = z.preprocess(
   (raw) => {
     const s = asObj(raw);
     return {
+      // spine link (docs/SECTION-SPINE-SPEC.md) — attached by the migration;
+      // Phase-2 readers match content by section_id first, label fallback
+      section_id: str(s.section_id) || undefined,
       label: str(s.label) || str(s.type),
       feel: str(s.feel) || undefined,
       frozen: s.frozen === true || undefined,
@@ -45,6 +48,7 @@ const ChordsSectionSchema = z.preprocess(
     };
   },
   z.object({
+    section_id: z.string().optional(),
     label: z.string(),
     feel: z.string().optional(),
     frozen: z.literal(true).optional(),
@@ -69,9 +73,11 @@ const LyricsSectionSchema = z.preprocess(
       : typeof s.text === "string"
         ? s.text.split("\n")
         : [];
-    return { label: str(s.label) || str(s.type), frozen: s.frozen === true || undefined, lines };
+    return { section_id: str(s.section_id) || undefined, label: str(s.label) || str(s.type), frozen: s.frozen === true || undefined, lines };
   },
   z.object({
+    /** spine link — see ChordsSectionSchema */
+    section_id: z.string().optional(),
     label: z.string(),
     frozen: z.literal(true).optional(),
     lines: z.array(z.string()),
@@ -92,6 +98,7 @@ const StructureSectionSchema = z.preprocess(
     const s = asObj(raw);
     const bars = Number(s.bars ?? 8);
     return {
+      section_id: str(s.section_id) || undefined,
       type: str(s.type),
       label: str(s.label) || str(s.type),
       bars: Number.isFinite(bars) ? bars : 8,
@@ -100,6 +107,8 @@ const StructureSectionSchema = z.preprocess(
     };
   },
   z.object({
+    /** spine link — see ChordsSectionSchema */
+    section_id: z.string().optional(),
     type: z.string(),
     label: z.string(),
     bars: z.number(),
@@ -157,7 +166,11 @@ export const LyricSpecDataSchema = z.preprocess(
       beats: Array.isArray(d.beats)
         ? d.beats.map((b) => {
             const o = asObj(b);
-            return { section: str(o.section) || str(o.label), beat: str(o.beat) || str(o.text) };
+            return {
+              section_id: str(o.section_id) || undefined,
+              section: str(o.section) || str(o.label),
+              beat: str(o.beat) || str(o.text),
+            };
           })
         : [],
       imageBank: strings(d.imageBank),
@@ -172,7 +185,7 @@ export const LyricSpecDataSchema = z.preprocess(
     arc: z.string(),
     diction: z.enum(DICTIONS),
     referenceVibe: z.string(),
-    beats: z.array(z.object({ section: z.string(), beat: z.string() })),
+    beats: z.array(z.object({ section_id: z.string().optional(), section: z.string(), beat: z.string() })),
     imageBank: z.array(z.string()),
     avoid: z.array(z.string()),
   }),

@@ -19,6 +19,7 @@ import { FinalRenders } from "../components/FinalRenders";
 import { SongSheet } from "../components/SongSheet";
 import { ArrangementBuilder } from "../components/ArrangementBuilder";
 import { parseArtifact } from "../lib/artifacts";
+import { useSpineSections } from "../lib/sections";
 
 export function SongWorkspace() {
   const { id } = useParams({ from: "/song/$id" });
@@ -42,6 +43,9 @@ export function SongWorkspace() {
   const buildAbleton = async () => { setAbMsg("Stubbing the song in Ableton — Sections + Bass / Chords / Melody / Filler / Arp…"); try { setAbMsg(await api.abletonBuildSong(id)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); } };
 
   const song = useQuery({ queryKey: ["song", id], queryFn: () => api.getSong(id) });
+  // the song's section spine (docs/SECTION-SPINE-SPEC.md, Phase 2) — section
+  // identity/order for the editors below; [] = legacy artifact-label fallback
+  const { sections: spineSections, isFetched: spineFetched } = useSpineSections(id);
   const currentType = song.data?.song.current_stage ?? "concept";
   const activeStageId = useMemo(() => {
     if (!song.data) return null;
@@ -88,7 +92,9 @@ export function SongWorkspace() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["songs"] }); nav({ to: "/" }); },
   });
 
-  if (song.isLoading) return <div className="empty">Loading…</div>;
+  // wait for the spine too: the Structure/LyricSpec/Lyrics editors seed their
+  // state on mount, so the section list must be known before they render
+  if (song.isLoading || !spineFetched) return <div className="empty">Loading…</div>;
   if (!song.data) return <div className="empty">Song not found.</div>;
   const v = song.data.song;
   const preset = song.data.preset;
@@ -238,6 +244,7 @@ export function SongWorkspace() {
               keyMode={v.key_mode}
               bpm={Number(v.bpm)}
               onChanged={invalidate}
+              spineSections={spineSections}
             />
           ) : sd?.artifact && sd.stage.type === "chords" ? (
             <SectionChordsEditor
@@ -258,6 +265,7 @@ export function SongWorkspace() {
               kind={sd.artifact.kind}
               content={sd.artifact.content}
               onChanged={invalidate}
+              spineSections={spineSections}
             />
           ) : sd?.artifact && sd.stage.type === "lyrics" ? (
             <LyricsEditor
@@ -268,6 +276,7 @@ export function SongWorkspace() {
               content={sd.artifact.content}
               onChanged={invalidate}
               chordsData={chordsData}
+              spineSections={spineSections}
             />
           ) : sd?.artifact && sd.stage.type === "prompt" ? (
             <PromptEditor

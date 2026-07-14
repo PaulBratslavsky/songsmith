@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
+import type { Section as SpineSection } from "../ipc/generated";
 import { NOTE_NAMES, pitchClassOf } from "../music/theory";
 import { FieldChat } from "./FieldChat";
+import { matchBySpineRow, normLabel } from "../lib/sections";
 
-export type Section = { type?: string; label: string; bars: number; role: string; frozen?: boolean };
+export type Section = { section_id?: string; type?: string; label: string; bars: number; role: string; frozen?: boolean };
 /** Editor state. root/mode/bpm are SONG facts (docs/SONG-FACTS.md) — the
  *  pickers edit them via `update_song_key`; they are NEVER persisted into the
  *  structure artifact. Only keyNote/tempoNote/sections live in the artifact. */
@@ -24,9 +26,32 @@ export function parseStructure(content: string, song: { keyRoot: string; keyMode
     keyNote: data?.keyNote ?? (km ? km[1].trim() : ""),
     tempoNote: data?.tempoNote ?? (tm ? tm[1].replace(/\([^)]*\)/g, "").trim() : ""),
     sections: Array.isArray(data?.sections)
-      ? data.sections.map((s: any) => ({ type: s.type ?? "", label: s.label ?? s.type ?? "", bars: Number(s.bars ?? 8), role: s.role ?? "", frozen: s.frozen === true }))
+      ? data.sections.map((s: any) => ({ section_id: typeof s.section_id === "string" && s.section_id ? s.section_id : undefined, type: s.type ?? "", label: s.label ?? s.type ?? "", bars: Number(s.bars ?? 8), role: s.role ?? "", frozen: s.frozen === true }))
       : [],
   };
+}
+
+/** Phase 2 (docs/SECTION-SPINE-SPEC.md): the section LIST shown in the editor
+ *  comes from the SPINE when the song has rows — label/type/bars/role in spine
+ *  order, frozen flags carried over from the artifact entry (matched by
+ *  section_id, label fallback); artifact-only sections are appended so nothing
+ *  disappears during the Phase-2 write window. The SAVE path is untouched (it
+ *  still writes label-keyed artifact data — writers switch in Phase 3). */
+export function spineSeededStructure(base: StructureData, spine: readonly SpineSection[]): StructureData {
+  if (!spine.length) return base;
+  const used = new Set<Section>();
+  const sections: Section[] = spine.map((row) => {
+    const art = matchBySpineRow(base.sections, row, used);
+    if (art) used.add(art);
+    return { section_id: row.id, type: row.type, label: row.label, bars: Number(row.bars), role: row.role, frozen: art?.frozen === true };
+  });
+  const seen = new Set(sections.map((s) => normLabel(s.label)));
+  for (const s of base.sections) {
+    if (used.has(s) || seen.has(normLabel(s.label))) continue;
+    seen.add(normLabel(s.label));
+    sections.push(s);
+  }
+  return { ...base, sections };
 }
 
 /** The saved artifact `text` — mirror of core render.rs `structure_editor_text`
@@ -43,12 +68,14 @@ export function structureToMarkdown(d: StructureData): string {
 }
 
 export function StructureEditor({
-  songId, stageId, kind, content, keyRoot, keyMode, bpm, onChanged,
+  songId, stageId, kind, content, keyRoot, keyMode, bpm, onChanged, spineSections,
 }: {
   songId: string; stageId: string; kind: string; content: string;
   keyRoot: string; keyMode: string; bpm: number; onChanged: () => void;
+  /** the song's section spine — the section list rendered when non-empty ([] = legacy artifact list) */
+  spineSections?: SpineSection[];
 }) {
-  const [d, setD] = useState<StructureData>(() => parseStructure(content, { keyRoot, keyMode, bpm }));
+  const [d, setD] = useState<StructureData>(() => spineSeededStructure(parseStructure(content, { keyRoot, keyMode, bpm }), spineSections ?? []));
   const [saved, setSaved] = useState("");
   const set = (patch: Partial<StructureData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
   const setSec = (i: number, patch: Partial<Section>) => set({ sections: d.sections.map((s, j) => (j === i ? { ...s, ...patch } : s)) });

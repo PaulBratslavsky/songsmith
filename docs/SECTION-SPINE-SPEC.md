@@ -100,6 +100,21 @@ self-contained without making the spine itself versioned.
    (`list/create/update/delete/reorder_sections`) as Tauri commands + MCP tools + mock parity.
    App behavior unchanged — no consumer reads the spine yet.
 2. Readers switch (render/prompts/Ableton/frontend read spine; label fallback for legacy).
+   ✅ Phase 2 built 2026-07-14: every reader prefers the spine, with the legacy label path
+   byte-identical when a song has no rows. Core: run_stage/self_check prompts lead with a
+   canonical "SECTIONS (canonical)" block (label · bars · role, spine order; "" without rows);
+   `ableton::song_sections`/`song_parts` read the spine (chords content attached by section_id,
+   exact-label fallback) — chat preamble + all Ableton builders inherit it; `lyrics_technical_brief`
+   takes the spine for its section list/bars/roles (chord stats matched id-then-label). Frontend:
+   `useSpineSections` (React Query ["sections", songId]) feeds SongSheet + ArrangementBuilder
+   (spine-aware `deriveSections`), LyricsEditor (section identity/order from the spine; footer
+   copy updated), StructureEditor (section LIST seeded from the spine, display only — save path
+   untouched), LyricSpecEditor (beats shown in spine order, matched id-then-label), and
+   compositionFromSong/ComposerRoute (section order/bars from the spine; `Composition.sections`
+   carries additive `section_id?` for Phase 3's lossless export). Artifact zod schemas expose
+   `section_id` additively; mock seeds Cyber Dreams spine rows (+ ids on its artifacts) for
+   browser parity. Writers unchanged: label-keyed saves may lag the spine until Phase 3 (readers
+   union unmatched artifact sections in, so nothing disappears). Freeze merge stays label-based.
 3. Writers switch (editors, run_stage reconciliation, imports, Composer, freeze-by-id).
 4. Cleanup: structure artifact drops sections; UI polish; docs.
 

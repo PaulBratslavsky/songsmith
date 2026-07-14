@@ -131,6 +131,10 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
     db::set_stage_status(conn, stage_id, "in_progress").await?;
 
     let run = async {
+        // the canonical SECTIONS block (spine) — "" for legacy songs, keeping
+        // the self-check prompt byte-identical without spine rows
+        let sections = spine_sections_block(conn, &stage.song_id).await?;
+        let sections_block = if sections.is_empty() { String::new() } else { format!("{sections}\n\n") };
         let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
         // Reverse context (Feature B2 #1) — empty for a normal forward song, so
         // this prompt stays byte-identical when no later artifacts exist.
@@ -151,7 +155,7 @@ pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: 
 6. Preserve the inline [chord] tags and the section labels exactly.\n\
 Return ONLY the revised result as the single fenced ```json block your skill specifies — no commentary.";
         let mut user = format!(
-            "Prior stages (context):\n\n{prior}\n\n{later_block}{brief_block}---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
+            "{sections_block}Prior stages (context):\n\n{prior}\n\n{later_block}{brief_block}---\nYOUR CURRENT {} OUTPUT TO SELF-TEST AND REVISE:\n\n{cur_text}\n\n{checks}",
             stage_label(&stage.r#type)
         );
         // frozen sections are FINAL even through a self-test/revise pass
@@ -291,14 +295,16 @@ const LATER_STAGES_BANNER: &str = "ALREADY-WRITTEN LATER STAGES (this song was i
 const LATER_STAGES_REGEN_BANNER: &str = "LATER STAGES ALREADY EXIST (reference only — they may be OUTDATED). You are REGENERATING this stage: write a fresh, improved version per your skill and the earlier stages. Do NOT copy this content back from the later stages' rendition of it; downstream stages will be re-run afterwards. Only borrow from them what is genuinely settled (the song's identity, story, and hook).";
 
 /// The computed TECHNICAL BRIEF for a song's LYRICS stage (run + self-check):
-/// real Structure/Chords `data` + the song's BPM → per-section bar / chord-
-/// change / line budgets (see `render::lyrics_technical_brief`). Empty when
-/// the stage isn't lyrics or the song has no structure yet — prompt unchanged.
+/// the section SPINE (bars/roles, when the song has one) + real Structure/
+/// Chords `data` + the song's BPM → per-section bar / chord-change / line
+/// budgets (see `render::lyrics_technical_brief`). Empty when the stage isn't
+/// lyrics or the song has no spine AND no structure yet — prompt unchanged.
 async fn lyrics_brief_for_stage(conn: &Connection, stage: &Stage) -> Result<String> {
     if stage.r#type != "lyrics" {
         return Ok(String::new());
     }
     let Some(song) = db::get_song(conn, &stage.song_id).await? else { return Ok(String::new()) };
+    let spine = db::list_sections(conn, &stage.song_id).await?;
     let stages = db::list_stages(conn, &stage.song_id).await?;
     let mut structure = None;
     let mut chords = None;
@@ -311,21 +317,49 @@ async fn lyrics_brief_for_stage(conn: &Connection, stage: &Stage) -> Result<Stri
             if s.r#type == "structure" { structure = data; } else { chords = data; }
         }
     }
-    Ok(crate::render::lyrics_technical_brief(&song, structure.as_ref(), chords.as_ref()))
+    Ok(crate::render::lyrics_technical_brief(&song, &spine, structure.as_ref(), chords.as_ref()))
 }
 
-/// The user prompt for a stage run: earlier-stage context, reverse (later-
-/// stage) context when it exists, the lyrics-stage TECHNICAL BRIEF, and the
-/// producer's seed. Factored out of `run_stage` so tests can assert the exact
-/// prompt without a Claude call.
+/// The canonical SECTIONS block (docs/SECTION-SPINE-SPEC.md, Phase 2): the
+/// song's section SPINE rendered once — label · bars · role, in spine order —
+/// so every stage sees the same section list regardless of which stage
+/// artifact it reads. Empty ("") when the song has no spine rows: legacy /
+/// unmigrated songs keep their prompts byte-identical.
+async fn spine_sections_block(conn: &Connection, song_id: &str) -> Result<String> {
+    let rows = db::list_sections(conn, song_id).await?;
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+    let mut lines = vec![
+        "----- SECTIONS (canonical — the song's section spine; use exactly these sections, labels, and order) -----".to_string(),
+    ];
+    for (i, r) in rows.iter().enumerate() {
+        lines.push(format!(
+            "{}. {} ({} bars){}",
+            i + 1,
+            r.label,
+            r.bars,
+            if r.role.trim().is_empty() { String::new() } else { format!(" — {}", r.role.trim()) },
+        ));
+    }
+    lines.push("-----------------------------------------------------------------------------------------------------".to_string());
+    Ok(lines.join("\n"))
+}
+
+/// The user prompt for a stage run: the canonical SECTIONS block (when the
+/// song has a spine), earlier-stage context, reverse (later-stage) context
+/// when it exists, the lyrics-stage TECHNICAL BRIEF, and the producer's seed.
+/// Factored out of `run_stage` so tests can assert the exact prompt without a
+/// Claude call.
 pub(crate) async fn stage_user_prompt(conn: &Connection, stage: &Stage, user_input: Option<&str>) -> Result<String> {
+    let sections = spine_sections_block(conn, &stage.song_id).await?;
     let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
     let later = gather_later_context(conn, &stage.song_id, stage.ordinal).await?;
     let tech_brief = lyrics_brief_for_stage(conn, stage).await?;
     // Empty stage → later content is the source of truth (derive). Regeneration
     // → later content is reference only (see LATER_STAGES_REGEN_BANNER).
     let regenerating = db::current_artifact(conn, &stage.id).await?.is_some();
-    Ok(build_user_prompt(&stage.r#type, &prior, &later, &tech_brief, user_input, regenerating))
+    Ok(build_user_prompt(&stage.r#type, &sections, &prior, &later, &tech_brief, user_input, regenerating))
 }
 
 fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> String {
@@ -392,8 +426,14 @@ fn enforce_song_key_tempo(song: &Song, stage_type: &str, content: &str) -> Strin
     v.to_string()
 }
 
-fn build_user_prompt(stage_type: &str, prior: &str, later: &str, tech_brief: &str, user_input: Option<&str>, regenerating: bool) -> String {
+fn build_user_prompt(stage_type: &str, sections: &str, prior: &str, later: &str, tech_brief: &str, user_input: Option<&str>, regenerating: bool) -> String {
     let mut p = String::new();
+    // the canonical section list leads the prompt — stage artifacts below may
+    // carry their own (possibly stale) section renditions; the spine wins
+    if !sections.is_empty() {
+        p.push_str(sections);
+        p.push_str("\n\n");
+    }
     if !prior.is_empty() {
         p.push_str("Approved outputs from earlier stages (carry these forward):\n\n");
         p.push_str(prior);
@@ -2016,8 +2056,59 @@ mod tests {
 
         let prompt = stage_user_prompt(&conn, concept, Some("a song about rain")).await.unwrap();
         // byte-identical to the pre-B2 prompt builder (empty later block)
-        assert_eq!(prompt, build_user_prompt("concept", "", "", "", Some("a song about rain"), false));
+        assert_eq!(prompt, build_user_prompt("concept", "", "", "", "", Some("a song about rain"), false));
         assert!(!prompt.contains("ALREADY-WRITTEN LATER STAGES"));
+    }
+
+    /// Phase 2 (docs/SECTION-SPINE-SPEC.md): every stage's prompt leads with
+    /// the canonical SECTIONS block when the song has spine rows — and is
+    /// BYTE-IDENTICAL to the spineless prompt when it doesn't (the block is
+    /// prepended verbatim, nothing else moves).
+    #[tokio::test]
+    async fn prompt_carries_canonical_sections_block_only_with_spine() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Spine Song").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let stage = |t: &str| stages.iter().find(|s| s.r#type == t).unwrap();
+
+        // some prior context so the prompt isn't trivially empty
+        db::save_artifact(&conn, &song.id, Some(&stage("concept").id), "concept",
+            &json!({ "kind": "concept", "text": "A night-drive song.", "data": null }).to_string()).await.unwrap();
+
+        // no spine rows → no block (byte-identical legacy prompt)
+        let without: std::collections::HashMap<&str, String> = {
+            let mut m = std::collections::HashMap::new();
+            for t in ["structure", "chords", "lyric_spec", "lyrics", "prompt"] {
+                m.insert(t, stage_user_prompt(&conn, stage(t), None).await.unwrap());
+            }
+            m
+        };
+        for (t, p) in &without {
+            assert!(!p.contains("SECTIONS (canonical"), "{t}: no spine → no block, got: {p}");
+        }
+
+        // spine rows exist → EVERY stage's prompt leads with the block, and the
+        // rest of the prompt is unchanged (block + "\n\n" prepended verbatim)
+        db::create_section(&conn, &song.id, "Verse 1", "verse", 8, "set the scene", None).await.unwrap();
+        db::create_section(&conn, &song.id, "Chorus", "", 12, "", None).await.unwrap();
+        let block = "----- SECTIONS (canonical — the song's section spine; use exactly these sections, labels, and order) -----\n\
+                     1. Verse 1 (8 bars) — set the scene\n\
+                     2. Chorus (12 bars)\n\
+                     -----------------------------------------------------------------------------------------------------";
+        for t in ["structure", "chords", "lyric_spec", "prompt"] {
+            let p = stage_user_prompt(&conn, stage(t), None).await.unwrap();
+            assert_eq!(p, format!("{block}\n\n{}", without[t]), "{t}: block must be prepended verbatim");
+        }
+        // the LYRICS prompt additionally gains the TECHNICAL BRIEF — the spine
+        // now supplies its section list even without a structure artifact
+        let lp = stage_user_prompt(&conn, stage("lyrics"), None).await.unwrap();
+        assert!(lp.starts_with(&format!("{block}\n\n")), "lyrics prompt leads with the block, got: {lp}");
+        assert!(lp.contains("----- TECHNICAL BRIEF"), "spine feeds the brief, got: {lp}");
+        assert!(lp.contains("- Chorus: 12 bars"), "brief bars come from the spine, got: {lp}");
     }
 
     /// The computed TECHNICAL BRIEF lands in the LYRICS stage prompt only —

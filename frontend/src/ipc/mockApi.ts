@@ -53,18 +53,28 @@ function seed(): Any {
     id: uid(), song_id: songId, stage_id: stageOf(stageType).id, kind,
     content: JSON.stringify({ kind, text: "", data }), version: 1, approved: true, created_at: ts,
   });
+  // the demo song's SECTION SPINE (docs/SECTION-SPINE-SPEC.md) — mirrors what
+  // the core migration would build: chords-artifact sections in order (the
+  // song has no structure artifact), plus the lyrics-only Bridge unioned last.
+  // Seeding it lets the browser demo exercise the Phase-2 spine readers.
+  const sections = ["Intro", "Verse 1", "Pre-Chorus / Build 1", "Chorus 1", "Bridge"].map((label, position) => ({
+    id: uid(), song_id: songId, position, label, type: "", bars: 8, role: "", created_at: ts, updated_at: ts,
+  }));
+  const sectionIdOf = (label: string) => sections.find((s) => s.label === label)!.id;
   // chords carry explicit per-chord beats so the Composer lays them out at
   // the right widths (full-song export). Strings still work (default 4 beats).
   // The Chords stage lists each progression ONCE; the LYRICS below cycle it
   // (Chorus 1: 4 chords, 8 placements) — the lyric-sheet v3 repro: the
   // Composer must lay one chord span per sung placement, not per entry.
+  // Each section entry carries its spine `section_id` (as the migration
+  // attaches them) so id-based content matching is exercised too.
   const ch = (name: string, beats = 4) => ({ name, beats });
   const chordsData = {
     sections: [
-      { label: "Intro", chords: [ch("Am"), ch("Am"), ch("F"), ch("F")] },
-      { label: "Verse 1", chords: [ch("Dm"), ch("Bb"), ch("F"), ch("Am")] },
-      { label: "Pre-Chorus / Build 1", chords: [ch("Dm", 2), ch("Em", 2), ch("F", 2), ch("G", 2)] },
-      { label: "Chorus 1", chords: [ch("C"), ch("G"), ch("Am"), ch("F")] },
+      { section_id: sectionIdOf("Intro"), label: "Intro", chords: [ch("Am"), ch("Am"), ch("F"), ch("F")] },
+      { section_id: sectionIdOf("Verse 1"), label: "Verse 1", chords: [ch("Dm"), ch("Bb"), ch("F"), ch("Am")] },
+      { section_id: sectionIdOf("Pre-Chorus / Build 1"), label: "Pre-Chorus / Build 1", chords: [ch("Dm", 2), ch("Em", 2), ch("F", 2), ch("G", 2)] },
+      { section_id: sectionIdOf("Chorus 1"), label: "Chorus 1", chords: [ch("C"), ch("G"), ch("Am"), ch("F")] },
     ],
   };
   const taggedLyrics = [
@@ -93,7 +103,7 @@ function seed(): Any {
     const out: Any[] = []; let cur: Any | null = null;
     for (const line of taggedLyrics.split("\n")) {
       const t = line.trim(); const hm = t.match(/^\[([^\]]+)\]$/);
-      if (hm) { cur = { label: hm[1], lines: [] }; out.push(cur); }
+      if (hm) { cur = { section_id: sectionIdOf(hm[1]), label: hm[1], lines: [] }; out.push(cur); }
       else if (cur && t) cur.lines.push(line);
     }
     return out;
@@ -127,7 +137,7 @@ function seed(): Any {
         created_at: ts, updated_at: ts,
       },
     ],
-    songs: [song], stages,
+    songs: [song], stages, sections,
     artifacts: [
       artifact("chords", "chords", chordsData),
       artifact("lyric_spec", "lyric_spec", {
@@ -136,8 +146,8 @@ function seed(): Any {
         arc: "restless and numb → wide awake and free",
         diction: "balanced", referenceVibe: "late-night, neon-lit, propulsive but lonely",
         beats: [
-          { section: "Verse 1", beat: "set the scene — the dashboard, the empty road, the restlessness" },
-          { section: "Chorus 1", beat: "the release — dreaming in neon, finally feeling alive" },
+          { section_id: sectionIdOf("Verse 1"), section: "Verse 1", beat: "set the scene — the dashboard, the empty road, the restlessness" },
+          { section_id: sectionIdOf("Chorus 1"), section: "Chorus 1", beat: "the release — dreaming in neon, finally feeling alive" },
         ],
         imageBank: ["dashboard glow", "cold glass", "tail lights", "static hum", "white lines"],
         avoid: ["chasing dreams", "fading light", "lost in time"],

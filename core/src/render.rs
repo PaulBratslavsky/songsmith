@@ -7,7 +7,7 @@
 //! mirrors are supersets (string chords AND `{name,beats}` objects, key/tempo
 //! notes, conditional role suffix).
 
-use crate::models::Song;
+use crate::models::{Section, Song};
 use serde_json::Value;
 
 /// Render the human-readable `text` for a section-based stage from its merged
@@ -181,13 +181,42 @@ fn is_instrumental(label: &str, role: &str) -> bool {
         .any(|w| matches!(w, "intro" | "outro" | "interlude" | "instrumental" | "solo" | "break"))
 }
 
+/// One section row the brief is computed over: the SPINE row when the song has
+/// a spine (Phase 2, docs/SECTION-SPINE-SPEC.md), else a structure-data entry.
+struct BriefRow {
+    id: Option<String>,
+    label: String,
+    bars: i64,
+    role: String,
+}
+
 /// Compute the TECHNICAL BRIEF injected into the lyrics-stage prompt (run +
-/// self-check). Pure: real Structure/Chords `data` + the song's BPM in, prompt
-/// text out; any missing input degrades to `""` (prompt unchanged).
-pub(crate) fn lyrics_technical_brief(song: &Song, structure: Option<&Value>, chords: Option<&Value>) -> String {
-    let sections = match structure.and_then(|d| d.get("sections")).and_then(|v| v.as_array()) {
-        Some(arr) if !arr.is_empty() => arr,
-        _ => return String::new(),
+/// self-check). Pure: the song's section SPINE (preferred when non-empty) +
+/// real Structure/Chords `data` + the song's BPM in, prompt text out; any
+/// missing input degrades to `""` (prompt unchanged — a song with no spine
+/// rows behaves byte-identically to the pre-spine reader).
+pub(crate) fn lyrics_technical_brief(song: &Song, spine: &[Section], structure: Option<&Value>, chords: Option<&Value>) -> String {
+    // section list + bars/role: the spine owns the form when rows exist;
+    // legacy/unmigrated songs fall back to the structure artifact's sections
+    let rows: Vec<BriefRow> = if !spine.is_empty() {
+        spine
+            .iter()
+            .map(|s| BriefRow { id: Some(s.id.clone()), label: s.label.clone(), bars: s.bars.max(1), role: s.role.clone() })
+            .collect()
+    } else {
+        match structure.and_then(|d| d.get("sections")).and_then(|v| v.as_array()) {
+            Some(arr) if !arr.is_empty() => arr
+                .iter()
+                .map(|sec| BriefRow {
+                    id: None,
+                    label: sec.get("label").and_then(|v| v.as_str())
+                        .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("Section").to_string(),
+                    bars: sec.get("bars").and_then(|v| v.as_i64()).unwrap_or(8).max(1),
+                    role: sec.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                })
+                .collect(),
+            _ => return String::new(),
+        }
     };
     let bpm = if song.bpm > 0 { song.bpm } else { 120 };
     let (syl_lo, syl_hi) = syllable_budget(bpm);
@@ -198,8 +227,10 @@ pub(crate) fn lyrics_technical_brief(song: &Song, structure: Option<&Value>, cho
         .map(|s| format!(" ({})", s.trim()))
         .unwrap_or_default();
 
-    // chord sections by normalized label → (chord changes, total beats)
-    let chord_stats: Vec<(String, i64, i64)> = chords
+    // chord sections → (section_id?, normalized label, chord changes, total
+    // beats); matched to rows by section_id when both sides carry one (the
+    // migration attaches ids), else by normalized label (legacy tolerance)
+    let chord_stats: Vec<(Option<String>, String, i64, i64)> = chords
         .and_then(|d| d.get("sections"))
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -207,6 +238,7 @@ pub(crate) fn lyrics_technical_brief(song: &Song, structure: Option<&Value>, cho
                 .map(|sec| {
                     let label = sec.get("label").and_then(|v| v.as_str())
                         .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("");
+                    let id = sec.get("section_id").and_then(|v| v.as_str()).map(String::from);
                     let (mut changes, mut beats) = (0i64, 0i64);
                     if let Some(ch) = sec.get("chords").and_then(|v| v.as_array()) {
                         for c in ch {
@@ -214,7 +246,7 @@ pub(crate) fn lyrics_technical_brief(song: &Song, structure: Option<&Value>, cho
                             beats += c.get("beats").and_then(|b| b.as_i64()).unwrap_or(4);
                         }
                     }
-                    (brief_norm(label), changes, beats)
+                    (id, brief_norm(label), changes, beats)
                 })
                 .collect()
         })
@@ -224,20 +256,23 @@ pub(crate) fn lyrics_technical_brief(song: &Song, structure: Option<&Value>, cho
         "----- TECHNICAL BRIEF (computed from this song's structure/chords/tempo — honor it) -----".to_string(),
         format!("Tempo: {bpm} BPM{tempo_note} → a comfortable sung line is roughly {syl_lo}-{syl_hi} syllables."),
     ];
-    for sec in sections {
-        let label = sec.get("label").and_then(|v| v.as_str())
-            .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("Section");
-        let bars = sec.get("bars").and_then(|v| v.as_i64()).unwrap_or(8).max(1);
-        let role = sec.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    for row in &rows {
+        let label = row.label.as_str();
+        let bars = row.bars;
+        let role = row.role.as_str();
 
         if is_instrumental(label, role) {
             out.push(format!("- {label}: {bars} bars, instrumental (no sung lines — bare chord tags only)."));
             continue;
         }
 
-        let stats = chord_stats.iter().find(|(l, _, _)| *l == brief_norm(label));
-        let changes = stats.map(|(_, c, _)| *c).unwrap_or(0);
-        let beats = stats.map(|(_, _, b)| *b).unwrap_or(0);
+        let stats = row
+            .id
+            .as_deref()
+            .and_then(|rid| chord_stats.iter().find(|(cid, _, _, _)| cid.as_deref() == Some(rid)))
+            .or_else(|| chord_stats.iter().find(|(_, l, _, _)| *l == brief_norm(label)));
+        let changes = stats.map(|(_, _, c, _)| *c).unwrap_or(0);
+        let beats = stats.map(|(_, _, _, b)| *b).unwrap_or(0);
 
         // suggested line count: between chord changes and bars, clamped 2..=10
         let (mut lo, mut hi) = if changes > 0 {
@@ -285,12 +320,12 @@ mod tests {
     #[test]
     fn brief_empty_without_structure() {
         let s = song(120);
-        assert_eq!(lyrics_technical_brief(&s, None, None), "");
-        assert_eq!(lyrics_technical_brief(&s, Some(&json!({})), None), "");
-        assert_eq!(lyrics_technical_brief(&s, Some(&json!({"sections": []})), None), "");
+        assert_eq!(lyrics_technical_brief(&s, &[], None, None), "");
+        assert_eq!(lyrics_technical_brief(&s, &[], Some(&json!({})), None), "");
+        assert_eq!(lyrics_technical_brief(&s, &[], Some(&json!({"sections": []})), None), "");
         // chords alone (no structure) is not enough either
         let ch = json!({"sections": [{"label": "Verse 1", "chords": [{"name":"Am","beats":4}]}]});
-        assert_eq!(lyrics_technical_brief(&s, None, Some(&ch)), "");
+        assert_eq!(lyrics_technical_brief(&s, &[], None, Some(&ch)), "");
     }
 
     /// The tempo buckets: <=90 → 8-12, 91-130 → 6-10, >130 → 4-8 syllables.
@@ -300,7 +335,7 @@ mod tests {
         for (bpm, want) in [(72, "roughly 8-12 syllables"), (90, "roughly 8-12 syllables"),
                             (91, "roughly 6-10 syllables"), (130, "roughly 6-10 syllables"),
                             (140, "roughly 4-8 syllables")] {
-            let b = lyrics_technical_brief(&song(bpm), Some(&st), None);
+            let b = lyrics_technical_brief(&song(bpm), &[], Some(&st), None);
             assert!(b.contains(want), "{bpm} BPM → {want}, got: {b}");
             assert!(b.contains(&format!("Tempo: {bpm} BPM")), "got: {b}");
         }
@@ -323,7 +358,7 @@ mod tests {
                 {"name":"Am","beats":4},{"name":"F","beats":4},{"name":"C","beats":4},{"name":"G","beats":4}]},
             {"label": "Chorus 1", "chords": [{"name":"F","beats":4},{"name":"C","beats":4},{"name":"G","beats":4},{"name":"Am","beats":4}]}
         ]});
-        let b = lyrics_technical_brief(&song(120), Some(&structure), Some(&chords));
+        let b = lyrics_technical_brief(&song(120), &[], Some(&structure), Some(&chords));
         assert!(b.contains("Tempo: 120 BPM (half-time feel) → a comfortable sung line is roughly 6-10 syllables."), "got: {b}");
         assert!(b.contains("- Intro: 4 bars, instrumental (no sung lines — bare chord tags only)."), "got: {b}");
         // 8 changes over 8 bars → degenerate 8-8 range widened down to 6-8
@@ -342,7 +377,7 @@ mod tests {
             {"label": "Verse 2", "bars": 8, "role": "instrumental breakdown, no vocals"},
             {"label": "Pre-Chorus", "bars": 4}
         ]});
-        let b = lyrics_technical_brief(&song(100), Some(&st), None);
+        let b = lyrics_technical_brief(&song(100), &[], Some(&st), None);
         assert!(b.contains("- Guitar Solo: 8 bars, instrumental"), "got: {b}");
         assert!(b.contains("- Verse 2: 8 bars, instrumental"), "got: {b}");
         assert!(b.contains("- Pre-Chorus: 4 bars → aim for 2-4 lines."), "got: {b}");
@@ -357,10 +392,52 @@ mod tests {
             {"label": "Verse 1", "bars": 8},
             {"label": "Chorus", "bars": 24}
         ]});
-        let b = lyrics_technical_brief(&song(120), Some(&st), None);
+        let b = lyrics_technical_brief(&song(120), &[], Some(&st), None);
         assert!(b.contains("- Verse 1: 8 bars → aim for 4-8 lines."), "got: {b}");
         // 24 bars: 12..24 clamps to 10..10, widened to 8-10
         assert!(b.contains("- Chorus: 24 bars → aim for 8-10 lines; land the hook on line 1."), "got: {b}");
+    }
+
+    fn spine_row(id: &str, position: i64, label: &str, bars: i64, role: &str) -> Section {
+        Section {
+            id: id.into(), song_id: "s1".into(), position, label: label.into(),
+            r#type: String::new(), bars, role: role.into(),
+            created_at: String::new(), updated_at: String::new(),
+        }
+    }
+
+    /// Phase 2 (docs/SECTION-SPINE-SPEC.md): when the song has spine rows, the
+    /// brief's section list / bars / roles come from the SPINE — not from the
+    /// structure artifact — and chord stats attach by section_id first (label
+    /// mismatch tolerated), falling back to label for legacy chords data.
+    #[test]
+    fn brief_bars_and_sections_from_spine() {
+        // the structure artifact disagrees on purpose: stale labels + bars
+        let stale_structure = json!({"tempoNote": "half-time feel", "sections": [
+            {"label": "Old Verse", "bars": 4}
+        ]});
+        let spine = vec![
+            spine_row("sec-1", 0, "Verse 1", 8, "set the scene"),
+            spine_row("sec-2", 1, "Chorus 1", 12, ""),
+            spine_row("sec-3", 2, "Outro", 4, ""),
+        ];
+        // chords: Verse 1 matched by section_id despite a renamed label;
+        // Chorus 1 matched by label (legacy entry without an id)
+        let chords = json!({"sections": [
+            {"section_id": "sec-1", "label": "verse one (renamed)", "chords": [
+                {"name":"Am","beats":4},{"name":"F","beats":4},{"name":"C","beats":4},{"name":"G","beats":4}]},
+            {"label": "chorus  1", "chords": [{"name":"F","beats":8},{"name":"C","beats":8}]}
+        ]});
+        let b = lyrics_technical_brief(&song(120), &spine, Some(&stale_structure), Some(&chords));
+        // spine order + spine bars; the structure artifact's stale section never appears
+        assert!(!b.contains("Old Verse"), "spine wins over the structure artifact, got: {b}");
+        assert!(b.contains("Tempo: 120 BPM (half-time feel)"), "tempoNote still comes from structure, got: {b}");
+        assert!(b.contains("- Verse 1: 8 bars, 4 chord changes (16 beats) → aim for 4-8 lines, roughly one chord change per line."), "id-matched chords, got: {b}");
+        assert!(b.contains("- Chorus 1: 12 bars, 2 chord changes (16 beats) → aim for 2-10 lines, roughly one chord change per line; land the hook on line 1."), "label-matched chords + spine bars, got: {b}");
+        assert!(b.contains("- Outro: 4 bars, instrumental"), "spine role/label instrumental detection, got: {b}");
+        // a spine alone (no structure artifact at all) still yields a brief
+        let solo = lyrics_technical_brief(&song(120), &spine, None, None);
+        assert!(solo.contains("- Verse 1: 8 bars → aim for 4-8 lines."), "spine without structure artifact, got: {solo}");
     }
 
     /// Song-facts contract (docs/SONG-FACTS.md): structure data WITHOUT embedded

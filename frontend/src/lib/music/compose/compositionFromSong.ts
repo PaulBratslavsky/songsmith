@@ -49,7 +49,9 @@ import type { PitchClass, ScaleType } from '../types';
 import { PITCH_CLASSES } from '../types';
 import { deriveSections } from '../../../components/ArrangementBuilder';
 import { parseLine } from '../chordpro';
-import type { ArtifactChord, ChordsData, LyricsData } from '../../artifacts';
+import type { ArtifactChord, ChordsData, ChordsSection, LyricsData } from '../../artifacts';
+import type { Section as SpineSection } from '../../../ipc/generated';
+import { matchBySpineRow } from '../../sections';
 
 const uid = (() => {
   let n = 0;
@@ -109,6 +111,13 @@ function readChords(sec: { chords: ArtifactChord[] }): ArtifactChord[] {
  *                    ({ sections: [{ label, lines:[] }] })
  * @param opts.name  composition name (song title)
  * @param opts.bpm   tempo
+ * @param spine  the song's section SPINE rows (docs/SECTION-SPINE-SPEC.md,
+ *               Phase 2). When non-empty the spine owns section order/labels/
+ *               bars; per-stage content attaches by section_id (label fallback
+ *               for legacy entries) and every Composition section carries a
+ *               `section_id` so Phase 3's export can map back losslessly.
+ *               `[]` (legacy / unmigrated) keeps the chords-artifact order
+ *               exactly as before.
  */
 export function compositionFromSong(
   keyRoot: string,
@@ -116,17 +125,40 @@ export function compositionFromSong(
   chordsData: ChordsData | null,
   lyricsData: LyricsData | null,
   opts: { id?: string; name?: string; bpm?: number } = {},
+  spine: readonly SpineSection[] = [],
 ): Composition {
   const root: PitchClass = normalizePitchClass(keyRoot) ?? 'C';
   const mode: KeyMode = keyMode === 'major' ? 'major' : 'minor';
 
   const cSecs = chordsData?.sections ?? [];
 
+  // The ordered section walk. With a spine, the spine rows own order/labels/
+  // bars and each row picks up its Chords-stage content by section_id (label
+  // fallback); chords-artifact sections not yet in the spine (the Phase-2
+  // write window) are appended. Without a spine it is the chords artifact's
+  // own order, unchanged.
+  type OrderedSec = { label: string; section_id?: string; bars?: number; cSec?: ChordsSection };
+  let ordered: OrderedSec[];
+  if (spine.length) {
+    const usedC = new Set<ChordsSection>();
+    ordered = spine.map((row) => {
+      const c = matchBySpineRow(cSecs, row, usedC);
+      if (c) usedC.add(c);
+      return { label: row.label || 'Section', section_id: row.id, bars: Math.max(1, Number(row.bars) || 8), cSec: c };
+    });
+    for (const s of cSecs) {
+      if (!usedC.has(s)) ordered.push({ label: s.label || 'Section', cSec: s });
+    }
+  } else {
+    ordered = cSecs.map((s) => ({ label: s.label || 'Section', cSec: s }));
+  }
+
   // Section label → lyric lines, from the Sheet-preview's own alignment
-  // (deriveSections), so the Composer lyric sheet matches the Sheet. Each
-  // line keeps its word-level ChordPro breakdown (the [chord]-tag anchors),
-  // which the lyric sheet uses to print chord names above the exact words.
-  const derived = deriveSections(chordsData, lyricsData);
+  // (deriveSections, spine-aware), so the Composer lyric sheet matches the
+  // Sheet. Each line keeps its word-level ChordPro breakdown (the [chord]-tag
+  // anchors), which the lyric sheet uses to print chord names above the
+  // exact words.
+  const derived = deriveSections(chordsData, lyricsData, spine);
   const lyricLinesByLabel = new Map<string, LyricWord[][]>();
   for (const d of derived) {
     const lines = d.lyrics
@@ -151,9 +183,10 @@ export function compositionFromSong(
     lyrics.push({ tick: a, text, words });
   };
 
-  for (const sec of cSecs) {
-    const label: string = sec.label || 'Section';
-    const raw = readChords(sec);
+  for (const os of ordered) {
+    const label: string = os.label;
+    const idTag = os.section_id ? { section_id: os.section_id } : {};
+    const raw = os.cSec ? readChords(os.cSec) : [];
     const lines = lyricLinesByLabel.get(label) ?? [];
 
     // Flatten the section's tagged ChordPro placements in sung order, and
@@ -199,6 +232,7 @@ export function compositionFromSong(
         name: label,
         startTick: sectionStart,
         lengthTicks: tick - sectionStart,
+        ...idTag,
       });
 
       // Anchors: a tagged line sits EXACTLY at its first placement's span
@@ -238,10 +272,23 @@ export function compositionFromSong(
     // ---- No tagged placements: keep the progression-once layout. ----
 
     if (!raw.length) {
-      // a chordless section (e.g. a bare Intro) — give it one bar so the
-      // band still shows it.
-      sections.push({ id: uid('sec'), name: label, startTick: tick, lengthTicks: TICKS_PER_BAR });
-      tick += TICKS_PER_BAR;
+      if (!os.section_id) {
+        // legacy: a chordless section (e.g. a bare Intro) — give it one bar
+        // so the band still shows it (byte-identical without a spine).
+        sections.push({ id: uid('sec'), name: label, startTick: tick, lengthTicks: TICKS_PER_BAR });
+        tick += TICKS_PER_BAR;
+        continue;
+      }
+      // spine row with no chords content: the SPINE's bar count sizes the
+      // section, and its lyric lines (if any) spread evenly across it —
+      // lyric-only sections are spine rows now, so they land here in order.
+      const lengthTicks = Math.max(1, os.bars ?? 1) * TICKS_PER_BAR;
+      const start = tick;
+      sections.push({ id: uid('sec'), name: label, startTick: start, lengthTicks, ...idTag });
+      tick += lengthTicks;
+      lines.forEach((words, i) => {
+        pushLine(start + Math.round((i * lengthTicks) / lines.length), words);
+      });
       continue;
     }
     const chordStarts: number[] = [];
@@ -263,6 +310,7 @@ export function compositionFromSong(
       name: label,
       startTick: sectionStart,
       lengthTicks: tick - sectionStart,
+      ...idTag,
     });
 
     // Anchor this section's (untagged) lyric lines (lyric-sheet-v2 fix).
@@ -284,19 +332,21 @@ export function compositionFromSong(
     });
   }
 
-  // ---- Lyric-only sections (they exist in the Lyrics stage but the Chords
-  // stage — the section spine — never got them, e.g. a Bridge written only
-  // in the lyrics). BACKLOG decision (2026-07-07): INCLUDE them — a section
-  // band with NO chord spans, one bar per lyric line (min one bar), the
-  // lines anchored evenly across it. Playback simply has no chords there;
-  // the sheet still shows the section chip and its (chordless) lines.
-  const chordLabels = new Set(cSecs.map((sec) => sec.label || 'Section'));
+  // ---- Lyric-only sections (they exist in the Lyrics stage but the walk
+  // above — spine rows + chords sections — never got them, e.g. a Bridge
+  // written only in the lyrics on a pre-spine song). BACKLOG decision
+  // (2026-07-07): INCLUDE them — a section band with NO chord spans, one bar
+  // per lyric line (min one bar), the lines anchored evenly across it.
+  // Playback simply has no chords there; the sheet still shows the section
+  // chip and its (chordless) lines. (With a spine, lyric-only sections are
+  // spine rows and were already laid out in order above.)
+  const coveredLabels = new Set(ordered.map((os) => os.label));
   for (const d of derived) {
-    if (chordLabels.has(d.label)) continue;
+    if (coveredLabels.has(d.label)) continue;
     const lines = lyricLinesByLabel.get(d.label) ?? [];
     const sectionStart = tick;
     const lengthTicks = Math.max(1, lines.length) * TICKS_PER_BAR;
-    sections.push({ id: uid('sec'), name: d.label, startTick: sectionStart, lengthTicks });
+    sections.push({ id: uid('sec'), name: d.label, startTick: sectionStart, lengthTicks, ...(d.section_id ? { section_id: d.section_id } : {}) });
     tick += lengthTicks;
     lines.forEach((words, i) => {
       pushLine(sectionStart + Math.round((i * lengthTicks) / lines.length), words);

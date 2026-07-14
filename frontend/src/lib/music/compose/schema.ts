@@ -40,6 +40,8 @@ const SectionSchema = z.object({
   name: z.string().min(1).max(120),
   startTick: z.number().int().min(0).max(MAX_TOTAL_TICKS),
   lengthTicks: z.number().int().min(1).max(MAX_TOTAL_TICKS),
+  /** spine link (docs/SECTION-SPINE-SPEC.md) — additive, optional */
+  section_id: z.string().min(1).max(64).optional(),
 });
 const LyricWordSchema = z.object({
   text: z.string().max(80),

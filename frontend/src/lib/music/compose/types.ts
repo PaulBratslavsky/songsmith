@@ -75,6 +75,10 @@ export type Section = {
   name: string;
   startTick: number;
   lengthTicks: number;
+  /** The song's section-SPINE row this section came from (docs/SECTION-SPINE-
+   *  SPEC.md) — set by full-song import when the song has a spine, so Phase 3's
+   *  export can map back losslessly. Absent on sketches / legacy imports. */
+  section_id?: string;
 };
 
 /** One word of a lyric line, ChordPro-style: the optional `chord` is the

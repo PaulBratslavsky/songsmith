@@ -7,6 +7,7 @@ import { playAlongSvg, downloadPng, pngBytes, diagramSvgShape, pianoVoicedSvg } 
 import { guitarCountByName, guitarFretsByName, chordSizeByName, voicedMidisByName } from "../music/engineAdapter";
 import { deriveSections } from "./ArrangementBuilder";
 import { parseArtifact } from "../lib/artifacts";
+import { useSpineSections } from "../lib/sections";
 import { extractTags } from "../lib/music/chordpro";
 
 const INV_LABELS = ["root", "1st inv", "2nd inv", "3rd inv", "4th inv"];
@@ -29,14 +30,18 @@ export function SongSheet({
   const lyricsStage = stages.find((s) => s.type === "lyrics");
   const chords = useQuery({ queryKey: ["stage", chordsStage?.id], queryFn: () => api.getStage(chordsStage!.id), enabled: !!chordsStage });
   const lyrics = useQuery({ queryKey: ["stage", lyricsStage?.id], queryFn: () => api.getStage(lyricsStage!.id), enabled: !!lyricsStage });
+  // the section spine owns identity/order (Phase 2); [] = legacy label derivation
+  const { sections: spine } = useSpineSections(songId);
 
-  // section model derived from the editable Chords + Lyrics artifacts (Builder tab)
+  // section model: spine order/labels + per-stage content from the editable
+  // Chords + Lyrics artifacts (Builder tab); label-union fallback without spine
   const sections = useMemo(
     () => deriveSections(
       parseArtifact("chords", chords.data?.artifact?.content).data,
       parseArtifact("lyrics", lyrics.data?.artifact?.content).data,
+      spine,
     ),
-    [chords.data, lyrics.data],
+    [chords.data, lyrics.data, spine],
   );
 
   // every distinct chord shown on the sheet — these get a voicing cycler
