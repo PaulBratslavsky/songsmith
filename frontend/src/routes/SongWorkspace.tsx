@@ -152,11 +152,16 @@ export function SongWorkspace() {
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          {/* Done state makes the Composer the obvious next step (spec: queued CTA) */}
+          {/* Done state makes the Composer the obvious next step (spec: queued CTA).
+              Gated like Build in Ableton: a half-built song imports a half-built
+              (or stale) timeline — every stage must be done first. */}
           <button
             className={v.status === "done" ? "primary" : ""}
             onClick={() => nav({ to: "/composer", search: { song: id } })}
-            title={v.status === "done"
+            disabled={!allStagesDone}
+            title={!allStagesDone
+              ? "Complete every song-spec stage first (Concept → Generation Prompt)"
+              : v.status === "done"
               ? "The song is done — open the finished song on the full Composer timeline (every section end-to-end, chords synced to the lyrics, melody + bass editable)"
               : "Open the whole song in the visual Composer — every section on one timeline, chords synced to the lyrics, melody + bass editable across the song"}
           >
