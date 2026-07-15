@@ -75,12 +75,16 @@ where
     // environment, the CLI silently switches to API billing and disables connectors.
     // Strip them so it always uses the subscription login.
     cmd.env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
-    cmd.arg("-p").arg(user)
+    // The user prompt goes over STDIN, not as a `-p` argument: prompts can start
+    // with `-` (the canonical SECTIONS block opens with "-----"), which the CLI's
+    // argument parser rejects as an unknown option (user-hit crash).
+    cmd.arg("-p")
         .arg("--append-system-prompt").arg(system)
         .arg("--output-format").arg("stream-json")
         .arg("--verbose")
         .arg("--include-partial-messages")
         .arg("--no-session-persistence")
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // no zombie `claude` if this future is dropped (timeout / cancel / panic)
@@ -90,6 +94,14 @@ where
     }
 
     let mut child = cmd.spawn().map_err(|e| anyhow!("could not start the claude CLI ({bin}): {e}. Install Claude Code and sign in."))?;
+    // write the prompt and close stdin so the CLI sees EOF and starts the turn
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("claude stdin unavailable"))?;
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(user.as_bytes()).await?;
+        stdin.shutdown().await?;
+        drop(stdin);
+    }
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("claude stdout unavailable"))?;
 
     // Drain stderr CONCURRENTLY with the stdout read — reading it only after

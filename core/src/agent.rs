@@ -633,11 +633,38 @@ const HEADER_WORDS: &[&str] = &[
 /// The section label when `line` is a header, else None. Two styles:
 /// `[Verse 1]` (any bracket-only line, Suno-style included) and `Verse 1:`
 /// (line-style, only when the first word is a known section word).
+/// A candidate header name is SECTION-LIKE when it carries a known section word
+/// (verse/chorus/bridge/…) anywhere, or reads like a short custom title
+/// ("Encroachment", "The Watch" — ≤3 words, capitalized, no comma). This gate
+/// keeps Suno ARRANGEMENT tags — "[staccato synth lead riff, electronic kick
+/// drum]", "[hi-hat eighth notes enter]" — as lyric-body lines instead of
+/// exploding them into sections (user-hit: they became garbage spine rows).
+fn section_like(name: &str) -> bool {
+    let has_section_word = name
+        .split(|c: char| !c.is_alphabetic())
+        .any(|w| !w.is_empty() && HEADER_WORDS.contains(&w.to_lowercase().as_str()));
+    if has_section_word {
+        return true;
+    }
+    let words = name.split_whitespace().count();
+    words >= 1
+        && words <= 3
+        && !name.contains(',')
+        && name.chars().next().is_some_and(|c| c.is_uppercase())
+}
+
 fn header_label(line: &str) -> Option<String> {
     let t = line.trim();
     if t.len() >= 3 && t.starts_with('[') && t.ends_with(']') {
         let inner = t[1..t.len() - 1].trim();
-        if !inner.is_empty() && !inner.contains('[') && !inner.contains(']') {
+        if !inner.is_empty() && !inner.contains('[') && !inner.contains(']') && section_like(inner) {
+            return Some(inner.to_string());
+        }
+    }
+    // markdown-bold headers: **Verse 1** / **Pre-Chorus** (common in pasted lyrics)
+    if t.len() >= 5 && t.starts_with("**") && t.ends_with("**") {
+        let inner = t[2..t.len() - 2].trim();
+        if !inner.is_empty() && inner.len() <= 40 && !inner.contains('*') && section_like(inner) {
             return Some(inner.to_string());
         }
     }
@@ -2178,6 +2205,27 @@ mod tests {
         assert_eq!(v["data"]["keyNote"], "A minor carries...");
         // non-structure stages pass through untouched
         assert_eq!(enforce_song_key_tempo(&song, "lyrics", &model_out), model_out);
+    }
+
+    /// Paste-parser header gate (user-hit): Suno ARRANGEMENT tags must not
+    /// become sections/spine rows; **bold** headers and short custom titles must.
+    #[test]
+    fn header_gate_rejects_arrangement_tags_keeps_real_headers() {
+        // real headers, all three styles
+        assert_eq!(header_label("[Verse 1]").as_deref(), Some("Verse 1"));
+        assert_eq!(header_label("[verse]").as_deref(), Some("verse"));
+        assert_eq!(header_label("**Pre-Chorus**").as_deref(), Some("Pre-Chorus"));
+        assert_eq!(header_label("**Verse 1**").as_deref(), Some("Verse 1"));
+        assert_eq!(header_label("Bridge:").as_deref(), Some("Bridge"));
+        // short custom titles stay headers ([Encroachment] was a real song section)
+        assert_eq!(header_label("[Encroachment]").as_deref(), Some("Encroachment"));
+        assert_eq!(header_label("[Main Section]").as_deref(), Some("Main Section"));
+        // arrangement/performance tags stay lyric-body lines
+        assert_eq!(header_label("[staccato synth lead riff, electronic kick drum]"), None);
+        assert_eq!(header_label("[hi-hat eighth notes enter]"), None);
+        assert_eq!(header_label("[synth bass enters, syncopated with kick]"), None);
+        assert_eq!(header_label("[bass and pads fade out]"), None);
+        assert_eq!(header_label("[final kick drum hit]"), None);
     }
 
     /// Advance stops at a done-but-STALE stage (user-reported: after generating

@@ -537,8 +537,10 @@ section, placed at the running bar offset from these counts: {}.",
         }
     }
 
+    // the message goes over STDIN, not as a `-p` argument — messages starting
+    // with `-` would be parsed as CLI options (same crash class as stage runs)
     let mut args: Vec<String> = vec![
-        "-p".into(), message,
+        "-p".into(),
         "--output-format".into(), "stream-json".into(), "--verbose".into(),
         "--mcp-config".into(), cfg.to_string_lossy().to_string(),
         "--allowedTools".into(), "mcp__songsmith".into(), "mcp__ableton".into(),
@@ -558,10 +560,17 @@ section, placed at the running bar offset from these counts: {}.",
             .args(&args)
             // use the Claude Code subscription login, not an inherited API key
             .env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN")
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("could not start claude: {e}"))?;
+        {
+            use std::io::Write;
+            let mut si = child.stdin.take().ok_or("claude stdin unavailable")?;
+            si.write_all(message.as_bytes()).map_err(|e| e.to_string())?;
+            // dropped here → EOF, the CLI starts the turn
+        }
         let stdout = child.stdout.take().unwrap();
         // drain stderr CONCURRENTLY — reading it only after wait() deadlocks once
         // the CLI writes more than the pipe buffer (~64KB) mid-run

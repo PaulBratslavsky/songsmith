@@ -237,11 +237,23 @@ const HEADER_WORDS = [
   "refrain","drop","build","buildup","breakdown","break","interlude","instrumental","solo",
   "tag","coda","vamp","middle","part","section","ending",
 ];
+// Mirrors core agent.rs section_like: a section word anywhere, or a short
+// capitalized custom title — Suno arrangement tags stay lyric-body lines.
+function sectionLike(name: string): boolean {
+  const hasWord = name.split(/[^A-Za-z]+/).some((w) => w && HEADER_WORDS.includes(w.toLowerCase()));
+  if (hasWord) return true;
+  const words = name.split(/\s+/).filter(Boolean).length;
+  return words >= 1 && words <= 3 && !name.includes(",") && /^[A-Z]/.test(name);
+}
 function headerLabel(line: string): string | null {
   const t = line.trim();
   if (t.length >= 3 && t.startsWith("[") && t.endsWith("]")) {
     const inner = t.slice(1, -1).trim();
-    if (inner && !inner.includes("[") && !inner.includes("]")) return inner;
+    if (inner && !inner.includes("[") && !inner.includes("]") && sectionLike(inner)) return inner;
+  }
+  if (t.length >= 5 && t.startsWith("**") && t.endsWith("**")) {
+    const inner = t.slice(2, -2).trim();
+    if (inner && inner.length <= 40 && !inner.includes("*") && sectionLike(inner)) return inner;
   }
   if (t.endsWith(":")) {
     const name = t.slice(0, -1).trim();
