@@ -48,12 +48,8 @@ pub fn part_color(part: &str) -> i64 {
     }
 }
 
-/// genre-driven groove: rhythmic (stabs / fast arp / punchy bass) vs sustained.
-pub fn groove_for_genre(genre: &str) -> bool {
-    let g = genre.to_lowercase();
-    ["phonk", "trap", "electronic", "edm", "house", "techno", "dnb", "drum", "dance", "hip", "beat", "synthwave", "drill", "wave", "bass"]
-        .iter().any(|k| g.contains(k))
-}
+// Style mapping lives in midi::profile_for_genre (arrangement profiles,
+// Phase 1) — the old groove_for_genre bool is gone.
 
 // ---- Section readers (THE one section parser — was triplicated) -------------
 
@@ -241,7 +237,7 @@ pub fn build_clips(bpm: i64, sections: &[(String, i64)]) -> Result<String> {
 /// plus Bass / Chords / Pad / Chord melody / Filler / Arp MIDI parts generated
 /// from the chord progression — direct socket, no MCP/LLM. MIDI-only (you pick
 /// the sounds).
-pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groove: bool, progress: &dyn Fn(String)) -> Result<String> {
+pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
     progress("Connecting to Ableton (port 9877)…".into());
     let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
@@ -272,7 +268,7 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groo
         nap();
     }
 
-    let mut log = vec![format!("{}tempo {bpm} BPM · {} feel · {} sections × up to {} tracks (density per section)", if cleared > 0 { format!("cleared {cleared} old tracks · ") } else { String::new() }, if groove { "rhythmic groove" } else { "sustained" }, sections.len(), track_names.len())];
+    let mut log = vec![format!("{}tempo {bpm} BPM · {} arrangement · {} sections × up to {} tracks (density per section)", if cleared > 0 { format!("cleared {cleared} old tracks · ") } else { String::new() }, profile.name, sections.len(), track_names.len())];
     let mut bar = 1i64;
     for (i, (label, bars, chords)) in sections.iter().enumerate() {
         progress(format!("Building {label} — section {}/{} ({bars} bars)…", i + 1, sections.len()));
@@ -287,7 +283,7 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groo
             if part == "Sections" {
                 let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
             } else {
-                let notes = part_notes(part, chords, *bars, groove);
+                let notes = part_notes(part, chords, *bars, profile);
                 if !notes.is_empty() {
                     let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                 }
@@ -336,11 +332,11 @@ pub async fn build_song_for(conn: &Connection, song_id: &str, progress: impl Fn(
     if sections.is_empty() {
         return Ok("No sections found — run the Structure stage first.".into());
     }
-    let groove = db::get_preset(conn, &song.style_preset_id).await.ok().flatten()
-        .map(|p| groove_for_genre(&p.genre))
-        .unwrap_or(true);
+    let profile = db::get_preset(conn, &song.style_preset_id).await.ok().flatten()
+        .map(|p| crate::midi::profile_for_genre(&p.genre))
+        .unwrap_or(&crate::midi::POP_DEFAULT);
     let bpm = song.bpm;
-    tokio::task::spawn_blocking(move || build_song(bpm, &sections, groove, &progress)).await?
+    tokio::task::spawn_blocking(move || build_song(bpm, &sections, profile, &progress)).await?
 }
 
 #[cfg(test)]
@@ -435,9 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn groove_follows_genre_keywords() {
-        assert!(groove_for_genre("Memphis Phonk"));
-        assert!(groove_for_genre("synthwave"));
-        assert!(!groove_for_genre("folk ballad"));
+    fn genre_maps_to_arrangement_profiles() {
+        assert_eq!(crate::midi::profile_for_genre("Memphis Phonk").name, "trap 808");
+        assert_eq!(crate::midi::profile_for_genre("synthwave").name, "synthwave drive");
+        assert_eq!(crate::midi::profile_for_genre("folk ballad").name, "folk acoustic");
     }
 }

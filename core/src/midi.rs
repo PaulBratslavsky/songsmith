@@ -39,6 +39,88 @@ pub fn nearest_pitch(pc: i64, reference: i64) -> i64 {
     [base - 12, base, base + 12].into_iter().min_by_key(|&p| (p - reference).abs()).unwrap()
 }
 
+// ---- Arrangement profiles (style-aware builds, Phase 1) ---------------------
+//
+// The style knowledge behind the Ableton stub. Replaces the old single
+// `groove: bool` (user-hit: "ethereal witch house … heavy sub-bass 808s,
+// 85 BPM half-time" matched the `house`/`wave` keywords and got the BOUNCY
+// variant). A profile names the arrangement character per track; Phase 2 will
+// let the style skill store one per preset — this keyword mapping stays as the
+// fallback.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BassPattern {
+    /// long root held the chord's length (folk, ambient)
+    Sustain,
+    /// sparse low 808 hits that ring — half-time weight (witch house, trap)
+    HalfTime808,
+    /// driving repeated eighth-note roots (synthwave, rock)
+    EighthDrive,
+    /// root then fifth (the old "sustained" default — pop)
+    Walking,
+    /// punchy root + off-beat ghost + fifth (the old "groove" — house, funk)
+    OffbeatSync,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChordStyle {
+    /// triad held the chord's length
+    Held,
+    /// short stabs on the chord start and midpoint
+    Stabs,
+    /// triad pulsing on eighth notes
+    Pulse8ths,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArpRate {
+    Off,
+    Eighths,
+    Sixteenths,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArrangementProfile {
+    pub name: &'static str,
+    pub bass: BassPattern,
+    /// drop the bass an octave into sub territory (808s)
+    pub sub_bass: bool,
+    pub chords: ChordStyle,
+    /// include the atmospheric Pad bed
+    pub pad: bool,
+    pub arp: ArpRate,
+    /// chord-melody plays only the top tone (no mid-chord step)
+    pub sparse_melody: bool,
+    /// velocity multiplier — soft washes vs punchy mixes
+    pub vel_scale: f64,
+}
+
+pub static DARK_HALFTIME: ArrangementProfile = ArrangementProfile { name: "dark half-time", bass: BassPattern::HalfTime808, sub_bass: true, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.85 };
+pub static TRAP_808: ArrangementProfile = ArrangementProfile { name: "trap 808", bass: BassPattern::HalfTime808, sub_bass: true, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Off, sparse_melody: true, vel_scale: 1.0 };
+pub static SYNTHWAVE: ArrangementProfile = ArrangementProfile { name: "synthwave drive", bass: BassPattern::EighthDrive, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Sixteenths, sparse_melody: false, vel_scale: 1.0 };
+pub static FOUR_FLOOR: ArrangementProfile = ArrangementProfile { name: "four-on-the-floor", bass: BassPattern::OffbeatSync, sub_bass: false, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0 };
+pub static ROCK_DRIVE: ArrangementProfile = ArrangementProfile { name: "rock drive", bass: BassPattern::EighthDrive, sub_bass: false, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Off, sparse_melody: false, vel_scale: 1.0 };
+pub static FOLK_ACOUSTIC: ArrangementProfile = ArrangementProfile { name: "folk acoustic", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: false, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 0.9 };
+pub static AMBIENT_WASH: ArrangementProfile = ArrangementProfile { name: "ambient wash", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.7 };
+pub static POP_DEFAULT: ArrangementProfile = ArrangementProfile { name: "pop default", bass: BassPattern::Walking, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0 };
+
+/// Fallback style mapping: preset genre text → builtin profile. Ordered by
+/// specificity — "synthwave" must beat the bare "wave" family, and "witch
+/// house" / "darkwave" must land on the dark profile before the "house"
+/// keyword can claim them (the exact bug the old bool mapping had).
+pub fn profile_for_genre(genre: &str) -> &'static ArrangementProfile {
+    let g = genre.to_lowercase();
+    let any = |ks: &[&str]| ks.iter().any(|k| g.contains(k));
+    if any(&["synthwave", "retrowave", "chillwave", "vaporwave", "outrun", "synth-pop", "synth pop", "synthpop", "new wave"]) { return &SYNTHWAVE; }
+    if any(&["witch", "darkwave", "dark wave", "goth", "ethereal", "shoegaze", "dream pop", "dreampop", "doom"]) { return &DARK_HALFTIME; }
+    if any(&["trap", "drill", "phonk", "hip hop", "hip-hop", "rap", "808", "grime"]) { return &TRAP_808; }
+    if any(&["house", "techno", "edm", "dance", "club", "electro", "dnb", "drum and bass", "garage"]) { return &FOUR_FLOOR; }
+    if any(&["metal", "punk", "rock", "grunge", "hardcore"]) { return &ROCK_DRIVE; }
+    if any(&["folk", "acoustic", "country", "singer-songwriter", "singer songwriter", "americana", "bluegrass", "ballad"]) { return &FOLK_ACOUSTIC; }
+    if any(&["ambient", "drone", "cinematic", "soundtrack", "score", "new age", "meditat"]) { return &AMBIENT_WASH; }
+    &POP_DEFAULT
+}
+
 /// Which parts play in a section — thins arrangement so it BUILDS with the energy
 /// arc (intro = sparse → chorus/drop = everything) instead of all parts everywhere.
 pub fn section_parts(label: &str) -> &'static [&'static str] {
@@ -69,58 +151,88 @@ pub fn chord_events(chords: &[(String, i64)], bars: i64) -> Vec<(String, f64, f6
 }
 
 /// Generate the MIDI notes for one part over a section, honoring each chord's beats
-/// (chord events of any length). `groove` (genre-driven) swaps sustained pads for
-/// rhythmic stabs/faster arps; velocities accent the chord's start and ghost the rest.
-pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, groove: bool) -> Vec<Value> {
+/// (chord events of any length). The profile picks each track's pattern —
+/// bass figure, chord treatment, arp rate, pad presence, melody density —
+/// and scales velocities (soft washes vs punchy mixes).
+pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &ArrangementProfile) -> Vec<Value> {
     let mut out = Vec::new();
+    let v = |base: i64| ((base as f64 * p.vel_scale) as i64).clamp(20, 127);
     let mut prev_bass = -1i64; // for bass voice-leading across the section
     for (name, start, dur) in chord_events(chords, bars) {
         let Some((pc, tones)) = chord_tones(&name) else { continue };
         let third = tones.get(1).copied().unwrap_or(4);
         let top = tones.last().copied().unwrap_or(7);
         match part {
-            // walk the root to the nearest octave (no big leaps), move to the 5th halfway
             "Bass" => {
-                let root = (if prev_bass < 0 { 36 + pc } else { nearest_pitch(pc, prev_bass) }).clamp(31, 47);
+                // voice-led root register; sub_bass drops an octave into 808 land
+                let (base, lo, hi) = if p.sub_bass { (24 + pc, 24, 40) } else { (36 + pc, 31, 47) };
+                let root = (if prev_bass < 0 { base } else { nearest_pitch(pc, prev_bass) }).clamp(lo, hi);
                 prev_bass = root;
                 let fifth = root + 7;
-                if groove {
-                    out.push(mk_note(root, start, (dur * 0.4).min(1.0), 112));
-                    if dur >= 2.0 { out.push(mk_note(root, start + dur * 0.375, 0.4, 82)); }   // off-beat sub
-                    out.push(mk_note(fifth, start + dur * 0.5, dur * 0.45, 94));
-                } else {
-                    out.push(mk_note(root, start, dur * 0.6, 106));
-                    out.push(mk_note(fifth, start + dur * 0.6, dur * 0.4, 88));
+                match p.bass {
+                    // one long root that rings the chord out
+                    BassPattern::Sustain => out.push(mk_note(root, start, dur * 0.95, v(100))),
+                    // sparse half-time weight: a ringing hit, plus a late ghost pickup on long chords
+                    BassPattern::HalfTime808 => {
+                        out.push(mk_note(root, start, dur * 0.8, v(112)));
+                        if dur >= 4.0 { out.push(mk_note(root, start + dur * 0.875, (dur * 0.12).max(0.5), v(72))); }
+                    }
+                    // relentless eighth-note roots, accent on the beat
+                    BassPattern::EighthDrive => {
+                        let n = (dur / 0.5).floor() as i64;
+                        for k in 0..n {
+                            out.push(mk_note(root, start + k as f64 * 0.5, 0.45, v(if k % 2 == 0 { 104 } else { 82 })));
+                        }
+                    }
+                    // root then fifth (the old sustained default)
+                    BassPattern::Walking => {
+                        out.push(mk_note(root, start, dur * 0.6, v(106)));
+                        out.push(mk_note(fifth, start + dur * 0.6, dur * 0.4, v(88)));
+                    }
+                    // punchy root + off-beat ghost + fifth (the old groove)
+                    BassPattern::OffbeatSync => {
+                        out.push(mk_note(root, start, (dur * 0.4).min(1.0), v(112)));
+                        if dur >= 2.0 { out.push(mk_note(root, start + dur * 0.375, 0.4, v(82))); }
+                        out.push(mk_note(fifth, start + dur * 0.5, dur * 0.45, v(94)));
+                    }
                 }
             }
             // wide sustained pad bed: triad octave-up held the full chord, soft, with an airy top octave
             "Pad" => {
-                for t in &tones { out.push(mk_note(60 + pc + t, start, dur, 50)); }
-                out.push(mk_note(72 + pc, start, dur, 38));
+                if !p.pad { return out; }
+                for t in &tones { out.push(mk_note(60 + pc + t, start, dur, v(50))); }
+                out.push(mk_note(72 + pc, start, dur, v(38)));
             }
-            // sustained pad for the chord's length, or two stabs when grooving
-            "Chords" => if groove {
-                for t in &tones { out.push(mk_note(48 + pc + t, start, (dur * 0.25).min(0.9), 90)); }
-                if dur >= 2.0 { for t in &tones { out.push(mk_note(48 + pc + t, start + dur * 0.5, (dur * 0.2).min(0.9), 74)); } }
-            } else {
-                for t in &tones { out.push(mk_note(48 + pc + t, start, dur, 78)); }
+            "Chords" => match p.chords {
+                ChordStyle::Held => for t in &tones { out.push(mk_note(48 + pc + t, start, dur, v(78))); },
+                ChordStyle::Stabs => {
+                    for t in &tones { out.push(mk_note(48 + pc + t, start, (dur * 0.25).min(0.9), v(90))); }
+                    if dur >= 2.0 { for t in &tones { out.push(mk_note(48 + pc + t, start + dur * 0.5, (dur * 0.2).min(0.9), v(74))); } }
+                }
+                ChordStyle::Pulse8ths => {
+                    let n = (dur / 0.5).floor() as i64;
+                    for k in 0..n {
+                        for t in &tones { out.push(mk_note(48 + pc + t, start + k as f64 * 0.5, 0.4, v(if k % 2 == 0 { 84 } else { 66 }))); }
+                    }
+                }
             },
-            // contour: top tone on the chord, step to the 3rd halfway through
+            // contour: top tone on the chord; the mid-chord step to the 3rd only
+            // when the profile wants an active melody
             "Chord melody" => {
-                out.push(mk_note(60 + pc + top, start, dur * 0.45, 96));
-                out.push(mk_note(60 + pc + third, start + dur * 0.5, dur * 0.45, 82));
+                out.push(mk_note(60 + pc + top, start, dur * 0.45, v(96)));
+                if !p.sparse_melody { out.push(mk_note(60 + pc + third, start + dur * 0.5, dur * 0.45, v(82))); }
             }
             // off-beat triad stabs within the chord
-            "Filler" => for off in [0.45_f64, 0.85] { for t in &tones { out.push(mk_note(48 + pc + t, start + dur * off, (dur * 0.12).max(0.25), 68)); } },
-            // arpeggio subdividing the chord's length (16ths grooving, else 8ths)
+            "Filler" => for off in [0.45_f64, 0.85] { for t in &tones { out.push(mk_note(48 + pc + t, start + dur * off, (dur * 0.12).max(0.25), v(68))); } },
+            // arpeggio subdividing the chord's length at the profile's rate
             "Arp" => {
-                let step = if groove { 0.25 } else { 0.5 };
+                let step = match p.arp { ArpRate::Off => return out, ArpRate::Eighths => 0.5, ArpRate::Sixteenths => 0.25 };
                 let n = (dur / step).floor() as i64;
                 for k in 0..n {
                     let t = tones[k as usize % tones.len()];
                     let oct = ((k as usize / tones.len()) % 2) as i64 * 12;
                     let vel = if k % 4 == 0 { 86 } else { 64 };
-                    out.push(mk_note(60 + pc + t + oct, start + k as f64 * step, step, vel));
+                    out.push(mk_note(60 + pc + t + oct, start + k as f64 * step, step, v(vel)));
                 }
             }
             _ => {}
@@ -160,20 +272,62 @@ mod tests {
     #[test]
     fn part_notes_smoke_bass_register_and_arp_subdivision() {
         let chords = vec![("Am".to_string(), 4), ("F".to_string(), 4)];
-        // Bass: notes exist and stay in the walking-bass register (roots clamped
-        // 31–47, fifths at most +7 above)
-        let bass = part_notes("Bass", &chords, 2, false);
+        // Bass (pop default = Walking): notes exist and stay in the walking-bass
+        // register (roots clamped 31–47, fifths at most +7 above)
+        let bass = part_notes("Bass", &chords, 2, &POP_DEFAULT);
         assert!(!bass.is_empty());
         for n in &bass {
             let p = n["pitch"].as_i64().unwrap();
             assert!((31..=54).contains(&p), "bass pitch {p} out of register");
         }
-        // Arp (no groove): 8th-note subdivision → 8 notes per 4-beat chord
-        let arp = part_notes("Arp", &chords, 2, false);
+        // Arp (pop default = Eighths): 8th-note subdivision → 8 notes per 4-beat chord
+        let arp = part_notes("Arp", &chords, 2, &POP_DEFAULT);
         assert_eq!(arp.len(), 16);
         // an unknown part yields nothing; unparseable chords are skipped
-        assert!(part_notes("Kazoo", &chords, 2, true).is_empty());
-        assert!(part_notes("Bass", &[("??".into(), 4)], 2, true).is_empty());
+        assert!(part_notes("Kazoo", &chords, 2, &FOUR_FLOOR).is_empty());
+        assert!(part_notes("Bass", &[("??".into(), 4)], 2, &FOUR_FLOOR).is_empty());
+    }
+
+    /// The style-aware profiles change the actual notes: dark half-time gets
+    /// SPARSE SUB bass and no arp; synthwave gets driving eighths and 16th arps.
+    #[test]
+    fn profiles_shape_bass_density_register_and_arp() {
+        let chords = vec![("F#m".to_string(), 4), ("D".to_string(), 4)];
+        // dark half-time: one ringing hit per 4-beat chord (no >=4.0-only ghost
+        // fires at exactly 4.0 → 2 notes), all in the sub register
+        let dark = part_notes("Bass", &chords, 2, &DARK_HALFTIME);
+        let drive = part_notes("Bass", &chords, 2, &SYNTHWAVE);
+        assert!(dark.len() < drive.len(), "half-time 808 must be sparser than eighth drive ({} vs {})", dark.len(), drive.len());
+        for n in &dark {
+            let p = n["pitch"].as_i64().unwrap();
+            assert!((24..=40).contains(&p), "808 bass pitch {p} must sit in the sub register");
+        }
+        // eighth drive: 8 root hits per 4-beat chord
+        assert_eq!(drive.len(), 16);
+        // arp rates: dark = off, synthwave = 16ths (16 notes per 4-beat chord)
+        assert!(part_notes("Arp", &chords, 2, &DARK_HALFTIME).is_empty());
+        assert_eq!(part_notes("Arp", &chords, 2, &SYNTHWAVE).len(), 32);
+        // pad presence follows the profile
+        assert!(part_notes("Pad", &chords, 2, &TRAP_808).is_empty());
+        assert!(!part_notes("Pad", &chords, 2, &DARK_HALFTIME).is_empty());
+        // ambient wash scales velocities down
+        let wash = part_notes("Chords", &chords, 2, &AMBIENT_WASH);
+        assert!(wash.iter().all(|n| n["velocity"].as_i64().unwrap() <= 60));
+    }
+
+    /// The keyword fallback mapping — incl. the exact bug the old bool had:
+    /// "witch house" / "darkwave" must NOT land on the four-on-the-floor or
+    /// synthwave buckets via their `house`/`wave` substrings.
+    #[test]
+    fn profile_for_genre_maps_families_with_precedence() {
+        assert_eq!(profile_for_genre("ethereal witch house darkwave").name, DARK_HALFTIME.name);
+        assert_eq!(profile_for_genre("synthwave").name, SYNTHWAVE.name);
+        assert_eq!(profile_for_genre("Memphis Phonk").name, TRAP_808.name);
+        assert_eq!(profile_for_genre("deep house").name, FOUR_FLOOR.name);
+        assert_eq!(profile_for_genre("indie rock").name, ROCK_DRIVE.name);
+        assert_eq!(profile_for_genre("folk ballad").name, FOLK_ACOUSTIC.name);
+        assert_eq!(profile_for_genre("cinematic ambient").name, AMBIENT_WASH.name);
+        assert_eq!(profile_for_genre("k-pop").name, POP_DEFAULT.name);
     }
 
     #[test]
