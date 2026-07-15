@@ -5,6 +5,7 @@ import type { Stage } from "../ipc/generated";
 import { pitchClassOf } from "../music/theory";
 import { playAlongSvg, downloadPng, pngBytes, diagramSvgShape, pianoVoicedSvg } from "../music/diagrams";
 import { guitarCountByName, guitarFretsByName, chordSizeByName, voicedMidisByName } from "../music/engineAdapter";
+import { padScaleSvg, padChordSvg } from "../music/pads";
 import { deriveSections } from "./ArrangementBuilder";
 import { parseArtifact } from "../lib/artifacts";
 import { useSpineSections } from "../lib/sections";
@@ -24,7 +25,7 @@ export function SongSheet({
   voicings: string;
 }) {
   const qc = useQueryClient();
-  const [instrument, setInstrument] = useState<"guitar" | "piano">("guitar");
+  const [instrument, setInstrument] = useState<"guitar" | "piano" | "ableton">("guitar");
   const [voicings, setVoicings] = useState<Record<string, number>>(() => parseVoicings(voicingsJson));
   const chordsStage = stages.find((s) => s.type === "chords");
   const lyricsStage = stages.find((s) => s.type === "lyrics");
@@ -58,7 +59,7 @@ export function SongSheet({
   // different things), keyed "<instrument>:<chord>". Derive a name→index map for
   // the current instrument to feed the renderer.
   const idxOf = (name: string) => voicings[`${instrument}:${name}`] ?? 0;
-  const countOf = (name: string) => Math.max(1, instrument === "guitar" ? guitarCountByName(name) : chordSizeByName(name));
+  const countOf = (name: string) => (instrument === "ableton" ? 1 : Math.max(1, instrument === "guitar" ? guitarCountByName(name) : chordSizeByName(name)));
   const curVoicings = useMemo(() => {
     const out: Record<string, number> = {};
     for (const name of uniqueChords) out[name] = voicings[`${instrument}:${name}`] ?? 0;
@@ -88,6 +89,7 @@ export function SongSheet({
         <div className="row" style={{ gap: 4 }}>
           <button className={"sm" + (instrument === "guitar" ? " primary" : "")} onClick={() => setInstrument("guitar")}>Guitar</button>
           <button className={"sm" + (instrument === "piano" ? " primary" : "")} onClick={() => setInstrument("piano")}>Piano</button>
+          <button className={"sm" + (instrument === "ableton" ? " primary" : "")} onClick={() => setInstrument("ableton")}>Ableton</button>
         </div>
         <button className="primary" onClick={async () => {
           const name = `${(title || "song").replace(/[^\w.-]+/g, "_")}.png`;
@@ -101,17 +103,28 @@ export function SongSheet({
         }}>⬇ Export PNG</button>
       </div>
 
+      {instrument === "ableton" && (
+        <div className="card" style={{ marginBottom: 10 }}>
+          <label>Push chromatic mode — {keyRoot} {keyMode} scale (right = +1 semitone, up = +4th; root in orange)</label>
+          <div style={{ marginTop: 8 }} dangerouslySetInnerHTML={{ __html: padScaleSvg(pitchClassOf(keyRoot) ?? 0, keyMode === "major" ? "major" : "minor") }} />
+        </div>
+      )}
+
       {uniqueChords.length > 0 && (
         <div className="card" style={{ marginBottom: 10 }}>
-          <label>{instrument === "guitar" ? "Voicings" : "Inversions"} — pick the shape shown on the sheet (click ‹ ›)</label>
+          <label>{instrument === "ableton" ? "Pad shapes — chord tones on the Push grid (root in orange)" : `${instrument === "guitar" ? "Voicings" : "Inversions"} — pick the shape shown on the sheet (click ‹ ›)`}</label>
           <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 6 }}>
             {uniqueChords.map((name) => {
               const n = countOf(name);
               const idx = idxOf(name);
-              const sub = instrument === "guitar"
+              const sub = instrument === "ableton"
+                ? "pads"
+                : instrument === "guitar"
                 ? (guitarFretsByName(name, idx)?.label ?? "—")
                 : (INV_LABELS[idx] ?? `inv ${idx}`);
-              const svg = instrument === "guitar"
+              const svg = instrument === "ableton"
+                ? (padChordSvg(name) ?? `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="60"><text x="45" y="34" fill="#5b6472" font-size="10" text-anchor="middle" font-family="monospace">(no pads)</text></svg>`)
+                : instrument === "guitar"
                 ? diagramSvgShape(guitarFretsByName(name, idx), name)
                 : pianoVoicedSvg(voicedMidisByName(name, idx), name);
               return (

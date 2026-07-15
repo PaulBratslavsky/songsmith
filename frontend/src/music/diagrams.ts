@@ -2,6 +2,7 @@
 // chord chart you can play from.
 
 import { NOTE_NAMES } from "./theory";
+import { padChordInner } from "./pads";
 import { guitarFretsByName, chordPcsByName, voicedMidisByName, type GuitarShape } from "./engineAdapter";
 import { extractTags, hasTags, stripTags } from "../lib/music/chordpro";
 
@@ -159,7 +160,7 @@ type PASection = { label: string; chords: string[]; lyrics: string[] };
 /** One-page lead sheet (Letter portrait): title, a deduped strip of chord shapes
  *  at the chosen voicing/inversion, then a two-column chord-over-lyric body that
  *  auto-fits to a single standard page. Renders inline and exports to PNG. */
-export function playAlongSvg(o: { title: string; subtitle: string; instrument: "guitar" | "piano"; rootPc: number; mode: "major" | "minor"; sections: PASection[]; voicings?: Record<string, number> }): { svg: string; width: number; height: number } {
+export function playAlongSvg(o: { title: string; subtitle: string; instrument: "guitar" | "piano" | "ableton"; rootPc: number; mode: "major" | "minor"; sections: PASection[]; voicings?: Record<string, number> }): { svg: string; width: number; height: number } {
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const guitar = o.instrument === "guitar";
   const voi = o.voicings ?? {};
@@ -180,12 +181,18 @@ export function playAlongSvg(o: { title: string; subtitle: string; instrument: "
 
   // ---- chord-shape strip (each chord once, at its chosen voicing/inversion)
   const stripScale = 0.82;
-  rows.push(`<text x="${margin}" y="${y}" fill="${INK}" font-size="10" font-weight="bold" font-family="monospace">CHORDS — ${guitar ? "guitar voicings" : "piano (inversions)"}</text>`); y += 6;
+  rows.push(`<text x="${margin}" y="${y}" fill="${INK}" font-size="10" font-weight="bold" font-family="monospace">CHORDS — ${o.instrument === "ableton" ? "Push pads (chromatic layout)" : guitar ? "guitar voicings" : "piano (inversions)"}</text>`); y += 6;
   const stripH = Math.round(104 * stripScale);
   let sx = margin, sy = y;
   for (const name of uniq) {
     let inner: string, natW: number;
-    if (guitar) {
+    if (o.instrument === "ableton") {
+      const pad = padChordInner(name, 9);
+      natW = pad ? Math.max(80, pad.width) : 80;
+      inner = `<text x="${(natW / 2).toFixed(0)}" y="10" fill="${INK}" font-size="11" font-weight="bold" text-anchor="middle" font-family="monospace">${esc(name)}</text>`
+        + (pad ? `<g transform="translate(${((natW - pad.width) / 2).toFixed(1)},16)">${pad.markup}</g>`
+               : `<text x="${(natW / 2).toFixed(0)}" y="52" fill="${LINE}" font-size="9" text-anchor="middle" font-family="monospace">(no pads)</text>`);
+    } else if (guitar) {
       natW = 80;
       inner = `<text x="40" y="10" fill="${INK}" font-size="11" font-weight="bold" text-anchor="middle" font-family="monospace">${esc(name)}</text>`
         + guitarInner(guitarFretsByName(name, voi[name] ?? 0), 0, 4);
