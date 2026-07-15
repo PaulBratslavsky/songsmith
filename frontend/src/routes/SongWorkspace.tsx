@@ -17,6 +17,7 @@ import { LyricSpecEditor } from "../components/LyricSpecEditor";
 import { FieldDrawer, useFieldDrawer } from "../components/FieldDrawer";
 import { FinalRenders } from "../components/FinalRenders";
 import { SongSheet } from "../components/SongSheet";
+import { SongNotation } from "../components/SongNotation";
 import { ArrangementBuilder } from "../components/ArrangementBuilder";
 import { parseArtifact } from "../lib/artifacts";
 import { useSpineSections } from "../lib/sections";
@@ -27,7 +28,7 @@ export function SongWorkspace() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [tab, setTab] = useState<"workspace" | "builder" | "sheet" | "renders">("workspace");
+  const [tab, setTab] = useState<"workspace" | "builder" | "sheet" | "notation" | "renders">("workspace");
   const [abMsg, setAbMsg] = useState("");
   const [showStyle, setShowStyle] = useState(false);
   const fd = useFieldDrawer();
@@ -198,6 +199,7 @@ export function SongWorkspace() {
         <button className={"sm" + (tab === "workspace" ? " primary" : "")} onClick={() => setTab("workspace")}>Workspace</button>
         <button className={"sm" + (tab === "builder" ? " primary" : "")} onClick={() => setTab("builder")}>Arrange</button>
         <button className={"sm" + (tab === "sheet" ? " primary" : "")} onClick={() => setTab("sheet")}>Sheet preview</button>
+        <button className={"sm" + (tab === "notation" ? " primary" : "")} onClick={() => setTab("notation")}>𝄞 Notation</button>
         <button className={"sm" + (tab === "renders" ? " primary" : "")} onClick={() => setTab("renders")}>🎧 Renders</button>
         <div style={{ flex: 1 }} />
         {tab === "workspace" && (
@@ -396,6 +398,18 @@ export function SongWorkspace() {
           keyMode={v.key_mode}
           stages={song.data.stages}
           voicings={v.voicings}
+        />
+      )}
+      {tab === "notation" && (
+        <SongNotation
+          songId={id}
+          title={v.title || "Untitled song"}
+          keyRoot={v.key_root}
+          keyMode={v.key_mode}
+          bpm={Number(v.bpm)}
+          chordsData={chordsData}
+          lyricsData={parseArtifact("lyrics", lyricsStageQ.data?.artifact?.content).data}
+          spine={spineSections}
         />
       )}
       {tab === "renders" && <FinalRenders songId={id} />}

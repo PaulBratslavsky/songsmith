@@ -101,6 +101,46 @@ function readChords(sec: { chords: ArtifactChord[] }): ArtifactChord[] {
 }
 
 /**
+ * ARRANGE IS THE SOURCE OF TRUTH (user decision 2026-07-15): a spine row's bar
+ * count owns its Composer section length 1:1. When the laid chord spans come
+ * up short (e.g. 4 placements over an 8-bar verse whose loop plays twice),
+ * the progression keeps cycling as instrumental fill until the section is
+ * full; a final span is truncated to land exactly on the bar line. Sung spans
+ * are never cut — a section whose placements overflow its bar count keeps its
+ * real length.
+ */
+function padSectionToBars(
+  chords: ChordSpan[],
+  raw: ArtifactChord[],
+  root: PitchClass,
+  mode: KeyMode,
+  laidCount: number,
+  tick: number,
+  targetEnd: number,
+): number {
+  if (!raw.length) return Math.max(tick, targetEnd);
+  let i = laidCount;
+  while (tick < targetEnd) {
+    const rc = raw[i % raw.length];
+    const length = Math.min(
+      Math.max(1, Math.round(rc.beats * TICKS_PER_BEAT)),
+      targetEnd - tick,
+    );
+    chords.push({
+      id: uid('span'),
+      degree: degreeForChordName(rc.name, root, mode),
+      seventh: false,
+      name: rc.name,
+      start: tick,
+      length,
+    });
+    tick += length;
+    i += 1;
+  }
+  return tick;
+}
+
+/**
  * Build a Composition spanning the whole song.
  *
  * @param keyRoot  song key root (e.g. "A"); accepts flat/sharp spellings
@@ -266,6 +306,13 @@ export function compositionFromSong(
         i = j;
       }
       lines.forEach((words, li) => pushLine(anchors[li], words));
+
+      // spine bars own the section length — cycle the progression as
+      // instrumental fill up to the bar target (sung spans stay untouched)
+      if (os.bars) {
+        tick = padSectionToBars(chords, raw, root, mode, placements.length, tick, sectionStart + os.bars * TICKS_PER_BAR);
+        sections[sections.length - 1].lengthTicks = tick - sectionStart;
+      }
       continue;
     }
 
@@ -304,6 +351,11 @@ export function compositionFromSong(
         length,
       });
       tick += length;
+    }
+    // spine bars own the section length — keep cycling the progression to
+    // fill the row's bar count (Arrange is the source of truth)
+    if (os.bars) {
+      tick = padSectionToBars(chords, raw, root, mode, raw.length, tick, sectionStart + os.bars * TICKS_PER_BAR);
     }
     sections.push({
       id: uid('sec'),
