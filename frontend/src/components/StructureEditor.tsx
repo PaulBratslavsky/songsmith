@@ -8,7 +8,9 @@ import { matchBySpineRow, normLabel, spineSnapshot } from "../lib/sections";
 
 export type Section = { section_id?: string; type?: string; label: string; bars: number; role: string; frozen?: boolean };
 /** Editor state. root/mode/bpm are SONG facts (docs/SONG-FACTS.md) — the
- *  pickers edit them via `update_song_key`; they are NEVER persisted into the
+ *  pickers are LIVE views of the song (write-through via `update_song_key`,
+ *  never part of this draft: a drafted key desynced from the Co-write pickers
+ *  and Re-run used the stale song key). They are NEVER persisted into the
  *  structure artifact. Only keyNote/tempoNote/sections live in the artifact. */
 export type StructureData = { root: string; mode: string; bpm: number; keyNote: string; tempoNote: string; sections: Section[] };
 
@@ -77,6 +79,17 @@ export function StructureEditor({
 }) {
   const [d, setD] = useState<StructureData>(() => spineSeededStructure(parseStructure(content, { keyRoot, keyMode, bpm }), spineSections ?? []));
   const [saved, setSaved] = useState("");
+  // Key/mode/BPM render from the SONG and write through immediately — the one
+  // source the Co-write pickers, header, and every stage prompt read. A local
+  // draft here let the user pick F# minor, hit Re-run without saving, and the
+  // run (correctly) used the song's still-A-minor key.
+  const liveRoot = NOTE_NAMES[pitchClassOf(keyRoot) ?? 0];
+  const liveMode = keyMode === "major" ? "major" : "minor";
+  const liveBpm = Number(bpm) || 120;
+  const setSongKey = async (root: string, mode: string, newBpm?: number) => {
+    await api.updateSongKey(songId, root, mode, newBpm ?? liveBpm);
+    onChanged();
+  };
   const set = (patch: Partial<StructureData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
   const setSec = (i: number, patch: Partial<Section>) => set({ sections: d.sections.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
   const addSec = () => set({ sections: [...d.sections, { label: "Section", bars: 8, role: "" }] });
@@ -128,20 +141,21 @@ export function StructureEditor({
         data: { keyNote: d.keyNote, tempoNote: d.tempoNote },
         spine_snapshot: spineSnapshot(freshSections),
       }));
-      // The SONG owns key/tempo — the pickers write it song-level, the single
-      // source the Chords palette, Sheet, prompts, and Ableton all read.
-      await api.updateSongKey(songId, d.root, d.mode, d.bpm);
+      // Key/tempo are NOT written here — the pickers write the song directly
+      // the moment they change (a save-time write of the draft would clobber
+      // a newer pick made in the Co-write panel).
       return freshSections;
     },
-    onSuccess: (freshSections) => { setD((c) => ({ ...c, sections: freshSections })); setSaved("Saved — key/tempo synced to the song."); onChanged(); },
+    onSuccess: (freshSections) => { setD((c) => ({ ...c, sections: freshSections })); setSaved("Saved."); onChanged(); },
   });
 
   return (
     <div className="col" style={{ gap: 12 }}>
       <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-        <div><label>Key</label><select value={d.root} onChange={(e) => set({ root: e.target.value })}>{NOTE_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
-        <div><label>Mode</label><select value={d.mode} onChange={(e) => set({ mode: e.target.value })}><option value="minor">minor</option><option value="major">major</option></select></div>
-        <div><label>BPM</label><input type="number" value={d.bpm} onChange={(e) => set({ bpm: Number(e.target.value) })} style={{ width: 70 }} /></div>
+        <div><label>Key</label><select value={liveRoot} onChange={(e) => setSongKey(e.target.value, liveMode)}>{NOTE_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
+        <div><label>Mode</label><select value={liveMode} onChange={(e) => setSongKey(liveRoot, e.target.value)}><option value="minor">minor</option><option value="major">major</option></select></div>
+        <div><label>BPM</label><input type="number" value={liveBpm} onChange={(e) => setSongKey(liveRoot, liveMode, Number(e.target.value) || 120)} style={{ width: 70 }} /></div>
+        <span className="faint" style={{ fontSize: 11 }}>the song's key/tempo — applied instantly, every stage follows it</span>
       </div>
       <div><label>Key note <span className="faint">(why this key)</span></label><input value={d.keyNote} onChange={(e) => set({ keyNote: e.target.value })} style={{ width: "100%" }} /></div>
       <div><label>Tempo note <span className="faint">(why this tempo)</span></label><input value={d.tempoNote} onChange={(e) => set({ tempoNote: e.target.value })} style={{ width: "100%" }} /></div>

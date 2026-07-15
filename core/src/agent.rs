@@ -2365,10 +2365,19 @@ mod tests {
                      1. Verse 1 (8 bars) — set the scene\n\
                      2. Chorus (12 bars)\n\
                      -----------------------------------------------------------------------------------------------------";
-        for t in ["structure", "chords", "lyric_spec", "prompt"] {
+        for t in ["chords", "lyric_spec", "prompt"] {
             let p = stage_user_prompt(&conn, stage(t), None).await.unwrap();
             assert_eq!(p, format!("{block}\n\n{}", without[t]), "{t}: block must be prepended verbatim");
         }
+        // STRUCTURE prompts lead with the KEY/TEMPO AUTHORITY block (the
+        // stale-key override) — the sections block slots in right after it and
+        // the rest of the prompt is unchanged.
+        let auth_end_marker = "never repeat it.\n\n";
+        let auth_end = without["structure"].find(auth_end_marker)
+            .expect("structure prompt carries the authority block") + auth_end_marker.len();
+        let (auth, rest) = without["structure"].split_at(auth_end);
+        let sp = stage_user_prompt(&conn, stage("structure"), None).await.unwrap();
+        assert_eq!(sp, format!("{auth}{block}\n\n{rest}"), "structure: authority block outermost, sections block prepended verbatim after it");
         // the LYRICS prompt additionally gains the TECHNICAL BRIEF — the spine
         // now supplies its section list even without a structure artifact
         let lp = stage_user_prompt(&conn, stage("lyrics"), None).await.unwrap();
