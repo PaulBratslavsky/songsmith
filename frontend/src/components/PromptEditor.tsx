@@ -6,13 +6,14 @@ import { FieldChat } from "./FieldChat";
 import { stripTags } from "../lib/music/chordpro";
 import { normLabel } from "../lib/sections";
 
-export type PromptData = { stylePrompt: string; taggedLyrics: string; instrumentalTags: string; notes: string };
+export type PromptData = { vocalPrompt: string; stylePrompt: string; taggedLyrics: string; instrumentalTags: string; notes: string };
 
 export function parsePrompt(content: string): PromptData {
   let data: any = null, text = "";
   try { const v = JSON.parse(content); text = v?.text ?? ""; data = v?.data ?? null; } catch { text = content; }
   const block = (re: RegExp) => { const m = text.match(re); return m ? m[1].trim() : ""; };
   return {
+    vocalPrompt: data?.vocalPrompt ?? block(/##?\s*VOCAL PROMPT\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
     stylePrompt: data?.stylePrompt ?? data?.style_prompt ?? block(/##?\s*STYLE PROMPT\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
     taggedLyrics: data?.taggedLyrics ?? data?.tagged_lyrics ?? block(/##?\s*TAGGED LYRICS\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
     instrumentalTags: data?.instrumentalTags ?? block(/##?\s*INSTRUMENTAL TAGS\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
@@ -22,6 +23,7 @@ export function parsePrompt(content: string): PromptData {
 
 export function promptToMarkdown(d: PromptData): string {
   return [
+    ...(d.vocalPrompt ? ["## VOCAL PROMPT", d.vocalPrompt, ""] : []),
     "## STYLE PROMPT", d.stylePrompt, "",
     "## TAGGED LYRICS", d.taggedLyrics, "",
     ...(d.instrumentalTags ? ["## INSTRUMENTAL TAGS", d.instrumentalTags, ""] : []),
@@ -93,8 +95,30 @@ export function PromptEditor({
     <div className="col" style={{ gap: 12 }}>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-          <label style={{ margin: 0 }}>Style prompt <span className="faint">→ paste into the generator's STYLE box (genre, mood, instrumentation, vocal, mix, key, tempo · no chords)</span></label>
-          <FieldChat stageLabel="Generation Prompt" fieldLabel="style prompt" current={d.stylePrompt} onResult={(v) => set({ stylePrompt: v })} />
+          <label style={{ margin: 0 }}>Vocal prompt <span className="faint">the singer — texture, gender/register, delivery, mic/production, imperfections · pasted FIRST (the generator front-loads it)</span></label>
+          <FieldChat stageLabel="Generation Prompt" fieldLabel="vocal prompt" current={d.vocalPrompt} onResult={(v) => set({ vocalPrompt: v })} />
+        </div>
+        <textarea value={d.vocalPrompt} onChange={(e) => set({ vocalPrompt: e.target.value })} placeholder="e.g. breathy female alto, whisper-sung intimate delivery, dry close-mic, occasional voice cracks, no autotune" style={{ width: "100%", minHeight: 40 }} />
+      </div>
+      <div>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
+          <label style={{ margin: 0 }}>Style prompt <span className="faint">the sonic world — genre, mood, instrumentation, mix, key, tempo · no chords, no vocal (that's above)</span></label>
+          <div className="row" style={{ gap: 6, alignItems: "center" }}>
+            {(() => {
+              const combined = [d.vocalPrompt, d.stylePrompt].map((s) => s.trim()).filter(Boolean).join(", ");
+              const over = combined.length > 1000;
+              return (
+                <button
+                  className={"sm" + (over ? "" : " ghost")}
+                  title={over ? "over the 1,000-character style-box limit (v4.5+) — trim before pasting" : "copy vocal + style combined, vocal first — the exact STYLE box paste"}
+                  onClick={() => navigator.clipboard.writeText(combined)}
+                >
+                  ⧉ Copy STYLE box {over ? `(${combined.length}/1000 ⚠)` : `(${combined.length}/1000)`}
+                </button>
+              );
+            })()}
+            <FieldChat stageLabel="Generation Prompt" fieldLabel="style prompt" current={d.stylePrompt} onResult={(v) => set({ stylePrompt: v })} />
+          </div>
         </div>
         <textarea value={d.stylePrompt} onChange={(e) => set({ stylePrompt: e.target.value })} style={{ width: "100%", minHeight: 50 }} />
       </div>

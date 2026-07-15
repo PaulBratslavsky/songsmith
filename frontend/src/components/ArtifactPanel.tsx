@@ -42,6 +42,12 @@ function StructuredView({ data }: { data: any }) {
       )}
       {data.stylePrompt && (
         <div>
+          {data.vocalPrompt && (
+            <>
+              <label>Vocal prompt</label>
+              <div>{data.vocalPrompt}</div>
+            </>
+          )}
           <label>Style prompt</label>
           <div>{data.stylePrompt}</div>
           {data.taggedLyrics && (
