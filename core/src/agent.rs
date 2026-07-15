@@ -357,6 +357,24 @@ async fn spine_sections_block(conn: &Connection, song_id: &str) -> Result<String
 /// when it exists, the lyrics-stage TECHNICAL BRIEF, and the producer's seed.
 /// Factored out of `run_stage` so tests can assert the exact prompt without a
 /// Claude call.
+/// The stale-key override for STRUCTURE runs. The song's key/tempo are producer
+/// facts, but earlier-stage texts generated under an OLD key still name it —
+/// and the model trusted that context over the system prompt's one-liner
+/// (user-hit: picker F# minor, regenerated keyNote still said "A minor is
+/// already set"). Same medicine as the chords stage's key directive: an
+/// explicit, adjacent, stale-calling instruction in the user prompt.
+fn key_authority_block(song: &Song) -> String {
+    format!(
+        "KEY/TEMPO AUTHORITY: this song is {root} {mode} at {bpm} BPM — set by the producer and \
+NOT yours to change. Your keyNote/tempoNote must describe EXACTLY {root} {mode} and {bpm} BPM. \
+If ANY earlier stage's text names a different key or tempo, that text is STALE — ignore it and \
+never repeat it.\n\n",
+        root = song.key_root,
+        mode = song.key_mode,
+        bpm = song.bpm,
+    )
+}
+
 pub(crate) async fn stage_user_prompt(conn: &Connection, stage: &Stage, user_input: Option<&str>) -> Result<String> {
     let sections = spine_sections_block(conn, &stage.song_id).await?;
     let prior = gather_prior_context(conn, &stage.song_id, stage.ordinal).await?;
@@ -365,7 +383,13 @@ pub(crate) async fn stage_user_prompt(conn: &Connection, stage: &Stage, user_inp
     // Empty stage → later content is the source of truth (derive). Regeneration
     // → later content is reference only (see LATER_STAGES_REGEN_BANNER).
     let regenerating = db::current_artifact(conn, &stage.id).await?.is_some();
-    Ok(build_user_prompt(&stage.r#type, &sections, &prior, &later, &tech_brief, user_input, regenerating))
+    let mut p = build_user_prompt(&stage.r#type, &sections, &prior, &later, &tech_brief, user_input, regenerating);
+    if stage.r#type == "structure" {
+        if let Some(song) = db::get_song(conn, &stage.song_id).await? {
+            p = format!("{}{}", key_authority_block(&song), p);
+        }
+    }
+    Ok(p)
 }
 
 fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> String {
@@ -2226,6 +2250,31 @@ mod tests {
         assert_eq!(header_label("[synth bass enters, syncopated with kick]"), None);
         assert_eq!(header_label("[bass and pads fade out]"), None);
         assert_eq!(header_label("[final kick drum hit]"), None);
+    }
+
+    /// Structure prompts carry the KEY/TEMPO AUTHORITY block calling stale
+    /// keys out (user-hit: regenerated keyNote still said "A minor" after the
+    /// producer set F# minor — the model trusted stale stage text).
+    #[tokio::test]
+    async fn structure_prompt_carries_key_authority_block() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Key Authority").await.unwrap();
+        db::update_song_key(&conn, &song.id, "F#", "minor", 109).await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+
+        let structure = stages.iter().find(|s| s.r#type == "structure").unwrap();
+        let sp = stage_user_prompt(&conn, structure, None).await.unwrap();
+        assert!(sp.contains("KEY/TEMPO AUTHORITY: this song is F# minor at 109 BPM"), "got: {sp}");
+        assert!(sp.contains("STALE"), "must call stale keys out");
+
+        // other stages don't get the block (their key handling is field-level)
+        let concept = stages.iter().find(|s| s.r#type == "concept").unwrap();
+        let cp = stage_user_prompt(&conn, concept, None).await.unwrap();
+        assert!(!cp.contains("KEY/TEMPO AUTHORITY"));
     }
 
     /// Advance stops at a done-but-STALE stage (user-reported: after generating
