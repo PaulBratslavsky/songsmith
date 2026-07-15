@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { NOTE_NAMES } from "../music/theory";
 import { playChord } from "../music/synth";
-import { diagramSvg, chartSvg, downloadSvg } from "../music/diagrams";
+import { diagramSvg, chartSvg, downloadSvg, pianoVoicedSvg } from "../music/diagrams";
+import { padChordSvg } from "../music/pads";
 import { QUALITY_OPTIONS, guitarFrets, guitarCount, chordPcsIdx, voicedMidis, voicedNotes, chordMidisByName } from "../music/engineAdapter";
 import type { ChordQuality } from "../lib/music/types";
 import { CircleOfFifths } from "./CircleOfFifths";
@@ -12,24 +13,12 @@ import { GuitarView } from "./GuitarView";
 const labelFor = (q: ChordQuality) => QUALITY_OPTIONS.find(([, e]) => e === q)?.[0] ?? q;
 const suffix = (q: ChordQuality) => { const l = labelFor(q); return l === "maj" ? "" : l; };
 
-function MiniPiano({ pcs }: { pcs: number[] }) {
-  const set = new Set(pcs);
-  const whites = [0, 2, 4, 5, 7, 9, 11];
-  const blacks: Record<number, number> = { 1: 0, 3: 1, 6: 3, 8: 4, 10: 5 };
-  return (
-    <div style={{ position: "relative", display: "flex", height: 60 }}>
-      {whites.map((pc) => (<div key={pc} style={{ width: 22, height: 60, border: "1px solid var(--line)", background: set.has(pc) ? "var(--accent)" : "var(--paper-2)" }} />))}
-      {Object.keys(blacks).map((k) => { const pc = Number(k); return <div key={pc} style={{ position: "absolute", left: (blacks[pc] + 1) * 22 - 6, top: 0, width: 12, height: 38, background: set.has(pc) ? "var(--accent-dim)" : "#000", border: "1px solid var(--line)" }} />; })}
-    </div>
-  );
-}
-
 export function ChordBuilder() {
   const [root, setRoot] = useState(0);
   const [quality, setQuality] = useState<ChordQuality>("maj");
   const [prog, setProg] = useState<string[]>([]);
   const [name, setName] = useState("");
-  const [view, setView] = useState<"guitar" | "piano">("guitar");
+  const [view, setView] = useState<"guitar" | "piano" | "ableton">("guitar");
   const [vIdx, setVIdx] = useState(0);
   const [inversion, setInversion] = useState(0);
   const qc = useQueryClient();
@@ -69,6 +58,7 @@ export function ChordBuilder() {
             <div className="row" style={{ gap: 4 }}>
               <button className={"sm" + (view === "guitar" ? " primary" : "")} onClick={() => setView("guitar")}>Guitar</button>
               <button className={"sm" + (view === "piano" ? " primary" : "")} onClick={() => setView("piano")}>Piano</button>
+              <button className={"sm" + (view === "ableton" ? " primary" : "")} onClick={() => setView("ableton")}>Ableton</button>
             </div>
           </div>
 
@@ -92,7 +82,15 @@ export function ChordBuilder() {
                   <GuitarView frets={shape.frets} />
                 </>
               ) : <span className="faint">(no guitar shape for this chord — see Piano)</span>
-            ) : <MiniPiano pcs={pcs} />}
+            ) : view === "piano" ? (
+              // the VOICED piano — the drawn keys follow the inversion (the old
+              // MiniPiano drew bare pitch classes, so ‹ › changed nothing)
+              <div dangerouslySetInnerHTML={{ __html: pianoVoicedSvg(voicedMidis(root, quality, inversion), built) }} />
+            ) : (
+              padChordSvg(built, 26, inversion)
+                ? <div dangerouslySetInnerHTML={{ __html: padChordSvg(built, 26, inversion)! }} />
+                : <span className="faint">(no pad shape for this chord)</span>
+            )}
           </div>
           <div className="faint">{pcs.map((pc) => NOTE_NAMES[pc]).join(" · ")}</div>
         </div>
