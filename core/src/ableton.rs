@@ -332,11 +332,14 @@ pub async fn build_song_for(conn: &Connection, song_id: &str, progress: impl Fn(
     if sections.is_empty() {
         return Ok("No sections found — run the Structure stage first.".into());
     }
-    let profile = db::get_preset(conn, &song.style_preset_id).await.ok().flatten()
-        .map(|p| crate::midi::profile_for_genre(&p.genre))
-        .unwrap_or(&crate::midi::POP_DEFAULT);
+    // stored per-preset profile wins; genre-keyword mapping is the fallback
+    let preset = db::get_preset(conn, &song.style_preset_id).await.ok().flatten();
+    let profile = preset
+        .as_ref()
+        .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
+        .unwrap_or_else(|| *preset.as_ref().map(|p| crate::midi::profile_for_genre(&p.genre)).unwrap_or(&crate::midi::POP_DEFAULT));
     let bpm = song.bpm;
-    tokio::task::spawn_blocking(move || build_song(bpm, &sections, profile, &progress)).await?
+    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &profile, &progress)).await?
 }
 
 #[cfg(test)]

@@ -96,6 +96,8 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE song ADD COLUMN voicings TEXT NOT NULL DEFAULT '{}'", ()).await;
     let _ = conn.execute("ALTER TABLE song ADD COLUMN intent TEXT NOT NULL DEFAULT ''", ()).await;
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN lyric_exemplars TEXT NOT NULL DEFAULT ''", ()).await;
+    // per-preset Ableton arrangement profile JSON (Phase 2; '' = keyword fallback)
+    let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN arrangement TEXT NOT NULL DEFAULT ''", ()).await;
     let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
     // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
     // songs that predate it — make room by shifting Lyrics/Prompt, then insert.
@@ -405,12 +407,12 @@ fn i(row: &libsql::Row, i: i32) -> i64 {
 // ---- Style presets ---------------------------------------------------------
 
 const PRESET_COLS: &str =
-    "id, name, genre, mood, influences, key_tempo_feel, vocal_range, themes, lyric_exemplars, created_at, updated_at";
+    "id, name, genre, mood, influences, key_tempo_feel, vocal_range, themes, lyric_exemplars, arrangement, created_at, updated_at";
 fn map_preset(r: &libsql::Row) -> StylePreset {
     StylePreset {
         id: s(r, 0), name: s(r, 1), genre: s(r, 2), mood: s(r, 3), influences: s(r, 4),
         key_tempo_feel: s(r, 5), vocal_range: s(r, 6), themes: s(r, 7), lyric_exemplars: s(r, 8),
-        created_at: s(r, 9), updated_at: s(r, 10),
+        arrangement: s(r, 9), created_at: s(r, 10), updated_at: s(r, 11),
     }
 }
 
@@ -434,6 +436,17 @@ pub async fn create_preset(conn: &Connection, p: StyleInput) -> Result<StylePres
     ).await?;
     get_preset(conn, &id).await?.ok_or_else(|| anyhow!("preset not found after create"))
 }
+/// Store a preset's Ableton arrangement profile JSON ('' clears it back to
+/// the genre-keyword fallback). Kept OUT of StyleInput so the classic 8-field
+/// create/update paths (and every existing caller) stay untouched.
+pub async fn set_preset_arrangement(conn: &Connection, id: &str, arrangement: &str) -> Result<StylePreset> {
+    conn.execute(
+        "UPDATE style_preset SET arrangement=?2, updated_at=?3 WHERE id=?1",
+        params![id, arrangement, now()],
+    ).await?;
+    get_preset(conn, id).await?.ok_or_else(|| anyhow!("preset not found after update"))
+}
+
 pub async fn update_preset(conn: &Connection, id: &str, p: StyleInput) -> Result<StylePreset> {
     conn.execute(
         "UPDATE style_preset SET name=?2, genre=?3, mood=?4, influences=?5, key_tempo_feel=?6, vocal_range=?7, themes=?8, lyric_exemplars=?9, updated_at=?10 WHERE id=?1",

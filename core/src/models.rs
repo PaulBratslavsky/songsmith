@@ -38,6 +38,10 @@ pub struct StylePreset {
     /// songs. `#[serde(default)]` keeps pre-upgrade payloads deserializable.
     #[serde(default)]
     pub lyric_exemplars: String,
+    /// Ableton arrangement profile JSON (midi::profile_from_json shape);
+    /// "" = use the genre-keyword fallback mapping.
+    #[serde(default)]
+    pub arrangement: String,
     pub created_at: String,
     pub updated_at: String,
 }

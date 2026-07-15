@@ -104,6 +104,48 @@ pub static FOLK_ACOUSTIC: ArrangementProfile = ArrangementProfile { name: "folk 
 pub static AMBIENT_WASH: ArrangementProfile = ArrangementProfile { name: "ambient wash", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.7 };
 pub static POP_DEFAULT: ArrangementProfile = ArrangementProfile { name: "pop default", bass: BassPattern::Walking, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0 };
 
+/// Parse a preset's stored arrangement JSON into a profile (Phase 2 — the
+/// style-skill-generated, user-editable per-preset profile). Shape:
+/// `{"bass":"half_time_808","sub_bass":true,"chords":"held","pad":true,
+///   "arp":"off","sparse_melody":true,"vel_scale":0.85}`
+/// Unknown/missing fields fall back to the pop default's value; a string that
+/// isn't a JSON object (or is empty) returns None → keyword fallback.
+pub fn profile_from_json(s: &str) -> Option<ArrangementProfile> {
+    let v: serde_json::Value = serde_json::from_str(s.trim()).ok()?;
+    let o = v.as_object()?;
+    let d = &POP_DEFAULT;
+    let bass = match o.get("bass").and_then(|x| x.as_str()).unwrap_or("") {
+        "sustain" => BassPattern::Sustain,
+        "half_time_808" => BassPattern::HalfTime808,
+        "eighth_drive" => BassPattern::EighthDrive,
+        "walking" => BassPattern::Walking,
+        "offbeat_sync" => BassPattern::OffbeatSync,
+        _ => d.bass,
+    };
+    let chords = match o.get("chords").and_then(|x| x.as_str()).unwrap_or("") {
+        "held" => ChordStyle::Held,
+        "stabs" => ChordStyle::Stabs,
+        "pulse_8ths" => ChordStyle::Pulse8ths,
+        _ => d.chords,
+    };
+    let arp = match o.get("arp").and_then(|x| x.as_str()).unwrap_or("") {
+        "off" => ArpRate::Off,
+        "eighths" => ArpRate::Eighths,
+        "sixteenths" => ArpRate::Sixteenths,
+        _ => d.arp,
+    };
+    Some(ArrangementProfile {
+        name: "preset arrangement",
+        bass,
+        sub_bass: o.get("sub_bass").and_then(|x| x.as_bool()).unwrap_or(d.sub_bass),
+        chords,
+        pad: o.get("pad").and_then(|x| x.as_bool()).unwrap_or(d.pad),
+        arp,
+        sparse_melody: o.get("sparse_melody").and_then(|x| x.as_bool()).unwrap_or(d.sparse_melody),
+        vel_scale: o.get("vel_scale").and_then(|x| x.as_f64()).unwrap_or(d.vel_scale).clamp(0.4, 1.2),
+    })
+}
+
 /// Fallback style mapping: preset genre text → builtin profile. Ordered by
 /// specificity — "synthwave" must beat the bare "wave" family, and "witch
 /// house" / "darkwave" must land on the dark profile before the "house"
@@ -313,6 +355,26 @@ mod tests {
         // ambient wash scales velocities down
         let wash = part_notes("Chords", &chords, 2, &AMBIENT_WASH);
         assert!(wash.iter().all(|n| n["velocity"].as_i64().unwrap() <= 60));
+    }
+
+    /// Preset-stored arrangement JSON: valid JSON parses (with defaults for
+    /// missing fields), garbage/empty falls back to None (keyword mapping).
+    #[test]
+    fn profile_from_json_parses_and_falls_back() {
+        let p = profile_from_json(r#"{"bass":"half_time_808","sub_bass":true,"chords":"held","pad":true,"arp":"off","sparse_melody":true,"vel_scale":0.85}"#).unwrap();
+        assert_eq!(p.bass, BassPattern::HalfTime808);
+        assert!(p.sub_bass);
+        assert_eq!(p.arp, ArpRate::Off);
+        assert!((p.vel_scale - 0.85).abs() < 1e-9);
+        // partial JSON: missing fields take the pop default's values
+        let q = profile_from_json(r#"{"bass":"eighth_drive"}"#).unwrap();
+        assert_eq!(q.bass, BassPattern::EighthDrive);
+        assert_eq!(q.chords, POP_DEFAULT.chords);
+        // vel_scale clamps into the sane range
+        assert!((profile_from_json(r#"{"vel_scale": 9.0}"#).unwrap().vel_scale - 1.2).abs() < 1e-9);
+        // empty / non-JSON → None (keyword fallback)
+        assert!(profile_from_json("").is_none());
+        assert!(profile_from_json("not json").is_none());
     }
 
     /// The keyword fallback mapping — incl. the exact bug the old bool had:

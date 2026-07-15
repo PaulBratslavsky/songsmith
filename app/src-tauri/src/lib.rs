@@ -46,6 +46,18 @@ async fn update_style_preset(state: State<'_, AppState>, id: String, input: Styl
     db::update_preset(&state.conn, &id, input).await.map_err(e2s)
 }
 
+/// Store a preset's Ableton arrangement profile JSON ("" = keyword fallback).
+#[tauri::command]
+async fn set_preset_arrangement(state: State<'_, AppState>, id: String, arrangement: String) -> R<StylePreset> {
+    db::set_preset_arrangement(&state.conn, &id, &arrangement).await.map_err(e2s)
+}
+
+/// Claude maps the preset's style onto the arrangement profile and stores it.
+#[tauri::command]
+async fn generate_preset_arrangement(state: State<'_, AppState>, id: String) -> R<StylePreset> {
+    song_core::agent::generate_preset_arrangement(&state.conn, &db::get_settings(&state.conn).await.map_err(e2s)?, &id).await.map_err(e2s)
+}
+
 /// Auto-generate a style preset from a name/seed. Streams `preset_token` events.
 #[tauri::command]
 async fn generate_style_preset(app: tauri::AppHandle, state: State<'_, AppState>, name: String, notes: Option<String>) -> R<StyleInput> {
@@ -1032,6 +1044,8 @@ pub fn run() {
             get_style_preset,
             create_style_preset,
             update_style_preset,
+            set_preset_arrangement,
+            generate_preset_arrangement,
             generate_style_preset,
             create_song,
             list_songs,

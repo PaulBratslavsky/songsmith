@@ -581,8 +581,10 @@ type MockHandlers = {
 const handlers: MockHandlers = {
   list_style_presets: () => db.presets,
   get_style_preset: (a) => db.presets.find((p: Any) => p.id === a.id) ?? null,
-  create_style_preset: (a) => { const p = { id: uid(), ...a.input, created_at: now(), updated_at: now() }; db.presets.push(p); return p; },
+  create_style_preset: (a) => { const p = { id: uid(), arrangement: "", ...a.input, created_at: now(), updated_at: now() }; db.presets.push(p); return p; },
   update_style_preset: (a) => { const p = db.presets.find((x: Any) => x.id === a.id); Object.assign(p, a.input, { updated_at: now() }); return p; },
+  set_preset_arrangement: (a) => { const p = db.presets.find((x: Any) => x.id === a.id); p.arrangement = a.arrangement; p.updated_at = now(); return p; },
+  generate_preset_arrangement: (a) => { const p = db.presets.find((x: Any) => x.id === a.id); p.arrangement = JSON.stringify({ bass: "half_time_808", sub_bass: true, chords: "held", pad: true, arp: "off", sparse_melody: true, vel_scale: 0.85 }); p.updated_at = now(); return p; },
   // lyric_exemplars stays empty on generate — the user's taste lever, never invented
   generate_style_preset: (a) => ({ name: a.name, genre: "(mock) genre", mood: "moody", influences: "describe the sound",
     key_tempo_feel: "A minor, 120 BPM", vocal_range: "mid", themes: `themes for ${a.name}`, lyric_exemplars: "" }),
@@ -867,7 +869,7 @@ export async function mockCall<C extends keyof CommandMap>(cmd: C, a: CommandArg
 }
 
 const MOCK_TOOLS = [
-  "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset",
+  "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset","set_preset_arrangement","generate_preset_arrangement",
   "create_song","create_song_from_lyrics","import_lyrics","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
   "list_sections","create_section","update_section","delete_section","reorder_sections",
   "get_stage","run_stage","approve_stage","advance_stage",

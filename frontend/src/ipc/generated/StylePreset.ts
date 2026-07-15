@@ -6,4 +6,9 @@ export type StylePreset = { id: string, name: string, genre: string, mood: strin
  * diction/line-length calibration for the Lyricist. Never copied into
  * songs. `#[serde(default)]` keeps pre-upgrade payloads deserializable.
  */
-lyric_exemplars: string, created_at: string, updated_at: string, };
+lyric_exemplars: string, 
+/**
+ * Ableton arrangement profile JSON (midi::profile_from_json shape);
+ * "" = use the genre-keyword fallback mapping.
+ */
+arrangement: string, created_at: string, updated_at: string, };

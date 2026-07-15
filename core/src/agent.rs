@@ -236,6 +236,35 @@ where
     })
 }
 
+/// Generate a preset's Ableton ARRANGEMENT PROFILE (Phase 2 of style-aware
+/// builds): Claude maps the preset's style fields onto the deterministic
+/// profile vocabulary (midi::profile_from_json's shape), the result is
+/// validated by actually parsing it, and stored on the preset. The build
+/// prefers this over the genre-keyword fallback.
+pub async fn generate_preset_arrangement(conn: &Connection, settings: &Settings, preset_id: &str) -> Result<StylePreset> {
+    let preset = db::get_preset(conn, preset_id).await?.ok_or_else(|| anyhow!("preset not found"))?;
+    let system = "You map a music style preset onto MIDI arrangement parameters for an Ableton song stub. \
+Pick the values that make a producer nod — the bass figure and density are what make a style read as itself. \
+Respond with ONLY a single fenced ```json block of exactly this shape (these exact keys and enum spellings):\n\
+{\"bass\":\"sustain|half_time_808|eighth_drive|walking|offbeat_sync\",\"sub_bass\":true|false,\
+\"chords\":\"held|stabs|pulse_8ths\",\"pad\":true|false,\"arp\":\"off|eighths|sixteenths\",\
+\"sparse_melody\":true|false,\"vel_scale\":0.4-1.2}\n\
+Guidance: half_time_808 + sub_bass for trap/witch-house/darkwave weight; eighth_drive for synthwave/rock momentum; \
+offbeat_sync for house/funk bounce; sustain for folk/ambient. pad=true for washed/atmospheric styles. \
+arp sixteenths only when the style genuinely arpeggiates. vel_scale below 0.9 for soft/hazy mixes, 1.0+ for punchy.";
+    let user = format!(
+        "STYLE PRESET\nName: {}\nGenre: {}\nMood: {}\nInfluences: {}\nKey/tempo feel: {}\n\nProduce the arrangement JSON now.",
+        preset.name, preset.genre, preset.mood, preset.influences, preset.key_tempo_feel
+    );
+    let text = call_claude(settings, system, &user, &|_: String| {}, None).await?;
+    let d = extract_json(&text).ok_or_else(|| anyhow!("the model did not return arrangement JSON. Raw output:\n{}", text.trim()))?;
+    let json = d.to_string();
+    if crate::midi::profile_from_json(&json).is_none() {
+        return Err(anyhow!("the model's arrangement JSON did not validate: {json}"));
+    }
+    db::set_preset_arrangement(conn, preset_id, &json).await
+}
+
 /// A stage artifact's context body. Prefer rendering the structured `data` over
 /// trusting the stored `text`: Claude-originated saves historically wrote
 /// commentary into `text` while the real content lived in `data` — feeding a
@@ -2486,6 +2515,7 @@ mod tests {
             id: "p".into(), name: "P".into(), genre: "".into(), mood: "".into(), influences: "".into(),
             key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(),
             lyric_exemplars: "I left the porch light on again\nNobody's coming home".into(),
+            arrangement: String::new(),
             created_at: String::new(), updated_at: String::new(),
         };
         let song = Song {
@@ -2520,7 +2550,7 @@ mod tests {
         };
         let preset = StylePreset {
             id: "p".into(), name: "P".into(), genre: "".into(), mood: "".into(), influences: "".into(),
-            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(), arrangement: String::new(),
             created_at: String::new(), updated_at: String::new(),
         };
         let mut song = Song {

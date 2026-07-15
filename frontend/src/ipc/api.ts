@@ -33,6 +33,8 @@ export type CommandMap = {
   get_style_preset: { args: { id: string }; result: StylePreset | null };
   create_style_preset: { args: { input: StyleInput }; result: StylePreset };
   update_style_preset: { args: { id: string; input: StyleInput }; result: StylePreset };
+  set_preset_arrangement: { args: { id: string; arrangement: string }; result: StylePreset };
+  generate_preset_arrangement: { args: { id: string }; result: StylePreset };
   generate_style_preset: { args: { name: string; notes: string | null }; result: StyleInput };
   // songs & stages
   create_song: { args: { stylePresetId: string; title: string; intent: string | null }; result: Song };
@@ -208,6 +210,8 @@ export const api = {
   getStylePreset: (id: string) => call("get_style_preset", { id }),
   createStylePreset: (input: StyleInput) => call("create_style_preset", { input }),
   updateStylePreset: (id: string, input: StyleInput) => call("update_style_preset", { id, input }),
+  setPresetArrangement: (id: string, arrangement: string) => call("set_preset_arrangement", { id, arrangement }),
+  generatePresetArrangement: (id: string) => call("generate_preset_arrangement", { id }),
   generateStylePreset: (name: string, notes?: string) =>
     call("generate_style_preset", { name, notes: notes ?? null }),
 
