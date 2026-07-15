@@ -4,7 +4,7 @@ import { api } from "../ipc/api";
 import type { Section as SpineSection } from "../ipc/generated";
 import { NOTE_NAMES, pitchClassOf } from "../music/theory";
 import { FieldChat } from "./FieldChat";
-import { matchBySpineRow, normLabel } from "../lib/sections";
+import { matchBySpineRow, normLabel, spineSnapshot } from "../lib/sections";
 
 export type Section = { section_id?: string; type?: string; label: string; bars: number; role: string; frozen?: boolean };
 /** Editor state. root/mode/bpm are SONG facts (docs/SONG-FACTS.md) — the
@@ -31,12 +31,12 @@ export function parseStructure(content: string, song: { keyRoot: string; keyMode
   };
 }
 
-/** Phase 2 (docs/SECTION-SPINE-SPEC.md): the section LIST shown in the editor
- *  comes from the SPINE when the song has rows — label/type/bars/role in spine
- *  order, frozen flags carried over from the artifact entry (matched by
- *  section_id, label fallback); artifact-only sections are appended so nothing
- *  disappears. Since Phase 3 the SAVE path writes the spine (D1: this editor
- *  IS the spine editor) and the artifact entries carry section_id + label. */
+/** The section LIST shown in the editor comes from the SPINE when the song
+ *  has rows — label/type/bars/role in spine order (docs/SECTION-SPINE-SPEC.md;
+ *  legacy frozen flags tolerated on artifact entries, matched by section_id
+ *  with label fallback); artifact-only sections are appended so nothing
+ *  disappears. The SAVE path writes the spine (D1: this editor IS the spine
+ *  editor); since Phase 4 the artifact keeps only the prose notes. */
 export function spineSeededStructure(base: StructureData, spine: readonly SpineSection[]): StructureData {
   if (!spine.length) return base;
   const used = new Set<Section>();
@@ -88,17 +88,18 @@ export function StructureEditor({
 
   const save = useMutation({
     mutationFn: async () => {
-      // Phase 3 (docs/SECTION-SPINE-SPEC.md, D1): this editor IS the spine
-      // editor — add/remove/reorder/rename/bars/role land on the `section`
-      // table first (rows matched by id keep their identity; removed rows are
-      // deleted — the user's authority), then the artifact save mirrors it.
+      // D1 (docs/SECTION-SPINE-SPEC.md): this editor IS the spine editor —
+      // add/remove/reorder/rename/bars/role land on the `section` table
+      // (rows matched by id keep their identity; removed rows are deleted —
+      // the user's authority). The artifact stores ONLY the prose notes
+      // (Phase 4): the spine IS the sections.
       const rows = spineSections ?? [];
+      const birthing = rows.length === 0 && d.sections.length > 0; // legacy/new song getting its first rows
       const keptIds = new Set(d.sections.map((s) => s.section_id).filter(Boolean));
       for (const r of rows) {
         if (!keptIds.has(r.id)) await api.deleteSection(r.id);
       }
       const orderedIds: string[] = [];
-      const withIds: Section[] = [];
       for (const s of d.sections) {
         const bars = Math.max(1, Number(s.bars) || 8);
         const row = rows.find((r) => r.id === s.section_id);
@@ -107,27 +108,32 @@ export function StructureEditor({
             await api.updateSection(row.id, s.label, s.type ?? "", bars, s.role);
           }
           orderedIds.push(row.id);
-          withIds.push({ ...s, bars });
         } else {
           const created = await api.createSection(songId, s.label, s.type ?? "", bars, s.role);
           orderedIds.push(created.id);
-          withIds.push({ ...s, bars, section_id: created.id });
         }
       }
       if (orderedIds.length) await api.reorderSections(songId, orderedIds);
-      // persist `frozen` only when set, so unfrozen sections stay as before;
-      // every entry carries its spine `section_id` (labels stay for Phase-3
-      // compat — readers still label-fallback until Phase 4)
-      const sections = withIds.map((s) => ({ section_id: s.section_id, type: s.type, label: s.label, bars: s.bars, role: s.role, ...(s.frozen ? { frozen: true } : {}) }));
-      // The artifact carries NO key/bpm (docs/SONG-FACTS.md) — only the prose
-      // notes and the section map. Saving also migrates legacy embedded copies away.
-      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: structureToMarkdown(d), data: { keyNote: d.keyNote, tempoNote: d.tempoNote, sections } }));
+      // spine BIRTH: union in sections that exist only in other stages'
+      // artifacts (the lyrics-only Bridge case) like the startup migration
+      if (birthing) await api.unionSpineSections(songId);
+      const fresh = await api.listSections(songId);
+      const freshSections: Section[] = fresh.map((r) => ({ section_id: r.id, type: r.type, label: r.label, bars: Number(r.bars), role: r.role }));
+      // The artifact carries NO key/bpm (docs/SONG-FACTS.md) and NO section
+      // copy (the SPINE owns them) — just the notes + the snapshot; the text
+      // renders the section map from the post-save spine.
+      await api.saveArtifact(songId, stageId, kind, JSON.stringify({
+        kind,
+        text: structureToMarkdown({ ...d, sections: freshSections }),
+        data: { keyNote: d.keyNote, tempoNote: d.tempoNote },
+        spine_snapshot: spineSnapshot(freshSections),
+      }));
       // The SONG owns key/tempo — the pickers write it song-level, the single
       // source the Chords palette, Sheet, prompts, and Ableton all read.
       await api.updateSongKey(songId, d.root, d.mode, d.bpm);
-      return withIds;
+      return freshSections;
     },
-    onSuccess: (withIds) => { setD((c) => ({ ...c, sections: withIds })); setSaved("Saved — key/tempo synced to the song."); onChanged(); },
+    onSuccess: (freshSections) => { setD((c) => ({ ...c, sections: freshSections })); setSaved("Saved — key/tempo synced to the song."); onChanged(); },
   });
 
   return (
@@ -142,14 +148,12 @@ export function StructureEditor({
 
       <div>
         <label>Sections</label>
-        <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>🔒 Locked sections are kept as-is when you regenerate this stage.</p>
+        <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>This is the song's canonical section list — Chords, Lyrics, the Composer, and Ableton all read it. Saving applies your changes everywhere.</p>
         <div className="col" style={{ gap: 8 }}>
           {d.sections.map((s, i) => (
-            <div key={i} className={s.frozen ? "frozen" : ""} style={{ border: "1px solid var(--line)", borderRadius: 2, padding: 8 }}>
+            <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 2, padding: 8 }}>
               <div className="row" style={{ gap: 6, alignItems: "center" }}>
-                <button className={"sm ghost" + (s.frozen ? " primary" : "")} title={s.frozen ? "unlock — let regeneration rewrite this section" : "lock — keep this section as-is when you regenerate"} onClick={() => setSec(i, { frozen: !s.frozen })}>{s.frozen ? "🔒" : "🔓"}</button>
                 <input value={s.label} onChange={(e) => setSec(i, { label: e.target.value })} placeholder="Verse 1" style={{ flex: 1 }} />
-                {s.frozen && <span className="badge done" title="locked — kept as-is when you regenerate">locked</span>}
                 <input type="number" value={s.bars} onChange={(e) => setSec(i, { bars: Number(e.target.value) })} title="bars" style={{ width: 60 }} />
                 <button className="sm ghost" title="up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>
                 <button className="sm ghost" title="down" disabled={i === d.sections.length - 1} onClick={() => move(i, 1)}>↓</button>

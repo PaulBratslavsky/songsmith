@@ -25,8 +25,9 @@ regen used to reset the user's key pickers; the enforce splice patched it; this 
    prose in notes. The `enforce_song_key_tempo` splice remains as a transitional guard for models
    that still emit key/bpm, but the schema no longer expects them.
 
-## Explicitly deferred
-- **The section spine** (labels/order/bars) is still duplicated across structure/chords/lyric_spec/
-  lyrics data and reconciled by back-fills (import_lyrics, composer export). Moving it to a
-  song-level `sections` entity follows the same principle but is a larger refactor touching every
-  editor + the Composer + freeze. Decide separately.
+## Explicitly deferred → since completed
+- **The section spine** (labels/order/bars) was the deferred item here — DONE, see
+  docs/SECTION-SPINE-SPEC.md (STATUS: COMPLETE, built 2026-07-14). Sections now live in the
+  song-level `section` table exactly per this file's principle: stage data references them by
+  `section_id`, the structure artifact keeps only its prose notes, and every reconciliation
+  (freeze merge, imports, Composer export, Ableton, prompts) goes through the spine.

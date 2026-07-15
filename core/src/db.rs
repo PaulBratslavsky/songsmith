@@ -240,19 +240,18 @@ async fn migrate_song_sections(conn: &Connection, song_id: &str) -> Result<()> {
     }
 
     // 3) union in sections that exist only in other stages, in first-seen order
-    //    (covers the "Bridge only in lyrics" case); empty labels can't be keyed
+    //    (covers the "Bridge only in lyrics" case); empty labels can't be keyed.
+    //    `artifact_section_labels` is the shared union source — the mid-session
+    //    spine-birth union (spine::union_artifact_sections, Phase 4) reuses it.
     let mut known: std::collections::HashSet<String> =
         spine.iter().map(|e| norm_label(&e.label)).filter(|l| !l.is_empty()).collect();
-    for sa in &artifacts {
-        for sec in sections_of(sa) {
-            let label = section_label(sa.stage_type, &sec);
-            let norm = norm_label(&label);
-            if norm.is_empty() || known.contains(&norm) {
-                continue;
-            }
-            known.insert(norm);
-            spine.push(SpineEntry { label, r#type: String::new(), bars: 8, role: String::new() });
+    for label in artifact_section_labels(conn, song_id).await? {
+        let norm = norm_label(&label);
+        if norm.is_empty() || known.contains(&norm) {
+            continue;
         }
+        known.insert(norm);
+        spine.push(SpineEntry { label, r#type: String::new(), bars: 8, role: String::new() });
     }
     if spine.is_empty() {
         return Ok(()); // nothing section-shaped anywhere — nothing to migrate
@@ -313,6 +312,32 @@ async fn migrate_song_sections(conn: &Connection, song_id: &str) -> Result<()> {
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Every section LABEL carried by a song's CURRENT section-stage artifacts, in
+/// stage order (structure → chords → lyric_spec → lyrics) then entry order —
+/// the union source (spec §Migration step 2) shared by the startup migration
+/// and the mid-session spine-birth union (`spine::union_artifact_sections`).
+/// Non-JSON / non-section-shaped artifacts are skipped, same tolerance as the
+/// migration.
+pub(crate) async fn artifact_section_labels(conn: &Connection, song_id: &str) -> Result<Vec<String>> {
+    use crate::freeze::{section_keys, section_label};
+    let mut out = Vec::new();
+    for stage_type in SECTION_STAGES {
+        let mut rows = conn
+            .query("SELECT id FROM stage WHERE song_id = ?1 AND type = ?2", params![song_id, stage_type])
+            .await?;
+        let Some(r) = rows.next().await? else { continue };
+        let stage_id = s(&r, 0);
+        let Some(art) = current_artifact(conn, &stage_id).await? else { continue };
+        let Ok(content) = serde_json::from_str::<serde_json::Value>(&art.content) else { continue };
+        let (arr_key, _) = section_keys(stage_type);
+        let Some(arr) = content.get("data").and_then(|d| d.get(arr_key)).and_then(|v| v.as_array()) else { continue };
+        for sec in arr {
+            out.push(section_label(stage_type, sec));
+        }
+    }
+    Ok(out)
 }
 
 const SEED_SKILLS: &[(&str, &str, &str, &str)] = &[
@@ -679,6 +704,30 @@ pub async fn create_section(
     tx.commit().await?;
     get_section(conn, &id).await?.ok_or_else(|| anyhow!("section not found after create"))
 }
+/// Re-insert a spine row with a KNOWN id — the snapshot-based restore
+/// (docs/SECTION-SPINE-SPEC.md §Snapshots): a restored artifact's entries
+/// reference this exact id, so a freshly-minted one would not reattach them.
+/// Position is clamped into the current spine; later rows shift down. The
+/// form takes defaults (type ""/bars 8/role "") — the snapshot is light.
+pub(crate) async fn restore_section_row(conn: &Connection, id: &str, song_id: &str, position: i64, label: &str) -> Result<Section> {
+    let ts = now();
+    let end: i64 = {
+        let mut rows = conn
+            .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
+            .await?;
+        rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0)
+    };
+    let pos = position.clamp(0, end);
+    let tx = conn.transaction().await?;
+    tx.execute("UPDATE section SET position = position + 1 WHERE song_id = ?1 AND position >= ?2", params![song_id, pos]).await?;
+    tx.execute(
+        "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, '', 8, '', ?5, ?5)",
+        params![id, song_id, pos, label, ts],
+    ).await?;
+    tx.commit().await?;
+    get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found after restore"))
+}
 /// Update a section's FORM (label/type/bars/role). Order changes go through
 /// `reorder_sections`; identity (`id`) and `song_id` never change.
 pub async fn update_section(conn: &Connection, id: &str, label: &str, r#type: &str, bars: i64, role: &str) -> Result<Section> {
@@ -837,10 +886,8 @@ pub async fn list_artifact_revisions(conn: &Connection, stage_id: &str) -> Resul
     while let Some(r) = rows.next().await? { out.push(map_artifact(&r)); }
     Ok(out)
 }
-pub async fn revert_artifact(conn: &Connection, artifact_id: &str) -> Result<Artifact> {
-    let t = get_artifact(conn, artifact_id).await?.ok_or_else(|| anyhow!("artifact not found"))?;
-    save_artifact(conn, &t.song_id, t.stage_id.as_deref(), &t.kind, &t.content).await
-}
+// (revert lives in `spine::revert_artifact` / `freeze::revert_artifact_guarded`
+// since Phase 4 — both are snapshot-based; see docs/SECTION-SPINE-SPEC.md.)
 /// Name (or clear — `None`) a revision's label. Non-destructive metadata: the
 /// content journal is untouched; new revisions always start unlabeled (the
 /// explicit `save_artifact` column lists leave `label` NULL).

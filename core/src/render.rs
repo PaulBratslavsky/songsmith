@@ -65,12 +65,16 @@ pub(crate) fn structure_editor_text(d: &Value) -> String {
     } else if !tempo_note.is_empty() {
         lines.push(format!("**TEMPO NOTE:** {tempo_note}"));
     }
-    if !lines.is_empty() {
+    // Phase 4 (docs/SECTION-SPINE-SPEC.md): structure data no longer carries
+    // sections (the SPINE does) — bare notes-only data renders notes only.
+    // Spine-aware callers use `structure_spine_text`; legacy data that still
+    // embeds sections keeps its full SECTION MAP.
+    if let Some(arr) = d.get("sections").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("**SECTION MAP**".into());
         lines.push(String::new());
-    }
-    lines.push("**SECTION MAP**".into());
-    lines.push(String::new());
-    if let Some(arr) = d.get("sections").and_then(|v| v.as_array()) {
         for (i, sec) in arr.iter().enumerate() {
             let label = sec.get("label").and_then(|v| v.as_str())
                 .or_else(|| sec.get("type").and_then(|v| v.as_str())).unwrap_or("");
@@ -80,6 +84,21 @@ pub(crate) fn structure_editor_text(d: &Value) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// The Structure stage's `text` once its `data` is notes-only (Phase 4,
+/// docs/SECTION-SPINE-SPEC.md): the SECTION MAP comes from the SPINE. Legacy
+/// data that still embeds sections keeps rendering them unchanged.
+pub(crate) fn structure_spine_text(d: &Value, spine: &[Section]) -> String {
+    if d.get("sections").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
+        return structure_editor_text(d);
+    }
+    let mut with = if d.is_object() { d.clone() } else { serde_json::json!({}) };
+    with["sections"] = serde_json::json!(spine
+        .iter()
+        .map(|r| serde_json::json!({ "label": r.label, "bars": r.bars, "role": r.role }))
+        .collect::<Vec<Value>>());
+    structure_editor_text(&with)
 }
 
 /// Mirror of `LyricsEditor`'s save: `[label]\n<lines>` blocks, each line a

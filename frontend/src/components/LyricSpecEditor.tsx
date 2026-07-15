@@ -3,7 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import type { Section as SpineSection } from "../ipc/generated";
 import { FieldChat } from "./FieldChat";
-import { normLabel } from "../lib/sections";
+import { normLabel, spineSnapshot } from "../lib/sections";
 
 type Beat = { section_id?: string; section: string; beat: string; frozen?: boolean };
 export type Diction = "plain-spoken" | "balanced" | "literary";
@@ -99,7 +99,11 @@ export function LyricSpecEditor({
         const row = rows.find((r) => normLabel(r.label) === normLabel(b.section));
         return row ? { ...b, section_id: row.id } : b;
       });
-      return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text: specToMarkdown(d), data: { ...d, beats } }));
+      // spine songs embed the snapshot beside data (§Snapshots — parity with core writes)
+      return api.saveArtifact(songId, stageId, kind, JSON.stringify({
+        kind, text: specToMarkdown(d), data: { ...d, beats },
+        ...(rows.length ? { spine_snapshot: spineSnapshot(rows) } : {}),
+      }));
     },
     onSuccess: () => { setSaved("Saved — the Lyricist writes from this plan."); onChanged(); },
   });

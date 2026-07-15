@@ -252,6 +252,62 @@ pub async fn save_artifact_guarded(
                     .or_else(|| incoming.get(arr_key).is_some().then(|| incoming.clone()))
                     .unwrap_or(Value::Null);
 
+                // Phase 4 (docs/SECTION-SPINE-SPEC.md): once the song has a
+                // spine, Claude-originated saves are NORMALIZED onto it so
+                // chat-driven saves stay id-coherent. Non-structure: incoming
+                // label-keyed sections map to section_ids (create=NEVER —
+                // unmatched ones are dropped with a visible ⚠ line, like
+                // non-structure runs), THEN the frozen splice (id-first) runs,
+                // so a locked section can never be lost to the mapping.
+                // Structure: the spine owns the sections — the artifact keeps
+                // only {keyNote,tempoNote}; incoming sections are ignored with
+                // a ⚠ note (the spine is edited via the section tools / the
+                // Structure editor, or proposed by a structure RUN). Spineless
+                // songs keep the legacy path below byte-identical.
+                let spine = db::list_sections(conn, song_id).await?;
+                if !spine.is_empty() {
+                    let mut warns: Vec<String> = Vec::new();
+                    let final_data = if stage.r#type == "structure" {
+                        let merged = match (&prior_data, frozen) {
+                            (Some(pd), true) => merge_frozen_sections("structure", pd, &incoming_data),
+                            _ => incoming_data,
+                        };
+                        if merged.get("sections").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
+                            warns.push(
+                                "⚠ The sections in this save were not applied — this song's sections live on its section spine. Change them with the create/update/delete/reorder_sections tools (or the Structure editor); a Structure stage RUN may also propose them.".into(),
+                            );
+                        }
+                        json!({
+                            "keyNote": merged.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+                            "tempoNote": merged.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+                        })
+                    } else {
+                        let mut nd = incoming_data;
+                        crate::spine::attach_ids_non_structure(&stage.r#type, &mut nd, &spine, &mut warns);
+                        match (&prior_data, frozen) {
+                            (Some(pd), true) => merge_frozen_sections(&stage.r#type, pd, &nd),
+                            _ => nd,
+                        }
+                    };
+                    let mut text = if stage.r#type == "structure" {
+                        crate::render::structure_spine_text(&final_data, &spine)
+                    } else {
+                        render_stage_text(&stage.r#type, &final_data)
+                            .or_else(|| incoming.get("text").and_then(|t| t.as_str()).map(String::from))
+                            .unwrap_or_default()
+                    };
+                    for w in &warns {
+                        text.push_str("\n\n");
+                        text.push_str(w);
+                    }
+                    let guarded = json!({
+                        "kind": kind, "text": text, "data": final_data,
+                        "spine_snapshot": crate::spine::snapshot_of(&spine),
+                    })
+                    .to_string();
+                    return db::save_artifact(conn, song_id, Some(sid), kind, &guarded).await;
+                }
+
                 let final_data = match (&prior_data, frozen) {
                     (Some(pd), true) => merge_frozen_sections(&stage.r#type, pd, &incoming_data),
                     _ => incoming_data,
@@ -281,8 +337,12 @@ pub async fn save_artifact_guarded(
 
 /// Guarded revert for Claude-originated calls: restoring an old revision must
 /// not resurrect pre-freeze content over currently-frozen sections — the
-/// reverted content passes through the same write-boundary guard.
+/// reverted content passes through the same write-boundary guard. Spine rows
+/// the revision references but the spine no longer has are re-created first
+/// from its `spine_snapshot` (spec §Snapshots), so the restored entries
+/// reattach by id.
 pub async fn revert_artifact_guarded(conn: &Connection, artifact_id: &str) -> Result<Artifact> {
     let t = db::get_artifact(conn, artifact_id).await?.ok_or_else(|| anyhow!("artifact not found"))?;
+    crate::spine::restore_snapshot_rows(conn, &t).await?;
     save_artifact_guarded(conn, &t.song_id, t.stage_id.as_deref(), &t.kind, &t.content).await
 }

@@ -7,6 +7,15 @@
 // is ever lost. Serialization mirrors each stage's editor exactly (chords =
 // SectionChordsEditor's `label: names` + {name,beats} data; structure reuses
 // the exported structureToMarkdown; lyrics = `[label]\nlines` ChordPro blocks).
+//
+// Section-spine (docs/SECTION-SPINE-SPEC.md §Snapshots): restores are
+// snapshot-aware. A whole-revision restore re-creates deleted spine rows from
+// the revision's embedded spine_snapshot core-side (api.revertArtifact). A
+// section cherry-pick keeps section_ids through the splice (id-first match);
+// if the old section's row was deleted, the row is re-created first (label +
+// position from the old revision's snapshot when present) and the spliced
+// entry re-keyed to it. Structure cherry-picks on new-shape (notes-only)
+// revisions restore the section's FORM straight onto the spine.
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -14,6 +23,7 @@ import { diffLines } from "diff";
 import { api } from "../ipc/api";
 import type { Artifact } from "../ipc/generated";
 import { artifactEnvelope, parseArtifact } from "../lib/artifacts";
+import { spineSnapshot, useSpineSections } from "../lib/sections";
 import { structureToMarkdown } from "./StructureEditor";
 
 /** Kinds whose data is a `sections` array — preview as cards + cherry-pickable. */
@@ -111,23 +121,27 @@ function previewSections(kind: string, content: string): PreviewSection[] | null
 // ---- per-section cherry-pick --------------------------------------------------
 
 /** CURRENT data with ONE section replaced by the old revision's section
- *  (label match, case/space-insensitive; the old section carried VERBATIM;
- *  every other current section — frozen flags included — untouched). A section
- *  that no longer exists is re-inserted at its old slot. Re-serialized exactly
- *  the way the stage's editor saves. Null when either side has no parseable
- *  section data (the UI hides the buttons then). */
+ *  (matched by section_id first — rename-proof — then by label, case/space-
+ *  insensitive; the old section carried VERBATIM, section_id included; every
+ *  other current section — frozen flags included — untouched). A section that
+ *  no longer exists is re-inserted at its old slot. Re-serialized exactly the
+ *  way the stage's editor saves. Null when either side has no parseable
+ *  section data (the UI hides the buttons then — for STRUCTURE the spine-based
+ *  restore path takes over instead). */
 export function composeSectionRestore(
   kind: string, currentContent: string, oldContent: string, oldIndex: number,
 ): { text: string; data: unknown } | null {
-  const splice = <S extends { label: string }>(cur: S[], old: S[]): S[] | null => {
+  const splice = <S extends { label: string; section_id?: string }>(cur: S[], old: S[]): S[] | null => {
     const sec = old[oldIndex];
     if (!sec) return null;
     const out = [...cur];
-    const pos = out.findIndex((s) => normLabel(s.label) === normLabel(sec.label));
+    let pos = sec.section_id ? out.findIndex((s) => s.section_id === sec.section_id) : -1;
+    if (pos < 0) pos = out.findIndex((s) => normLabel(s.label) === normLabel(sec.label));
     if (pos >= 0) out[pos] = sec;
     else out.splice(Math.min(oldIndex, out.length), 0, sec);
     return out;
   };
+  const withId = <S extends { section_id?: string }>(s: S) => (s.section_id ? { section_id: s.section_id } : {});
   if (kind === "lyrics") {
     const cur = parseArtifact("lyrics", currentContent).data;
     const old = parseArtifact("lyrics", oldContent).data;
@@ -135,7 +149,7 @@ export function composeSectionRestore(
     const sections = splice(cur.sections, old.sections);
     if (!sections) return null;
     // mirror LyricsEditor's save: `frozen` persisted only when set
-    const data = { sections: sections.map((s) => ({ label: s.label, lines: s.lines, ...(s.frozen ? { frozen: true } : {}) })) };
+    const data = { sections: sections.map((s) => ({ ...withId(s), label: s.label, lines: s.lines, ...(s.frozen ? { frozen: true } : {}) })) };
     return { text: lyricsBlocks(data.sections), data };
   }
   if (kind === "chords") {
@@ -147,21 +161,22 @@ export function composeSectionRestore(
     // mirror SectionChordsEditor.toData: feel kept, frozen only when set
     const data = {
       sections: sections.map((s) => ({
-        label: s.label, feel: s.feel, ...(s.frozen ? { frozen: true } : {}),
+        ...withId(s), label: s.label, feel: s.feel, ...(s.frozen ? { frozen: true } : {}),
         chords: s.chords.map((c) => ({ name: c.name, beats: c.beats })),
       })),
     };
     return { text: chordsLines(data.sections), data };
   }
   if (kind === "structure") {
+    // legacy shape only: both sides still carry sections in the artifact data
     const cur = parseArtifact("structure", currentContent).data;
     const old = parseArtifact("structure", oldContent).data;
-    if (!cur || !old) return null;
+    if (!cur?.sections.length || !old) return null;
     const sections = splice(cur.sections, old.sections);
     if (!sections) return null;
-    // mirror StructureEditor's save: notes from the CURRENT data; NO embedded
-    // key/bpm (the SONG owns them — docs/SONG-FACTS.md); frozen only when set
-    const secs = sections.map((s) => ({ type: s.type ?? "", label: s.label, bars: s.bars, role: s.role ?? "", ...(s.frozen ? { frozen: true } : {}) }));
+    // mirror the pre-spine StructureEditor save: notes from the CURRENT data;
+    // NO embedded key/bpm (the SONG owns them — docs/SONG-FACTS.md)
+    const secs = sections.map((s) => ({ ...withId(s), type: s.type ?? "", label: s.label, bars: s.bars, role: s.role ?? "", ...(s.frozen ? { frozen: true } : {}) }));
     const data = { keyNote: cur.keyNote, tempoNote: cur.tempoNote, sections: secs };
     return { text: structureToMarkdown({ root: "", mode: "", bpm: 0, ...data }), data };
   }
@@ -216,6 +231,7 @@ export function RevisionHistory({ songId, stageId, kind, current, onClose, onCha
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<"diff" | "full">("diff");
+  const { sections: spine } = useSpineSections(songId);
 
   const revisions = useQuery({ queryKey: ["revisions", stageId], queryFn: () => api.listArtifactRevisions(stageId) });
   const revs = revisions.data ?? [];
@@ -234,11 +250,66 @@ export function RevisionHistory({ songId, stageId, kind, current, onClose, onCha
     mutationFn: () => api.revertArtifact(selected.id),
     onSuccess: () => { setSelectedId(null); refreshAll(); },
   });
+  /** The old revision's snapshot entry for a section id (label + position), if any. */
+  const snapshotEntryOf = (content: string, sectionId: string): { label?: string; position?: number } | undefined => {
+    try {
+      const snap = (JSON.parse(content) as { spine_snapshot?: { section_id?: string; label?: string; position?: number }[] }).spine_snapshot;
+      return snap?.find((e) => e?.section_id === sectionId);
+    } catch {
+      return undefined;
+    }
+  };
+
   const restoreSection = useMutation({
-    mutationFn: (oldIndex: number) => {
+    mutationFn: async (oldIndex: number) => {
+      // STRUCTURE on a spine song (new shape — the current revision carries no
+      // section copy): restoring a section restores its FORM onto the SPINE
+      // (update the matching row, or re-create it), then a notes-only save
+      // records the action as a new revision.
+      const curStructure = kind === "structure" ? parseArtifact("structure", head.content).data : null;
+      if (kind === "structure" && !curStructure?.sections.length) {
+        const old = parseArtifact("structure", selected.content).data;
+        const sec = old?.sections[oldIndex];
+        if (!sec) throw new Error("couldn't read the old section");
+        const row =
+          (sec.section_id ? spine.find((r) => r.id === sec.section_id) : undefined) ??
+          spine.find((r) => normLabel(r.label) === normLabel(sec.label));
+        if (row) await api.updateSection(row.id, sec.label, sec.type ?? "", sec.bars, sec.role ?? "");
+        else {
+          const snap = sec.section_id ? snapshotEntryOf(selected.content, sec.section_id) : undefined;
+          await api.createSection(songId, sec.label, sec.type ?? "", sec.bars, sec.role ?? "",
+            snap?.position != null ? Number(snap.position) : Math.min(oldIndex, spine.length));
+        }
+        const fresh = await api.listSections(songId);
+        const data = { keyNote: curStructure?.keyNote ?? "", tempoNote: curStructure?.tempoNote ?? "" };
+        const text = structureToMarkdown({
+          root: "", mode: "", bpm: 0, ...data,
+          sections: fresh.map((r) => ({ label: r.label, bars: Number(r.bars), role: r.role })),
+        });
+        return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data, spine_snapshot: spineSnapshot(fresh) }));
+      }
+
       const composed = composeSectionRestore(kind, head.content, selected.content, oldIndex);
-      if (!composed) return Promise.reject(new Error("couldn't compose the section restore"));
-      return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, ...composed }));
+      if (!composed) throw new Error("couldn't compose the section restore");
+      // the old section may reference a DELETED spine row — re-create it (label
+      // + position from the old revision's snapshot when it has one) and re-key
+      // the spliced entry to the fresh row before saving (§Snapshots)
+      const oldSec = (parseArtifact(kind as "lyrics" | "chords" | "structure", selected.content).data?.sections as
+        | { section_id?: string; label: string }[]
+        | undefined)?.[oldIndex];
+      if (oldSec?.section_id && spine.length && !spine.some((r) => r.id === oldSec.section_id)) {
+        const snap = snapshotEntryOf(selected.content, oldSec.section_id);
+        const created = await api.createSection(songId, String(snap?.label ?? oldSec.label), "", 8, "",
+          snap?.position != null ? Number(snap.position) : undefined);
+        for (const s of (composed.data as { sections?: { section_id?: string }[] }).sections ?? []) {
+          if (s.section_id === oldSec.section_id) s.section_id = created.id;
+        }
+      }
+      const fresh = spine.length ? await api.listSections(songId) : [];
+      return api.saveArtifact(songId, stageId, kind, JSON.stringify({
+        kind, ...composed,
+        ...(fresh.length ? { spine_snapshot: spineSnapshot(fresh) } : {}),
+      }));
     },
     onSuccess: refreshAll,
   });
@@ -249,8 +320,12 @@ export function RevisionHistory({ songId, stageId, kind, current, onClose, onCha
   const changed = diff.some((p) => p.added || p.removed);
 
   const selSections = previewSections(kind, selected.content);
-  // per-section restore needs BOTH sides parseable (and an older revision picked)
-  const canCherryPick = isSectionKind(kind) && !isCurrent && !!selSections && previewSections(kind, head.content) != null;
+  // per-section restore needs the old side parseable (and an older revision
+  // picked); lyrics/chords also need the CURRENT side to splice into, while
+  // STRUCTURE without current sections restores via the SPINE instead
+  const canCherryPick =
+    isSectionKind(kind) && !isCurrent && !!selSections &&
+    (kind === "structure" ? spine.length > 0 || previewSections(kind, head.content) != null : previewSections(kind, head.content) != null);
   const busy = restoreAll.isPending || restoreSection.isPending;
   const err = restoreAll.error ?? restoreSection.error;
 

@@ -4,7 +4,7 @@ import { api, type ParsedLyrics } from "../ipc/api";
 import type { Section as SpineSection } from "../ipc/generated";
 import { FieldChat } from "./FieldChat";
 import { parseArtifact, type ChordsData } from "../lib/artifacts";
-import { matchBySpineRow, normLabel } from "../lib/sections";
+import { matchBySpineRow, normLabel, spineSnapshot } from "../lib/sections";
 import {
   parseLine as parseChordProLine,
   toLine as lineToChordPro,
@@ -282,11 +282,15 @@ export function LyricsEditor({
 
   const save = useMutation({
     mutationFn: () => {
-      // entries carry their spine section_id (docs/SECTION-SPINE-SPEC.md,
-      // Phase 3) alongside the label so renames can't detach the words
+      // entries carry their spine section_id (docs/SECTION-SPINE-SPEC.md)
+      // alongside the label so renames can't detach the words; spine songs
+      // embed the snapshot beside data (§Snapshots — parity with core writes)
       const data = { sections: sections.map((s) => ({ ...(s.section_id ? { section_id: s.section_id } : {}), label: s.label, lines: s.lines.map(lineToChordPro), ...(s.frozen ? { frozen: true } : {}) })) };
       const text = sections.map((s) => `[${s.label}]\n${s.lines.map(lineToChordPro).join("\n")}`).join("\n\n");
-      return api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data }));
+      return api.saveArtifact(songId, stageId, kind, JSON.stringify({
+        kind, text, data,
+        ...(spine.length ? { spine_snapshot: spineSnapshot(spine) } : {}),
+      }));
     },
     onSuccess: () => { setDirty(false); onChanged(); },
   });

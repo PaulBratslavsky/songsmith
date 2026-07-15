@@ -143,6 +143,14 @@ async fn delete_section(state: State<'_, AppState>, id: String) -> R<()> {
 async fn reorder_sections(state: State<'_, AppState>, song_id: String, section_ids: Vec<String>) -> R<Vec<Section>> {
     db::reorder_sections(&state.conn, &song_id, &section_ids).await.map_err(e2s)
 }
+/// Mid-session spine-birth union (docs/SECTION-SPINE-SPEC.md Phase 4): append
+/// rows for sections that exist only in stage artifacts (first-seen order) —
+/// the StructureEditor calls this when its save creates a song's first rows,
+/// so a lyrics-only Bridge is never orphaned. Idempotent.
+#[tauri::command]
+async fn union_spine_sections(state: State<'_, AppState>, song_id: String) -> R<Vec<Section>> {
+    song_core::spine::union_artifact_sections(&state.conn, &song_id).await.map_err(e2s)
+}
 
 // ---- Paste-lyrics import (spec Feature B — words kept verbatim) -------------
 
@@ -283,9 +291,13 @@ async fn save_artifact(state: State<'_, AppState>, song_id: String, stage_id: Op
 async fn list_artifact_revisions(state: State<'_, AppState>, stage_id: String) -> R<Vec<Artifact>> {
     db::list_artifact_revisions(&state.conn, &stage_id).await.map_err(e2s)
 }
+/// Direct (user-authority) revert — snapshot-based (docs/SECTION-SPINE-SPEC.md
+/// §Snapshots): spine rows the revision references that no longer exist are
+/// re-created from its embedded `spine_snapshot` before the content is
+/// restored verbatim, so its section_ids reattach.
 #[tauri::command]
 async fn revert_artifact(state: State<'_, AppState>, artifact_id: String) -> R<Artifact> {
-    db::revert_artifact(&state.conn, &artifact_id).await.map_err(e2s)
+    song_core::spine::revert_artifact(&state.conn, &artifact_id).await.map_err(e2s)
 }
 /// Name (or clear) a revision in the History timeline — metadata only.
 #[tauri::command]
@@ -1020,6 +1032,7 @@ pub fn run() {
             update_section,
             delete_section,
             reorder_sections,
+            union_spine_sections,
             import_reference,
             parse_pasted_lyrics,
             import_lyrics,

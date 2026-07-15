@@ -18,7 +18,9 @@ pub use crate::engine::{extract_json, CancelToken};
 pub use crate::freeze::{merge_frozen_sections, revert_artifact_guarded, save_artifact_guarded};
 use crate::engine::call_claude;
 use crate::freeze::{frozen_labels, frozen_prompt_block, norm_label, section_label};
-use crate::render::{chords_editor_text, lyrics_text, render_stage_text, structure_editor_text};
+use crate::render::{chords_editor_text, lyrics_text, render_stage_text};
+#[cfg(test)]
+use crate::render::structure_editor_text; // legacy-shaped test fixtures still render with it
 
 /// The artifact `kind` produced by each stage type.
 pub fn kind_for_stage(stage_type: &str) -> &'static str {
@@ -505,13 +507,33 @@ pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path
 
     let stages = db::list_stages(conn, &song.id).await?;
     let stage_id = |t: &str| stages.iter().find(|s| s.r#type == t).map(|s| s.id.clone());
+    // Phase 4 (docs/SECTION-SPINE-SPEC.md): the analysis' sections become the
+    // NEW song's SPINE (user-authority import); the structure artifact keeps
+    // the notes only, and the chords entries attach by section_id.
+    let mut entries: Vec<Value> = structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    crate::spine::sync_spine(conn, &song.id, &mut entries).await?;
+    let rows = db::list_sections(conn, &song.id).await?;
+    let snapshot = crate::spine::snapshot_of(&rows);
     if let Some(sid) = stage_id("structure") {
-        let content = json!({ "kind": "structure", "text": structure_editor_text(&structure), "data": structure }).to_string();
+        let s_data = json!({
+            "keyNote": structure.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+            "tempoNote": structure.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+        });
+        let content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &rows), "data": s_data, "spine_snapshot": snapshot }).to_string();
         db::save_artifact(conn, &song.id, Some(&sid), "structure", &content).await?;
         let _ = db::set_stage_status(conn, &sid, "done").await;
     }
     if let Some(cid) = stage_id("chords") {
-        let content = json!({ "kind": "chords", "text": chords_editor_text(&chords), "data": chords }).to_string();
+        let mut chords = chords;
+        if let Some(arr) = chords.get_mut("sections").and_then(|v| v.as_array_mut()) {
+            for sec in arr.iter_mut() {
+                let label = norm_label(&section_label("chords", sec));
+                if let Some(row) = rows.iter().find(|r| norm_label(&r.label) == label) {
+                    sec["section_id"] = json!(row.id);
+                }
+            }
+        }
+        let content = json!({ "kind": "chords", "text": chords_editor_text(&chords), "data": chords, "spine_snapshot": snapshot }).to_string();
         db::save_artifact(conn, &song.id, Some(&cid), "chords", &content).await?;
         let _ = db::set_stage_status(conn, &cid, "done").await;
     }
@@ -880,9 +902,10 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
     let lyrics_stage = stages.iter().find(|s| s.r#type == "lyrics").ok_or_else(|| anyhow!("song has no lyrics stage"))?;
     let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
 
-    // Structure back-fill — the pasted labels/order become the section map;
-    // bars/role/type (and an existing lock) survive where a label matches —
-    // the SPINE row is the preferred form source, the prior artifact entry the
+    // Section forms for the SPINE replace — the pasted labels/order become the
+    // section map; bars/role/type (and an existing lock, which keeps its row's
+    // form verbatim through the sync) survive where a label matches — the
+    // SPINE row is the preferred form source, the prior artifact entry the
     // legacy fallback; new sections get the editor defaults (bars=8, role="").
     let prior_data = match db::current_artifact(conn, &structure_stage.id).await? {
         Some(a) => serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned()).unwrap_or(Value::Null),
@@ -931,15 +954,15 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
     db::save_artifact(conn, &song.id, Some(&lyrics_stage.id), "lyrics", &content).await?;
     db::set_stage_status(conn, &lyrics_stage.id, "done").await?;
 
-    // The SONG owns key/tempo (docs/SONG-FACTS.md) — the back-fill no longer
-    // copies them into the artifact (legacy embedded values are dropped here,
-    // harmlessly migrating old rows); only the prose notes carry over.
+    // The SONG owns key/tempo (docs/SONG-FACTS.md) and the SPINE owns the
+    // sections (docs/SECTION-SPINE-SPEC.md Phase 4) — the structure artifact
+    // keeps only the prose notes; its text renders the map from the spine.
     let structure_data = json!({
         "keyNote": prior_data.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
         "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
-        "sections": new_secs,
     });
-    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data, "spine_snapshot": snapshot }).to_string();
+    let rows = db::list_sections(conn, &song.id).await?;
+    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&structure_data, &rows), "data": structure_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -1176,10 +1199,9 @@ pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sectio
     // the SPINE is replaced to the merged list (matched rows keep ids).
     let prior_structure = current_stage_data(conn, &structure_stage.id).await?;
     let new_structure = structure_data_from_resolved(&sections, &prior_structure, &spine, had_spine);
-    let mut merged_structure = merge_frozen_sections("structure", &prior_structure, &new_structure);
+    let merged_structure = merge_frozen_sections("structure", &prior_structure, &new_structure);
     let mut s_entries = merged_structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     crate::spine::sync_spine(conn, &song.id, &mut s_entries).await?;
-    merged_structure["sections"] = Value::Array(s_entries);
     let snapshot = crate::spine::spine_snapshot(conn, &song.id).await?;
 
     // Chords: the export (entries keyed to the fresh spine — new rows included),
@@ -1195,7 +1217,13 @@ pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sectio
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
-    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&merged_structure), "data": merged_structure, "spine_snapshot": snapshot }).to_string();
+    // Phase 4 (docs/SECTION-SPINE-SPEC.md): the SPINE owns the sections — the
+    // structure artifact keeps the prose notes; text renders from the spine.
+    let s_data = json!({
+        "keyNote": merged_structure.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "tempoNote": merged_structure.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &fresh), "data": s_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -1230,21 +1258,24 @@ pub async fn create_song_from_composition(
     let structure_stage = stages.iter().find(|s| s.r#type == "structure").ok_or_else(|| anyhow!("song has no structure stage"))?;
 
     // the resolved sections BECOME the new song's spine (user authority)
-    let mut structure_data = structure_data_from_resolved(&sections, &Value::Null, &[], true);
+    let structure_data = structure_data_from_resolved(&sections, &Value::Null, &[], true);
     let mut s_entries = structure_data.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let ids = crate::spine::sync_spine(conn, &song.id, &mut s_entries).await?;
-    structure_data["sections"] = Value::Array(s_entries);
     for (s, id) in sections.iter_mut().zip(&ids) {
         s.section_id = Some(id.clone());
     }
-    let snapshot = crate::spine::spine_snapshot(conn, &song.id).await?;
+    let rows = db::list_sections(conn, &song.id).await?;
+    let snapshot = crate::spine::snapshot_of(&rows);
 
     let chords_data = chords_data_from_resolved(&sections);
     let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
-    let s_content = json!({ "kind": "structure", "text": structure_editor_text(&structure_data), "data": structure_data, "spine_snapshot": snapshot }).to_string();
+    // Phase 4: the SPINE owns the sections — the structure artifact keeps the
+    // prose notes only (empty on a fresh export); text renders from the spine.
+    let s_data = json!({ "keyNote": "", "tempoNote": "" });
+    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &rows), "data": s_data, "spine_snapshot": snapshot }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -1696,23 +1727,24 @@ mod tests {
         assert_eq!(lsecs[0]["lines"][0], "New words all the way down");
         assert!(lsecs.iter().all(|s| s.get("frozen").is_none()), "paste carries no frozen flags");
 
-        // Structure: back-filled to the pasted labels/order, bars/role preserved on match
+        // The SPINE is back-filled to the pasted labels/order, bars/role
+        // preserved on match (Phase 4: the structure artifact keeps no copy)
+        let rows = db::list_sections(&conn, &song.id).await.unwrap();
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"]);
+        assert_eq!((rows[0].bars, rows[0].role.as_str(), rows[0].r#type.as_str()), (16, "story", "verse"));
+        assert_eq!((rows[1].bars, rows[1].role.as_str()), (8, "lift"));
+        assert_eq!((rows[2].bars, rows[2].role.as_str()), (8, ""), "new section gets the editor default");
         let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
-        let ssecs = sv["data"]["sections"].as_array().unwrap();
-        let labels: Vec<&str> = ssecs.iter().map(|s| s["label"].as_str().unwrap()).collect();
-        assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"]);
-        assert_eq!(ssecs[0]["bars"], json!(16));
-        assert_eq!(ssecs[0]["role"], json!("story"));
-        assert_eq!(ssecs[0]["type"], json!("verse"));
-        assert_eq!(ssecs[1]["bars"], json!(8));
-        assert_eq!(ssecs[1]["role"], json!("lift"));
-        assert_eq!(ssecs[2]["bars"], json!(8), "new section gets the editor default");
-        assert_eq!(ssecs[2]["role"], json!(""));
-        // song-facts contract: the back-fill drops the legacy embedded key/bpm
-        // (the SONG owns them — docs/SONG-FACTS.md); the prose notes carry over
+        // song-facts + spine contracts: no embedded key/bpm (the SONG owns
+        // them — docs/SONG-FACTS.md) and no section copy (the SPINE owns them
+        // — docs/SECTION-SPINE-SPEC.md); only the prose notes carry over
         assert!(sv["data"].get("key").is_none(), "back-fill must not copy the key into the artifact");
         assert!(sv["data"].get("bpm").is_none(), "back-fill must not copy the bpm into the artifact");
+        assert!(sv["data"].get("sections").is_none(), "the structure artifact keeps no section copy");
+        assert!(sv["spine_snapshot"].is_array(), "the save embeds the spine snapshot");
+        assert!(sv["text"].as_str().unwrap().contains("1. **Verse 1** (16 bars) — story"), "text renders the map from the spine, got: {}", sv["text"]);
         // both stages marked done
         assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "done");
         assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
@@ -1742,13 +1774,17 @@ mod tests {
         assert_eq!(lv["data"]["sections"][0]["label"], "Verse 1");
         assert_eq!(lv["data"]["sections"][0]["lines"], json!(["First line here", "Second line here"]));
         assert_eq!(lv["data"]["sections"][1]["lines"], json!(["Hook line"]));
+        // the pasted labels/order become the SPINE (the structure artifact keeps no copy)
+        let rows = db::list_sections(&conn, &song.id).await.unwrap();
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Verse 1", "Chorus"]);
         let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
-        let labels: Vec<&str> = sv["data"]["sections"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap()).collect();
-        assert_eq!(labels, ["Verse 1", "Chorus"]);
         // song-facts contract: the artifact carries no key/bpm — the SONG does
         assert!(sv["data"].get("key").is_none(), "structure data must not embed the key");
         assert!(sv["data"].get("bpm").is_none(), "structure data must not embed the bpm");
+        assert!(sv["data"].get("sections").is_none(), "the SPINE owns the sections");
+        assert!(sv["text"].as_str().unwrap().contains("2. **Chorus** (8 bars)"), "text renders the spine map, got: {}", sv["text"]);
         assert_eq!(song.key_root, "A"); // create-flow defaults live on the song
         assert_eq!(song.bpm, 120);
         assert_eq!(db::get_stage(&conn, &lyrics_stage.id).await.unwrap().unwrap().status, "done");
@@ -1839,18 +1875,19 @@ mod tests {
         assert!(text.contains("Chorus: G Em"), "rendered text has the exported chorus, got: {text}");
         assert!(text.contains("Bridge: F G"), "rendered text has the new bridge, got: {text}");
 
-        // Structure: exported labels/order; bars/role/type preserved on match;
-        // new sections take the exported bar counts
+        // The SPINE takes the exported labels/order; bars/role/type preserved
+        // on match; new sections take the exported bar counts (the structure
+        // artifact keeps no section copy — Phase 4)
+        let rows = db::list_sections(&conn, &song.id).await.unwrap();
+        let slabels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(slabels, ["Verse 1", "Chorus", "Bridge"]);
+        assert_eq!((rows[0].bars, rows[0].role.as_str(), rows[0].r#type.as_str()), (16, "story", "verse"), "matched section keeps its form");
+        assert_eq!(rows[1].bars, 8, "new section takes the exported bars");
+        assert_eq!(rows[2].bars, 4);
         let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
-        let ssecs = sv["data"]["sections"].as_array().unwrap();
-        let slabels: Vec<&str> = ssecs.iter().map(|s| s["label"].as_str().unwrap()).collect();
-        assert_eq!(slabels, ["Verse 1", "Chorus", "Bridge"]);
-        assert_eq!(ssecs[0]["bars"], json!(16), "matched section keeps its bars");
-        assert_eq!(ssecs[0]["role"], json!("story"));
-        assert_eq!(ssecs[0]["type"], json!("verse"));
-        assert_eq!(ssecs[1]["bars"], json!(8), "new section takes the exported bars");
-        assert_eq!(ssecs[2]["bars"], json!(4));
+        assert!(sv["data"].get("sections").is_none(), "the SPINE owns the sections");
+        assert!(sv["text"].as_str().unwrap().contains("1. **Verse 1** (16 bars) — story"), "text renders the spine map, got: {}", sv["text"]);
         // both stages marked done
         assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
         assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
@@ -1875,7 +1912,6 @@ mod tests {
         ]});
         let s_content = json!({ "kind": "structure", "text": structure_editor_text(&s_data), "data": s_data }).to_string();
         db::save_artifact(&conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await.unwrap();
-        let frozen_intro = s_data["sections"][0].clone();
 
         // the export has no Intro at all
         let resolved = json!([
@@ -1884,12 +1920,20 @@ mod tests {
         .to_string();
         export_composition_to_song(&conn, &song.id, &resolved).await.unwrap();
 
+        // the frozen Intro survives (re-inserted by the merge) as a SPINE row
+        // with its form verbatim; the artifact keeps no section copy (Phase 4)
+        let rows = db::list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].label.as_str(), rows[0].r#type.as_str(), rows[0].bars, rows[0].role.as_str()),
+            ("Intro", "intro", 4, "set the scene"),
+            "dropped frozen structure section survives at its index, form verbatim"
+        );
+        assert_eq!(rows[1].label, "Verse 1");
         let st = db::current_artifact(&conn, &structure_stage.id).await.unwrap().unwrap();
         let sv = serde_json::from_str::<Value>(&st.content).unwrap();
-        let ssecs = sv["data"]["sections"].as_array().unwrap();
-        assert_eq!(ssecs.len(), 2);
-        assert_eq!(ssecs[0], frozen_intro, "dropped frozen structure section re-inserted verbatim at its index");
-        assert_eq!(ssecs[1]["label"], "Verse 1");
+        assert!(sv["data"].get("sections").is_none(), "the SPINE owns the sections");
+        assert!(sv["text"].as_str().unwrap().contains("1. **Intro** (4 bars) — set the scene"), "got: {}", sv["text"]);
     }
 
     /// (c) Create a NEW song from a composition: stages populated, key/bpm
@@ -1937,8 +1981,12 @@ mod tests {
         // song-facts contract: key/bpm live on the SONG (asserted above), never in the artifact
         assert!(sv["data"].get("key").is_none(), "structure data must not embed the key");
         assert!(sv["data"].get("bpm").is_none(), "structure data must not embed the bpm");
-        assert_eq!(sv["data"]["sections"][0]["label"], "Sketch");
-        assert_eq!(sv["data"]["sections"][0]["bars"], json!(8));
+        // spine contract (Phase 4): the section lives on the SPINE, not in the artifact
+        assert!(sv["data"].get("sections").is_none(), "the SPINE owns the sections");
+        let rows = db::list_sections(&conn, &song.id).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].label.as_str(), rows[0].bars), ("Sketch", 8));
+        assert!(sv["text"].as_str().unwrap().contains("1. **Sketch** (8 bars)"), "got: {}", sv["text"]);
 
         assert_eq!(db::get_stage(&conn, &chords_stage.id).await.unwrap().unwrap().status, "done");
         assert_eq!(db::get_stage(&conn, &structure_stage.id).await.unwrap().unwrap().status, "done");
@@ -2025,7 +2073,10 @@ mod tests {
         assert!(prompt.contains(LATER_STAGES_BANNER), "prompt must carry the reverse-context banner, got: {prompt}");
         assert!(prompt.contains("### Lyrics output"), "prompt must carry the Lyrics stage block, got: {prompt}");
         assert!(prompt.contains("City lights are calling me home"), "prompt must carry the pasted words, got: {prompt}");
-        assert!(prompt.contains("### Structure output"), "prompt must carry the back-filled Structure, got: {prompt}");
+        // the back-filled sections arrive as the canonical SECTIONS block (the
+        // import built the SPINE; the structure artifact is notes-only now)
+        assert!(prompt.contains("SECTIONS (canonical"), "prompt must lead with the spine's section block, got: {prompt}");
+        assert!(prompt.contains("2. Chorus (8 bars)"), "the imported sections are in the block, got: {prompt}");
         // and the banner comes BEFORE the later-stage blocks
         assert!(prompt.find(LATER_STAGES_BANNER).unwrap() < prompt.find("### Lyrics output").unwrap());
     }

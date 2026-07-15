@@ -363,6 +363,12 @@ function syncMockSpine(songId: string, entries: Any[]): string[] {
   return ids;
 }
 
+/** The light `spine_snapshot` block core writes embed beside `data`
+ *  (docs/SECTION-SPINE-SPEC.md §Snapshots) — mirrors spine::snapshot_of. */
+function snapshotOf(songId: string): Any[] {
+  return songSections(songId).map((r, position) => ({ section_id: r.id, label: r.label, position }));
+}
+
 /** Replace the Lyrics artifact + back-fill Structure to the pasted sections (labels/order). */
 function importLyricsIntoSong(songId: string, text: string) {
   const parsed = parsePastedLyrics(text);
@@ -395,14 +401,16 @@ function importLyricsIntoSong(songId: string, text: string) {
   // Phase 3: the paste is a user-authority SPINE writer — rows replaced to the
   // pasted labels/order; ids key every artifact entry below.
   const ids = syncMockSpine(songId, sections);
+  const snapshot = snapshotOf(songId);
   // Lyrics — pasted words verbatim, editor-style text, no frozen flags carried
   const lyricsData = { sections: parsed.sections.map((s, i) => ({ section_id: ids[i], label: s.label, lines: s.lines })) };
   const lyricsText = parsed.sections.map((s) => `[${s.label}]\n${s.lines.join("\n")}`).join("\n\n");
-  push(lyricsStage, "lyrics", JSON.stringify({ kind: "lyrics", text: lyricsText, data: lyricsData }));
-  // The SONG owns key/tempo (docs/SONG-FACTS.md) — no embedded copies; only
-  // the prose notes carry over (mirrors core agent.rs apply_parsed_lyrics).
-  const sData = { keyNote: prior?.keyNote ?? "", tempoNote: prior?.tempoNote ?? "", sections };
-  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData), data: sData }));
+  push(lyricsStage, "lyrics", JSON.stringify({ kind: "lyrics", text: lyricsText, data: lyricsData, spine_snapshot: snapshot }));
+  // The SONG owns key/tempo (docs/SONG-FACTS.md) and the SPINE owns the
+  // sections (Phase 4) — the structure artifact keeps the prose notes only;
+  // its text renders the map from the spine (mirrors agent.rs).
+  const sData = { keyNote: prior?.keyNote ?? "", tempoNote: prior?.tempoNote ?? "" };
+  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData, songSections(songId)), data: sData, spine_snapshot: snapshot }));
   // Chords back-fill from inline [chord] tags (Feature B2 #2) — mirrors agent.rs:
   // per section, the tag sequence collapsed to one progression pass, beats 4;
   // untagged sections empty; no tags anywhere → Chords untouched.
@@ -415,7 +423,7 @@ function importLyricsIntoSong(songId: string, text: string) {
         label: p.label,
         chords: collapseProgression(tagSeqs[i]).map((name) => ({ name, beats: 4 })),
       }));
-      push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cSecs), data: { sections: cSecs } }));
+      push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cSecs), data: { sections: cSecs }, spine_snapshot: snapshot }));
     }
   }
 }
@@ -442,15 +450,19 @@ function mergeFrozen(priorSecs: Any[], newSecs: Any[]): Any[] {
 function chordsText(secs: Any[]): string {
   return secs.map((s) => `${s.label ?? "Section"}: ${(s.chords ?? []).map((c: Any) => (typeof c === "string" ? c : c.name)).join(" ")}`).join("\n");
 }
-// Mirror of StructureEditor.structureToMarkdown / core render.rs for the new
-// data shape: no KEY/TEMPO fact lines (the SONG owns key/tempo — docs/SONG-FACTS.md).
-function structureText(d: Any): string {
+// Mirror of StructureEditor.structureToMarkdown / core render.rs for the
+// Phase-4 shape: no KEY/TEMPO fact lines (the SONG owns key/tempo —
+// docs/SONG-FACTS.md); the SECTION MAP renders from the given rows (the
+// SPINE — structure data no longer carries sections).
+function structureText(d: Any, sections: Any[]): string {
   const out: string[] = [];
   if (d.keyNote) out.push(`**KEY NOTE:** ${d.keyNote}`);
   if (d.tempoNote) out.push(`**TEMPO NOTE:** ${d.tempoNote}`);
-  if (out.length) out.push("");
-  out.push("**SECTION MAP**", "");
-  out.push(...d.sections.map((s: Any, i: number) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`));
+  if (sections.length) {
+    if (out.length) out.push("");
+    out.push("**SECTION MAP**", "");
+    out.push(...sections.map((s: Any, i: number) => `${i + 1}. **${s.label}** (${s.bars} bars)${s.role ? ` — ${s.role}` : ""}`));
+  }
   return out.join("\n");
 }
 /** Write resolved sections into a song's Chords + Structure stages. */
@@ -501,6 +513,7 @@ function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
   });
   const mergedSSecs = mergeFrozen(priorSSecs, newSSecs);
   syncMockSpine(songId, mergedSSecs);
+  const snapshot = snapshotOf(songId);
   // Chords: the export (entries keyed to the fresh spine — new rows included),
   // with prior frozen sections spliced back verbatim.
   const fresh = songSections(songId);
@@ -517,13 +530,11 @@ function exportSectionsIntoSong(songId: string, sections: Any[]): string[] {
     chords: (s.chords ?? []).map((c: Any) => ({ name: c.name, beats: Math.max(1, Number(c.beats) || 4) })),
   }));
   const cData = { sections: mergeFrozen(priorCSecs, newCSecs) };
-  push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cData.sections), data: cData }));
-  // No embedded key/bpm — the SONG owns them (docs/SONG-FACTS.md); notes carry over.
-  const sData = {
-    keyNote: priorS?.keyNote ?? "", tempoNote: priorS?.tempoNote ?? "",
-    sections: mergedSSecs,
-  };
-  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData), data: sData }));
+  push(chordsStage, "chords", JSON.stringify({ kind: "chords", text: chordsText(cData.sections), data: cData, spine_snapshot: snapshot }));
+  // No embedded key/bpm (the SONG owns them — docs/SONG-FACTS.md) and no
+  // section copy (the SPINE owns them — Phase 4); the notes carry over.
+  const sData = { keyNote: priorS?.keyNote ?? "", tempoNote: priorS?.tempoNote ?? "" };
+  push(structureStage, "structure", JSON.stringify({ kind: "structure", text: structureText(sData, songSections(songId)), data: sData, spine_snapshot: snapshot }));
   return skipped;
 }
 
@@ -621,6 +632,28 @@ const handlers: MockHandlers = {
     });
     return songSections(a.songId).map(toSection);
   },
+  // mid-session spine-birth union (Phase 4 — mirrors spine::union_artifact_sections):
+  // append rows for sections that exist only in stage artifacts, first-seen order
+  union_spine_sections: (a) => {
+    const known = new Set(songSections(a.songId).map((r) => normLabel(r.label)).filter(Boolean));
+    for (const t of ["structure", "chords", "lyric_spec", "lyrics"]) {
+      const stage = db.stages.find((s: Any) => s.song_id === a.songId && s.type === t);
+      if (!stage) continue;
+      let data: Any | null = null;
+      try { data = JSON.parse(currentArtifact(stage.id)?.content ?? "")?.data ?? null; } catch {}
+      const arr: Any[] = Array.isArray(data?.[t === "lyric_spec" ? "beats" : "sections"]) ? data[t === "lyric_spec" ? "beats" : "sections"] : [];
+      for (const sec of arr) {
+        const label = String((t === "lyric_spec" ? sec.section : sec.label) ?? sec.type ?? "");
+        const norm = normLabel(label);
+        if (!norm || known.has(norm)) continue;
+        known.add(norm);
+        const rows = songSections(a.songId);
+        db.sections.push({ id: uid(), song_id: a.songId, position: rows.length ? rows[rows.length - 1].position + 1 : 0,
+          label, type: "", bars: 8, role: "", created_at: now(), updated_at: now() });
+      }
+    }
+    return songSections(a.songId).map(toSection);
+  },
   refine_field: (a) => `(mock) ${a.fieldLabel}: ${a.instruction}`,
   delete_song: (a) => {
     db.songs = db.songs.filter((v: Any) => v.id !== a.id);
@@ -672,6 +705,23 @@ const handlers: MockHandlers = {
     db.artifacts.filter((x: Any) => x.stage_id === a.stageId).sort((x: Any, y: Any) => y.version - x.version).map(toArtifact),
   revert_artifact: (a) => {
     const src = db.artifacts.find((x: Any) => x.id === a.artifactId);
+    // snapshot-based restore (docs/SECTION-SPINE-SPEC.md §Snapshots — mirrors
+    // spine::restore_snapshot_rows): re-create spine rows the revision
+    // references that no longer exist, same ids, at their snapshot positions;
+    // rows that exist keep their current form (the snapshot only fills gaps).
+    try {
+      const snap: Any[] = JSON.parse(src.content)?.spine_snapshot ?? [];
+      const missing = snap
+        .filter((e) => e?.section_id && !songSections(src.song_id).some((r) => r.id === e.section_id))
+        .sort((x, y) => Number(x.position ?? 0) - Number(y.position ?? 0));
+      for (const e of missing) {
+        const rows = songSections(src.song_id);
+        const pos = Math.max(0, Math.min(Number(e.position ?? 0), rows.length));
+        rows.filter((x) => x.position >= pos).forEach((x) => (x.position += 1));
+        db.sections.push({ id: e.section_id, song_id: src.song_id, position: pos, label: e.label ?? "Section",
+          type: "", bars: 8, role: "", created_at: now(), updated_at: now() });
+      }
+    } catch { /* legacy revision without a snapshot — label fallback still renders it */ }
     const ver = (currentArtifact(src.stage_id)?.version ?? 0) + 1;
     // the restored revision starts unlabeled, like the core (label stays NULL)
     const art = { ...src, id: uid(), version: ver, approved: false, label: null, created_at: now() };

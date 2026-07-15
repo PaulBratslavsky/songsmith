@@ -5,7 +5,7 @@ import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrate
 import { CSS } from "@dnd-kit/utilities";
 import { api } from "../ipc/api";
 import type { Section as SpineSection } from "../ipc/generated";
-import { matchBySpineRow } from "../lib/sections";
+import { matchBySpineRow, spineSnapshot } from "../lib/sections";
 import { diatonicChords, pitchClassOf, NOTE_NAMES } from "../music/theory";
 import { isValidName, chordMidisByName, chordPcsByName, voicedMidisByName, voicedNotesByName, chordSizeByName } from "../music/engineAdapter";
 import { pianoVoicedSvg } from "../music/diagrams";
@@ -182,7 +182,12 @@ export function SectionChordsEditor({
         if (orderedIds.length) await api.reorderSections(songId, orderedIds);
       }
       const text = final.map((s) => `${s.label}: ${s.chords.map((c) => c.name).join(" ")}`).join("\n");
-      await api.saveArtifact(songId, stageId, kind, JSON.stringify({ kind, text, data: toData(final) }));
+      // spine songs embed the snapshot beside data (docs/SECTION-SPINE-SPEC.md
+      // §Snapshots — parity with core writes); legacy saves stay byte-identical
+      await api.saveArtifact(songId, stageId, kind, JSON.stringify({
+        kind, text, data: toData(final),
+        ...(spine.length ? { spine_snapshot: spineSnapshot(final) } : {}),
+      }));
       return final;
     },
     onSuccess: (final) => { setSections(final); setDirty(false); onChanged(); },

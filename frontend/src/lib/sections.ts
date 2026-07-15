@@ -24,6 +24,20 @@ export function normLabel(s: string): string {
   return s.trim().toLowerCase().split(/\s+/).join(" ");
 }
 
+/** One `spine_snapshot` entry (docs/SECTION-SPINE-SPEC.md §Snapshots). */
+export type SpineSnapshotEntry = { section_id: string; label: string; position: number };
+
+/** The light `spine_snapshot` block an editor save embeds beside `data` —
+ *  mirror of core spine::snapshot_of, built from an ordered row list (spine
+ *  rows or `{section_id,label}` pairs already in save order). Restores use it
+ *  to re-create deleted rows, keeping the journal self-contained. */
+export function spineSnapshot(rows: readonly { section_id?: string; id?: string; label: string }[]): SpineSnapshotEntry[] {
+  return rows.flatMap((r, position) => {
+    const section_id = r.section_id ?? r.id;
+    return section_id ? [{ section_id, label: r.label, position }] : [];
+  });
+}
+
 /** Find the artifact-section entry that carries a spine row's CONTENT:
  *  match by `section_id` when the entry has one, else by normalized label.
  *  `used` lets ordered walks consume each entry at most once. */

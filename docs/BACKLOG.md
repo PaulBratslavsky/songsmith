@@ -19,9 +19,10 @@
   `lib/artifacts.ts` (#8), Composer/Builder rename (#14), frontend dead-code sweep (#15), ChordPro
   consolidation into `lib/music/chordpro.ts` (#16, partial) — see the audit annotations.
 
-- **Section-spine normalization (milestone — spec first, do NOT bolt on)** (user-approved direction,
-  2026-07-08): sections (labels/order/bars) are duplicated across structure/chords/lyric_spec/lyrics
-  artifact data and reconciled by back-fills — the biggest remaining copy-drift class (see
-  docs/SONG-FACTS.md "Explicitly deferred"). Plan: a song-level `sections` entity as the single
-  spine; stage data references section ids; freeze flags move to the spine; Composer/import/export
-  read it. Touches every editor + Composer + freeze + imports — needs its own spec + test plan.
+- ✅ DONE (2026-07-14, four phases) **Section-spine normalization (milestone — spec first, do NOT
+  bolt on)** (user-approved direction, 2026-07-08): sections (labels/order/bars) were duplicated
+  across structure/chords/lyric_spec/lyrics artifact data and reconciled by back-fills — the biggest
+  remaining copy-drift class. Built per docs/SECTION-SPINE-SPEC.md (STATUS: COMPLETE): the `section`
+  table is the single spine; stage data references section ids (freeze matches id-first); the
+  structure artifact dropped its section copy; Composer/import/export/Ableton/prompts all read the
+  spine; restores are snapshot-based.

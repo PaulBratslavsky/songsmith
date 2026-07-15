@@ -1,19 +1,24 @@
 # Section Spine — one source of truth for sections (spec, APPROVED 2026-07-13)
 
-The last big copy-drift class (docs/SONG-FACTS.md deferred it here): sections are duplicated across
-four stage artifacts and reconciled by label-matching back-fills. This spec normalizes them into a
-song-level **spine**, the same move that fixed key/BPM — but sections carry per-stage content, so it
-is a real refactor. SPEC-FIRST by agreement; implementation is its own session.
+STATUS: COMPLETE — all four phases built 2026-07-14; the spine is the only section authority.
 
-## Today's duplication (verified in code)
-- structure `data.sections`: `{type?, label, bars, role, frozen?}` — owns form
-- chords `data.sections`: `{label, feel?, chords:[{name,beats}], frozen?}` — UI calls chords "the
-  section spine" (LyricsEditor: "Sections & order come from the Chords stage")
+The last big copy-drift class (docs/SONG-FACTS.md deferred it here): sections WERE duplicated across
+four stage artifacts and reconciled by label-matching back-fills. This spec normalized them into a
+song-level **spine**, the same move that fixed key/BPM — but sections carry per-stage content, so it
+was a real refactor. SPEC-FIRST by agreement; implementation was its own session.
+
+## The duplication this removed (verified in code, pre-spine)
+- structure `data.sections`: `{type?, label, bars, role, frozen?}` — owned form (now: the artifact
+  keeps only `{keyNote, tempoNote}`; the spine IS the sections)
+- chords `data.sections`: `{label, feel?, chords:[{name,beats}], frozen?}` — the UI called chords
+  "the section spine" (LyricsEditor: "Sections & order come from the Chords stage")
 - lyric_spec `data.beats`: `{section, beat}` — keyed by section NAME
 - lyrics `data.sections`: `{label, lines(ChordPro), frozen?}`
-- Reconciliation by LABEL everywhere: freeze merge, import_lyrics back-fill, Composer export
+- Reconciliation was by LABEL everywhere: freeze merge, import_lyrics back-fill, Composer export
   back-fill, deriveSections, ArrangementBuilder, Ableton song_sections. Renames = silent breakage;
-  two stages can disagree on order; "who owns sections" is answered differently by different files.
+  two stages could disagree on order; "who owns sections" was answered differently by different
+  files. All of that now goes through `section_id` (labels remain in content-stage data purely as
+  human-readable text + legacy-revision tolerance).
 
 ## The model
 New table `section`:
@@ -140,6 +145,41 @@ self-contained without making the spine itself versioned.
    Phase 4: dropping labels/sections from structure data, snapshot-based restore,
    editor saves embedding snapshots, MCP save_artifact label→id normalization.
 4. Cleanup: structure artifact drops sections; UI polish; docs.
+   ✅ Phase 4 built 2026-07-14 — the spine is the only section authority end to end:
+   - STRUCTURE ARTIFACT DROPS ITS SECTION COPY: every structure writer (StructureEditor
+     save, `spine::build_run_content` structure runs, `apply_parsed_lyrics`, Composer
+     export/create, `import_reference`, the guarded MCP save) stores only
+     `{keyNote, tempoNote}` (+ `spine_snapshot`); the text's SECTION MAP renders FROM
+     THE SPINE (`render::structure_spine_text`; notes-only for bare data). Legacy
+     revisions that still embed sections render/diff unchanged (readers keep the label
+     fallback; `structure_editor_text` still renders embedded sections). The structure
+     per-section 🔒 (form-lock) UI is retired with the copy — the user owns the form in
+     the spine editor; frozen entries in LEGACY priors are still honored verbatim by
+     run reconciliation (tolerance test kept).
+   - SNAPSHOT-BASED RESTORE (§Snapshots): `spine::restore_snapshot_rows` re-creates
+     missing rows from an artifact's `spine_snapshot` (SAME ids, snapshot label +
+     position; existing rows keep their current form — the snapshot only fills gaps)
+     before both revert paths: `spine::revert_artifact` (Tauri/user — content restored
+     verbatim) and `freeze::revert_artifact_guarded` (MCP — then through the
+     freeze/normalize boundary). RevisionHistory cherry-picks splice by section_id
+     first, re-create a deleted row (snapshot label/position, else old label appended)
+     and re-key the spliced entry; a structure cherry-pick over notes-only revisions
+     restores the section's FORM straight onto the spine.
+   - FRONTEND SAVES EMBED `spine_snapshot` (lib/sections.ts `spineSnapshot`): the
+     Structure/Chords/Lyrics/LyricSpec editors + History restores — spine songs only,
+     legacy saves stay byte-identical.
+   - MCP `save_artifact` NORMALIZATION: on spine songs the guarded path maps
+     label-keyed sections → section_id (create=NEVER, drop + ⚠ like non-structure
+     runs) BEFORE the frozen splice, re-renders text, embeds the snapshot; structure
+     saves keep notes only (+ ⚠ note when sections were included) and never touch the
+     spine — Claude changes sections via the section tools or a structure run.
+   - IN-SESSION UNION EDGE: `spine::union_artifact_sections` (reusing the migration's
+     union source, `db::artifact_section_labels`) runs when a structure RUN births the
+     spine, and via the `union_spine_sections` command when a StructureEditor save
+     births it — chords/lyrics-only sections join in first-seen order, default form.
+   - Mock parity throughout (notes-only structure, snapshots, snapshot-restoring
+     revert, union). 97 core + 2 app tests green (4 new: snapshot restore, MCP save
+     normalization ×2, birth union; structure-shape tests now assert the SPINE).
 
 ## USER DECISIONS — ✅ RESOLVED 2026-07-13: user accepted all four recommendations
 (D1 structure = spine editor · D2 keep+warn · D3 no section creation by non-structure runs ·
