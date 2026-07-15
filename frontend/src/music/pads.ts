@@ -62,19 +62,69 @@ export function padScaleSvg(rootPc: number, mode: "major" | "minor", cell = 40):
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${g.width}" height="${g.height}" viewBox="0 0 ${g.width} ${g.height}">${g.markup}</svg>`;
 }
 
-/** Inner markup for one chord's pad shape (chord tones lit, chord root orange).
- *  Returns null for unparseable names (N.C. etc.) — callers show a fallback. */
-export function padChordInner(name: string, cell = 12): { markup: string; width: number; height: number } | null {
+/** Inner markup for one chord's pad SHAPE — a single compact fingering, not the
+ *  whole grid (the fourths layout repeats every shape across the 8×8, so the
+ *  full-grid view was pure repetition — user feedback). The root anchors at
+ *  row 1 / col 1 of a 5-pad-wide window; each chord tone (closed voicing,
+ *  ascending from the root) lands once on its nearest pad. Returns null for
+ *  unparseable names (N.C. etc.) — callers show a fallback. */
+export function padChordInner(name: string, cell = 12, inversion = 0): { markup: string; width: number; height: number } | null {
   const pcs = chordPcsByName(name);
   if (!pcs.length) return null;
   const rootPc = pcs[0];
-  const members = new Set(pcs);
-  return grid((pc) => (pc === rootPc ? "root" : members.has(pc) ? "lit" : "off"), cell);
+  const intervals = [...new Set(pcs.map((pc) => (pc - rootPc + 12) % 12))].sort((a, b) => a - b);
+  // closed-voicing inversion, same convention as the piano view: rotate the
+  // tone stack, wrapped tones jump an octave, then anchor the LOWEST tone
+  const n = intervals.length;
+  const k = ((inversion % n) + n) % n;
+  const voicing = intervals.map((_, i) => intervals[(k + i) % n] + (k + i >= n ? 12 : 0));
+  const lowest = voicing[0];
+  const W = 5; // window columns
+  const ROOT_T = ROW_INT + 1; // lowest tone's pad at (row 1, col 1) → semitone offset 6 from the window base
+  const spots: { row: number; col: number; pc: number; isRoot: boolean }[] = [];
+  for (const iv of voicing.map((v) => v - lowest)) {
+    const t = ROOT_T + iv;
+    let best: { row: number; col: number; score: number } | null = null;
+    for (let row = 0; row < 6; row++) {
+      const col = t - row * ROW_INT;
+      if (col < 0 || col >= W) continue;
+      const score = Math.abs(col - 2) + Math.abs(row - 1) * 0.5; // prefer compact, near the root row
+      if (!best || score < best.score) best = { row, col, score };
+    }
+    if (best) {
+      const pc = (rootPc + lowest + iv) % 12;
+      spots.push({ row: best.row, col: best.col, pc, isRoot: pc === rootPc });
+    }
+  }
+  if (!spots.length) return null;
+  const rows = Math.max(...spots.map((s) => s.row)) + 1;
+  const gap = Math.max(2, Math.round(cell * 0.12));
+  const names = cell >= 18;
+  const rx = Math.max(2, Math.round(cell * 0.14));
+  const at = new Map(spots.map((s) => [`${s.row}:${s.col}`, s]));
+  const parts: string[] = [];
+  for (let row = rows - 1; row >= 0; row--) {
+    const y = (rows - 1 - row) * (cell + gap);
+    for (let col = 0; col < W; col++) {
+      const s = at.get(`${row}:${col}`);
+      const fill = s ? (s.isRoot ? COL_ROOT : COL_LIT) : COL_OFF;
+      const x = col * (cell + gap);
+      parts.push(`<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="${rx}" fill="${fill}"/>`);
+      if (names && s) {
+        parts.push(
+          `<text x="${x + cell / 2}" y="${y + cell / 2 + cell * 0.16}" fill="${TXT_LIT}" font-size="${Math.round(cell * 0.42)}" font-weight="bold" text-anchor="middle" font-family="monospace">${NOTE_NAMES[s.pc]}</text>`,
+        );
+      }
+    }
+  }
+  const width = W * cell + (W - 1) * gap;
+  const height = rows * cell + (rows - 1) * gap;
+  return { markup: parts.join(""), width, height };
 }
 
 /** Standalone SVG of one chord's pad shape with the chord name above it. */
-export function padChordSvg(name: string, cell = 20): string | null {
-  const g = padChordInner(name, cell);
+export function padChordSvg(name: string, cell = 26, inversion = 0): string | null {
+  const g = padChordInner(name, cell, inversion);
   if (!g) return null;
   const label = 16;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${g.width}" height="${g.height + label}" viewBox="0 0 ${g.width} ${g.height + label}">`

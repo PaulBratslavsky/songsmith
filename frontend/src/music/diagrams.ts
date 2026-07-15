@@ -187,7 +187,7 @@ export function playAlongSvg(o: { title: string; subtitle: string; instrument: "
   for (const name of uniq) {
     let inner: string, natW: number;
     if (o.instrument === "ableton") {
-      const pad = padChordInner(name, 9);
+      const pad = padChordInner(name, 9, voi[name] ?? 0);
       natW = pad ? Math.max(80, pad.width) : 80;
       inner = `<text x="${(natW / 2).toFixed(0)}" y="10" fill="${INK}" font-size="11" font-weight="bold" text-anchor="middle" font-family="monospace">${esc(name)}</text>`
         + (pad ? `<g transform="translate(${((natW - pad.width) / 2).toFixed(1)},16)">${pad.markup}</g>`

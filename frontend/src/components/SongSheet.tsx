@@ -59,7 +59,8 @@ export function SongSheet({
   // different things), keyed "<instrument>:<chord>". Derive a name→index map for
   // the current instrument to feed the renderer.
   const idxOf = (name: string) => voicings[`${instrument}:${name}`] ?? 0;
-  const countOf = (name: string) => (instrument === "ableton" ? 1 : Math.max(1, instrument === "guitar" ? guitarCountByName(name) : chordSizeByName(name)));
+  // ableton cycles closed-voicing inversions, same count as the piano view
+  const countOf = (name: string) => Math.max(1, instrument === "guitar" ? guitarCountByName(name) : chordSizeByName(name));
   const curVoicings = useMemo(() => {
     const out: Record<string, number> = {};
     for (const name of uniqueChords) out[name] = voicings[`${instrument}:${name}`] ?? 0;
@@ -117,13 +118,11 @@ export function SongSheet({
             {uniqueChords.map((name) => {
               const n = countOf(name);
               const idx = idxOf(name);
-              const sub = instrument === "ableton"
-                ? "pads"
-                : instrument === "guitar"
+              const sub = instrument === "guitar"
                 ? (guitarFretsByName(name, idx)?.label ?? "—")
                 : (INV_LABELS[idx] ?? `inv ${idx}`);
               const svg = instrument === "ableton"
-                ? (padChordSvg(name) ?? `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="60"><text x="45" y="34" fill="#5b6472" font-size="10" text-anchor="middle" font-family="monospace">(no pads)</text></svg>`)
+                ? (padChordSvg(name, 26, idx) ?? `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="60"><text x="45" y="34" fill="#5b6472" font-size="10" text-anchor="middle" font-family="monospace">(no pads)</text></svg>`)
                 : instrument === "guitar"
                 ? diagramSvgShape(guitarFretsByName(name, idx), name)
                 : pianoVoicedSvg(voicedMidisByName(name, idx), name);
