@@ -39,3 +39,13 @@ If a scenario exposes a REAL production bug: do NOT fix production code. Write t
 - Never touch the running dev app: do not kill anything on port 5173, do not run visual_test.py, do not use the live DB (`~/Library/Application Support/com.songsmithstudio.desktop/`). In-memory DBs only.
 - Do not commit. The parent session reviews and commits.
 - Keep every mock JSON minimal but schema-valid; when unsure of a shape, read the parsing code, not guesses.
+
+## FINDINGS
+
+**No production bugs.** All 8 scenarios pass against production behavior as-is — no `#[ignore]` tests were needed.
+
+**Test-infra finding — the `SONGSMITH_MOCK_CLAUDE` hook cannot be shared across test modules.** The brief's instruction to duplicate `agent::tests`' env-lock locally does not work: the env var is process-global, `agent::tests`' `ENV_LOCK` is private, and two lock instances over one global race hard under the parallel test harness (measured ≈5/8 full-suite runs failing; one interleaving even nuked the var mid-flight and sent a test to the REAL `claude` CLI). `flow_tests.rs` therefore scripts Claude differently: each test points `settings.claude_bin` at its own temp-dir shell script that emits the canned reply as a stream-json `result` line — same real engine spawn/stream path, zero global state. The one residual hazard (`call_claude` still checks the env var before spawning, so a concurrent `agent::tests` window could leak its value into a flow run) is closed by detect-undo-retry in `run_mock` (raw output verified against the script; polluted revision deleted, spine restored, run retried). `agent::tests` is never affected — flow tests never touch the env var. Verified stable: 15/15 consecutive green full-suite runs. Recommendation for a future cleanup (parent's call): move the mock hook behind a crate-visible test lock, or key it per-thread.
+
+**Scenario 3 note.** "No new spine row" is proven on a NON-structure (chords) run — D3 in `spine.rs` is explicitly "non-structure runs never create sections", while a STRUCTURE run inventing a section legitimately creates a row (proposing sections is its job). The D2 keep-and-warn half is proven on a structure run dropping a content-bearing section, warn surfaced in the artifact text where `reconcile_structure_run` puts it.
+
+**Transient during the build (not mine, self-resolved):** `tools::tests::mock_has_every_tool` failed mid-build because the parent session added `create_song_from_lyrics`/`import_lyrics` to the tool registry before updating `frontend/src/ipc/mockApi.ts`; it went green again once that edit completed.

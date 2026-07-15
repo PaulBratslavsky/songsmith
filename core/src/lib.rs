@@ -6,6 +6,8 @@
 
 pub mod ableton;
 pub mod agent;
+#[cfg(test)]
+mod flow_tests;
 pub mod db;
 pub mod engine;
 pub mod freeze;
