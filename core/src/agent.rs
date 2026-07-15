@@ -1696,6 +1696,22 @@ mod tests {
         assert_eq!(p.sections[2].lines, ["Hold on to the static in the air"]);
     }
 
+    /// (a2) Markdown-bold headers — the exact shape of the user's "Fade Away"
+    /// creation paste (song made pre-fix landed everything under one "Lyrics"
+    /// section with `**Verse 1**` as lyric text). Bold headers split
+    /// deterministically; stray one-char lines stay verbatim in the body.
+    #[tokio::test]
+    async fn paste_split_on_markdown_bold_headers() {
+        let text = "**Verse 1**\nStreetlights blur in silver rain.\nYour last words still call my name.\n\n.\n\n**Pre-Chorus**\nEvery passing pair of lights...\nI think it's you.\n\n**Chorus**\nWait for me, you said.\nDon't leave tonight.";
+        let p = parse_pasted_lyrics(&Settings::default(), text).await.unwrap();
+        assert!(!p.used_claude);
+        let labels: Vec<&str> = p.sections.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["Verse 1", "Pre-Chorus", "Chorus"]);
+        assert_eq!(p.sections[0].lines, ["Streetlights blur in silver rain.", "Your last words still call my name.", "", "."]);
+        assert_eq!(p.sections[1].lines, ["Every passing pair of lights...", "I think it's you."]);
+        assert_eq!(p.sections[2].lines, ["Wait for me, you said.", "Don't leave tonight."]);
+    }
+
     /// (b) Unlabeled text: Claude (mocked) returns a VALID segmentation — the
     /// boundaries are used, `used_claude` is true, and the kept lines are the
     /// input's own bytes.
