@@ -203,6 +203,27 @@ pub(crate) fn build_merged_content(stage_type: &str, raw_text: &str, prior_conte
     Ok(json!({ "kind": kind, "text": raw_text, "data": new_data }).to_string())
 }
 
+/// Model-output tolerance at the write boundary: a chords section's `chords`
+/// array sometimes arrives as bare name strings ("F#m") instead of
+/// `{name, beats}` objects — the editors read objects only, so such a run
+/// saved content the Arrange view showed as "no chords" (user-hit, 2026-07-15).
+/// Coerce strings to `{name, beats: 4}`; objects pass through untouched.
+fn normalize_chord_entries(data: &mut Value) {
+    let Some(sections) = data.get_mut("sections").and_then(|v| v.as_array_mut()) else { return };
+    for sec in sections {
+        let Some(chords) = sec.get_mut("chords").and_then(|v| v.as_array_mut()) else { continue };
+        for c in chords.iter_mut() {
+            if let Some(name) = c.as_str() {
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    *c = serde_json::json!({ "name": name, "beats": 4 });
+                }
+            }
+        }
+        chords.retain(|c| !c.as_str().is_some_and(|s| s.trim().is_empty()));
+    }
+}
+
 // ---- The freeze write-boundary ----------------------------------------------
 
 /// Guarded artifact save for Claude-originated writes. For a section-based stage
@@ -246,11 +267,14 @@ pub async fn save_artifact_guarded(
                 // accept the `{kind,text,data}` wrapper or bare data
                 // (an object already carrying the stage's section array)
                 let (arr_key, _) = section_keys(&stage.r#type);
-                let incoming_data = incoming
+                let mut incoming_data = incoming
                     .get("data")
                     .cloned()
                     .or_else(|| incoming.get(arr_key).is_some().then(|| incoming.clone()))
                     .unwrap_or(Value::Null);
+                if stage.r#type == "chords" {
+                    normalize_chord_entries(&mut incoming_data);
+                }
 
                 // Phase 4 (docs/SECTION-SPINE-SPEC.md): once the song has a
                 // spine, Claude-originated saves are NORMALIZED onto it so

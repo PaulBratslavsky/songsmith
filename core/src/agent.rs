@@ -2117,6 +2117,34 @@ mod tests {
         assert!(!text.contains("commentary"), "commentary must not survive as text, got: {text}");
     }
 
+    /// Write-boundary chord coercion (found in the wild — "Fade Away" regen):
+    /// a chords RUN whose model output listed chords as bare strings ("F#m")
+    /// saved data the Arrange editor showed as "no chords". The guarded save
+    /// coerces strings to {name, beats: 4}; real objects pass untouched.
+    #[tokio::test]
+    async fn guarded_save_normalizes_string_chord_entries() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "synthwave".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Norm").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        db::create_section(&conn, &song.id, "Verse 1", "verse", 8, "", None).await.unwrap();
+
+        let incoming = json!({ "kind": "chords", "text": "", "data": { "sections": [
+            { "label": "Verse 1", "chords": ["F#m", "D", { "name": "Bm", "beats": 2 }, "  "], "romans": ["i", "VI", "iv"] }
+        ]}}).to_string();
+        let saved = save_artifact_guarded(&conn, &song.id, Some(&chords_stage.id), "chords", &incoming).await.unwrap();
+        let v: Value = serde_json::from_str(&saved.content).unwrap();
+        let cs = v["data"]["sections"][0]["chords"].as_array().unwrap();
+        assert_eq!(cs.len(), 3, "blank entry dropped, got: {cs:?}");
+        assert_eq!(cs[0], json!({ "name": "F#m", "beats": 4 }));
+        assert_eq!(cs[1], json!({ "name": "D", "beats": 4 }));
+        assert_eq!(cs[2], json!({ "name": "Bm", "beats": 2 }), "real objects pass untouched");
+    }
+
     // ---- Feature B2: lyrics-first flow completion ----------------------------
 
     /// (1) Reverse context: after a lyrics-first import, the Concept run's
