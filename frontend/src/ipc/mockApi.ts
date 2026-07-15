@@ -868,7 +868,7 @@ export async function mockCall<C extends keyof CommandMap>(cmd: C, a: CommandArg
 
 const MOCK_TOOLS = [
   "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset",
-  "create_song","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
+  "create_song","create_song_from_lyrics","import_lyrics","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
   "list_sections","create_section","update_section","delete_section","reorder_sections",
   "get_stage","run_stage","approve_stage","advance_stage",
   "get_artifact","save_artifact","list_artifact_revisions","revert_artifact","set_artifact_label",

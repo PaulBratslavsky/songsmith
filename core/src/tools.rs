@@ -32,6 +32,8 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "create_style_preset", description: "Create a style preset (genre, mood, influences, key/tempo, vocal range, themes).", destructive: false, input_schema: obj(style_props.clone(), &["name"]) },
         ToolSpec { name: "update_style_preset", description: "Update a style preset.", destructive: false, input_schema: obj({ let mut p = style_props.clone(); p["id"] = s("preset id"); p }, &["id"]) },
         ToolSpec { name: "generate_style_preset", description: "Auto-generate a style preset from a name/seed using the style skill.", destructive: false, input_schema: obj(json!({"name": s("name or seed"),"notes": s("optional context")}), &["name"]) },
+        ToolSpec { name: "create_song_from_lyrics", description: "New song from pasted lyrics (verbatim — words are never rewritten): sections split on headers ([Verse 1] / **Verse 1** / Verse 1:), key inferred from inline [chord] tags when present, Structure and Chords back-filled.", destructive: false, input_schema: obj(json!({"style_preset_id": s(""),"title": s("working title"),"text": s("the full pasted lyrics")}), &["style_preset_id","text"]) },
+        ToolSpec { name: "import_lyrics", description: "Paste completed lyrics into an existing song (verbatim — words are never rewritten): sections split on headers and REPLACE the song's section spine; the Lyrics stage gets the words as a new revision and Structure is back-filled. The song's key is not touched.", destructive: false, input_schema: obj(json!({"song_id": s(""),"text": s("the full pasted lyrics")}), &["song_id","text"]) },
         ToolSpec { name: "create_song", description: "Start a new song; seeds the ordered stage spec.", destructive: false, input_schema: obj(json!({"style_preset_id": s(""),"title": s("working title")}), &["style_preset_id"]) },
         ToolSpec { name: "list_songs", description: "List all songs with status and current stage.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_song", description: "Get a song with its preset and stages.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
@@ -192,6 +194,8 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             v(db::update_preset(conn, id, input).await?)
         }
         "generate_style_preset" => v(agent::generate_style_preset(conn, settings, arg(args, "name")?, arg_opt(args, "notes"), |_| {}).await?),
+        "create_song_from_lyrics" => v(agent::create_song_from_lyrics(conn, settings, arg(args, "style_preset_id")?, arg_opt(args, "title").unwrap_or("Untitled song"), arg(args, "text")?).await?),
+        "import_lyrics" => v(agent::import_lyrics(conn, settings, arg(args, "song_id")?, arg(args, "text")?).await?),
         "create_song" => v(db::create_song(conn, arg(args, "style_preset_id")?, arg_opt(args, "title").unwrap_or("Untitled song")).await?),
         "list_songs" => v(db::list_songs(conn).await?),
         "get_song" => v(db::get_song_detail(conn, arg(args, "id")?).await?),
