@@ -985,8 +985,13 @@ async fn ableton_build_clips(state: State<'_, AppState>, song_id: String) -> R<S
 /// Chords / Pad / Chord melody / Filler / Arp MIDI parts from the progression.
 /// Thin wrapper over song_core::ableton::build_song_for (also an MCP tool).
 #[tauri::command]
-async fn ableton_build_song(state: State<'_, AppState>, song_id: String) -> R<String> {
-    song_core::ableton::build_song_for(&state.conn, &song_id).await.map_err(e2s)
+async fn ableton_build_song(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
+    let sid = song_id.clone();
+    song_core::ableton::build_song_for(&state.conn, &song_id, move |msg| {
+        let _ = app.emit("ableton_progress", serde_json::json!({ "song_id": sid, "message": msg }));
+    })
+    .await
+    .map_err(e2s)
 }
 
 /// Free the single Ableton socket by stopping stray standalone `ableton-mcp`

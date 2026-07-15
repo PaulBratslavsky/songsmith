@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, STAGE_LABELS } from "../ipc/api";
+import { api, listen, STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
 import { StageChecklist, staleStageIds } from "../components/StageChecklist";
 import { ArtifactPanel } from "../components/ArtifactPanel";
@@ -41,6 +41,17 @@ export function SongWorkspace() {
   // navigating to a different song clears the stage selection (avoids stale highlight)
   useEffect(() => { setSelectedId(null); fd?.close?.(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
   const buildAbleton = async () => { setAbMsg("Stubbing the song in Ableton — Sections + Bass / Chords / Melody / Filler / Arp…"); try { setAbMsg(await api.abletonBuildSong(id)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); } };
+  // live per-step progress while the Ableton build runs (backend emits one
+  // event per connect/clear/track-create/section step)
+  useEffect(() => {
+    let un = () => {};
+    (async () => {
+      un = await listen<{ song_id: string; message: string }>("ableton_progress", (p) => {
+        if (p.song_id === id) setAbMsg(`⚡ ${p.message}`);
+      });
+    })();
+    return () => un();
+  }, [id]);
 
   const song = useQuery({ queryKey: ["song", id], queryFn: () => api.getSong(id) });
   // the song's section spine (docs/SECTION-SPINE-SPEC.md, Phase 2) — section
@@ -295,6 +306,8 @@ export function SongWorkspace() {
               content={sd.artifact.content}
               onChanged={invalidate}
               lyricsTagged={lyricsTagged}
+              spineSections={spineSections}
+              chordsData={chordsData}
             />
           ) : (
             sd?.artifact && <ArtifactPanel artifact={sd.artifact} songId={id} stageId={sd.stage.id} onChanged={invalidate} />

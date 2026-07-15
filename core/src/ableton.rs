@@ -241,7 +241,8 @@ pub fn build_clips(bpm: i64, sections: &[(String, i64)]) -> Result<String> {
 /// plus Bass / Chords / Pad / Chord melody / Filler / Arp MIDI parts generated
 /// from the chord progression — direct socket, no MCP/LLM. MIDI-only (you pick
 /// the sounds).
-pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groove: bool) -> Result<String> {
+pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groove: bool, progress: &dyn Fn(String)) -> Result<String> {
+    progress("Connecting to Ableton (port 9877)…".into());
     let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
         .map_err(|e| anyhow!("Can't reach Ableton on 9877 ({e}). Open Live (AbletonMCP on) and free the connection."))?;
@@ -254,11 +255,13 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groo
     // clear our previously-built tracks so re-running rebuilds cleanly instead
     // of stacking duplicate track sets (needs the patched Remote Script)
     let track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp"];
+    progress("Clearing previously built tracks…".into());
     let cleared = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": track_names}}))
         .ok().and_then(|v| v.get("result").and_then(|r| r.get("deleted")).and_then(|n| n.as_i64())).unwrap_or(0);
     nap();
 
     // create the tracks fresh, capture their indices
+    progress(format!("Creating {} MIDI tracks…", track_names.len()));
     let mut tracks: Vec<i64> = Vec::new();
     for name in track_names {
         let ti = ableton_cmd(&mut s, json!({"type":"create_midi_track","params":{"index":-1}}))
@@ -272,6 +275,7 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], groo
     let mut log = vec![format!("{}tempo {bpm} BPM · {} feel · {} sections × up to {} tracks (density per section)", if cleared > 0 { format!("cleared {cleared} old tracks · ") } else { String::new() }, if groove { "rhythmic groove" } else { "sustained" }, sections.len(), track_names.len())];
     let mut bar = 1i64;
     for (i, (label, bars, chords)) in sections.iter().enumerate() {
+        progress(format!("Building {label} — section {}/{} ({bars} bars)…", i + 1, sections.len()));
         let ci = i as i64;
         let length = (*bars as f64) * 4.0;
         let dest = ((bar - 1) as f64) * 4.0;
@@ -326,7 +330,7 @@ pub async fn build_clips_for(conn: &Connection, song_id: &str) -> Result<String>
 
 /// The full MIDI song stub (fetch song + sections + chords + the preset's
 /// genre-driven groove, then `build_song`).
-pub async fn build_song_for(conn: &Connection, song_id: &str) -> Result<String> {
+pub async fn build_song_for(conn: &Connection, song_id: &str, progress: impl Fn(String) + Send + 'static) -> Result<String> {
     let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let sections = song_parts(conn, song_id).await;
     if sections.is_empty() {
@@ -336,7 +340,7 @@ pub async fn build_song_for(conn: &Connection, song_id: &str) -> Result<String> 
         .map(|p| groove_for_genre(&p.genre))
         .unwrap_or(true);
     let bpm = song.bpm;
-    tokio::task::spawn_blocking(move || build_song(bpm, &sections, groove)).await?
+    tokio::task::spawn_blocking(move || build_song(bpm, &sections, groove, &progress)).await?
 }
 
 #[cfg(test)]

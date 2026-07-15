@@ -268,7 +268,7 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "add_render" => v(db::create_render(conn, arg(args, "song_id")?, arg_opt(args, "label").unwrap_or("Render"), arg(args, "file_path")?, arg_opt(args, "source").unwrap_or(""), arg_opt(args, "notes").unwrap_or("")).await?),
         "set_render_pick" => { db::set_render_pick(conn, arg(args, "id")?, args.get("is_pick").and_then(|b| b.as_bool()).unwrap_or(true)).await?; Ok(json!({ "ok": true })) }
         "delete_render" => { db::delete_render(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
-        "ableton_build_song" => Ok(json!(ableton::build_song_for(conn, arg(args, "song_id")?).await?)),
+        "ableton_build_song" => Ok(json!(ableton::build_song_for(conn, arg(args, "song_id")?, |_| {}).await?)),
         "analyze_reference" => run_analyzer(settings, arg(args, "audio_path")?).await,
         "get_settings" => v(db::get_settings(conn).await?),
         "set_settings" => {

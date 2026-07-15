@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../ipc/api";
+import type { Section as SpineSection } from "../ipc/generated";
 import { FieldChat } from "./FieldChat";
 import { stripTags } from "../lib/music/chordpro";
+import { normLabel } from "../lib/sections";
 
-export type PromptData = { stylePrompt: string; taggedLyrics: string; notes: string };
+export type PromptData = { stylePrompt: string; taggedLyrics: string; instrumentalTags: string; notes: string };
 
 export function parsePrompt(content: string): PromptData {
   let data: any = null, text = "";
@@ -13,6 +15,7 @@ export function parsePrompt(content: string): PromptData {
   return {
     stylePrompt: data?.stylePrompt ?? data?.style_prompt ?? block(/##?\s*STYLE PROMPT\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
     taggedLyrics: data?.taggedLyrics ?? data?.tagged_lyrics ?? block(/##?\s*TAGGED LYRICS\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
+    instrumentalTags: data?.instrumentalTags ?? block(/##?\s*INSTRUMENTAL TAGS\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
     notes: data?.notes ?? block(/##?\s*NOTES\s*\n([\s\S]*?)(?:\n##?\s|\n*$)/i),
   };
 }
@@ -21,8 +24,31 @@ export function promptToMarkdown(d: PromptData): string {
   return [
     "## STYLE PROMPT", d.stylePrompt, "",
     "## TAGGED LYRICS", d.taggedLyrics, "",
+    ...(d.instrumentalTags ? ["## INSTRUMENTAL TAGS", d.instrumentalTags, ""] : []),
     "## NOTES", d.notes,
   ].join("\n");
+}
+
+/** The instrumental generator paste: every section as [Label] + its chord run +
+ *  an arrangement cue from the spine's role — no sung words. Deterministic from
+ *  the Chords stage + spine, so it can always be rebuilt with one click. */
+export function buildInstrumentalTags(spine: readonly SpineSection[], chordsData: any): string {
+  const chordSecs: any[] = chordsData?.sections ?? [];
+  const rows = spine.length
+    ? spine.map((r) => ({ id: r.id as string | undefined, label: r.label, role: r.role }))
+    : chordSecs.map((s) => ({ id: s.section_id as string | undefined, label: String(s.label ?? "Section"), role: "" }));
+  const out: string[] = [];
+  for (const r of rows) {
+    const cs = chordSecs.find((s) => s.section_id && s.section_id === r.id)
+      ?? chordSecs.find((s) => normLabel(String(s.label ?? "")) === normLabel(r.label));
+    out.push(`[${r.label}]`);
+    const chords: any[] = cs?.chords ?? [];
+    if (chords.length) out.push(chords.map((c) => `[${c?.name ?? c}]`).join(" "));
+    const cue = (r.role || "").replace(/\s+/g, " ").trim();
+    if (cue) out.push(`[${cue}]`);
+    out.push("");
+  }
+  return out.join("\n").trim();
 }
 
 // compare the WORDS that get sung — ignore chord-tag spelling/quality differences
@@ -30,14 +56,24 @@ export function promptToMarkdown(d: PromptData): string {
 const wordsOnly = (s: string) => stripTags(s).replace(/\s+/g, " ").trim().toLowerCase();
 
 export function PromptEditor({
-  songId, stageId, kind, content, onChanged, lyricsTagged,
+  songId, stageId, kind, content, onChanged, lyricsTagged, spineSections, chordsData,
 }: {
   songId: string; stageId: string; kind: string; content: string; onChanged: () => void;
   /** the Lyrics stage's tagged text — the source of truth for the tagged lyrics field */
   lyricsTagged?: string;
+  /** the song's section spine + Chords stage data — sources for the Instrumental tab */
+  spineSections?: SpineSection[];
+  chordsData?: any;
 }) {
   const [d, setD] = useState<PromptData>(() => parsePrompt(content));
   const [saved, setSaved] = useState("");
+  const [tagTab, setTagTab] = useState<"sung" | "instrumental">("sung");
+  const buildInstr = () => buildInstrumentalTags(spineSections ?? [], chordsData);
+  // first visit to the Instrumental tab seeds it from Chords + Structure
+  const openInstrumental = () => {
+    setTagTab("instrumental");
+    if (!d.instrumentalTags.trim()) set({ instrumentalTags: buildInstr() });
+  };
   const set = (patch: Partial<PromptData>) => { setD((c) => ({ ...c, ...patch })); setSaved(""); };
   // the tagged lyrics should mirror the Lyrics stage verbatim; flag drift + offer a one-click pull
   const lyr = (lyricsTagged ?? "").trim();
@@ -64,18 +100,36 @@ export function PromptEditor({
       </div>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-          <label style={{ margin: 0 }}>Tagged lyrics <span className="faint">→ paste into the generator's LYRICS box ([Section] + inline [Chord] tags, from the Lyrics stage)</span></label>
+          <div className="row" style={{ gap: 8, alignItems: "flex-end" }}>
+            <div className="row" style={{ gap: 4 }}>
+              <button className={"sm" + (tagTab === "sung" ? " primary" : "")} onClick={() => setTagTab("sung")}>Sung</button>
+              <button className={"sm" + (tagTab === "instrumental" ? " primary" : "")} onClick={openInstrumental}>Instrumental</button>
+            </div>
+            <label style={{ margin: 0 }}>
+              {tagTab === "sung"
+                ? <>Tagged lyrics <span className="faint">→ paste into the generator's LYRICS box ([Section] + inline [Chord] tags, from the Lyrics stage)</span></>
+                : <>Instrumental tags <span className="faint">→ paste into the generator's LYRICS box for an instrumental take ([Section] + [Chord] runs + arrangement cues, no words)</span></>}
+            </label>
+          </div>
           <div className="row" style={{ gap: 6, alignItems: "center" }}>
-            {lyr && <button className={"sm" + (lyricsDiffer ? " primary" : " ghost")} title="replace with the exact lyrics from the Lyrics stage" onClick={pullFromLyrics}>↺ Pull from Lyrics</button>}
-            <FieldChat stageLabel="Generation Prompt" fieldLabel="tagged lyrics" current={d.taggedLyrics} onResult={(v) => set({ taggedLyrics: v })} />
+            {tagTab === "sung" && lyr && <button className={"sm" + (lyricsDiffer ? " primary" : " ghost")} title="replace with the exact lyrics from the Lyrics stage" onClick={pullFromLyrics}>↺ Pull from Lyrics</button>}
+            {tagTab === "instrumental" && <button className="sm ghost" title="rebuild from the Chords stage + section roles" onClick={() => set({ instrumentalTags: buildInstr() })}>↺ Build from Chords + Structure</button>}
+            <FieldChat
+              stageLabel="Generation Prompt"
+              fieldLabel={tagTab === "sung" ? "tagged lyrics" : "instrumental tags"}
+              current={tagTab === "sung" ? d.taggedLyrics : d.instrumentalTags}
+              onResult={(v) => set(tagTab === "sung" ? { taggedLyrics: v } : { instrumentalTags: v })}
+            />
           </div>
         </div>
-        {lyricsDiffer && (
+        {tagTab === "sung" && lyricsDiffer && (
           <div className="banner warn" style={{ marginBottom: 6 }}>
             ⚠ These don't match your <b>Lyrics</b> stage. The generator should sing your actual lyrics — click <b>↺ Pull from Lyrics</b> to sync, then Save.
           </div>
         )}
-        <textarea value={d.taggedLyrics} onChange={(e) => set({ taggedLyrics: e.target.value })} spellCheck={false} style={{ width: "100%", minHeight: 220, fontFamily: "var(--mono)", fontSize: 12 }} />
+        {tagTab === "sung"
+          ? <textarea value={d.taggedLyrics} onChange={(e) => set({ taggedLyrics: e.target.value })} spellCheck={false} style={{ width: "100%", minHeight: 220, fontFamily: "var(--mono)", fontSize: 12 }} />
+          : <textarea value={d.instrumentalTags} onChange={(e) => set({ instrumentalTags: e.target.value })} spellCheck={false} style={{ width: "100%", minHeight: 220, fontFamily: "var(--mono)", fontSize: 12 }} />}
       </div>
       <div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
