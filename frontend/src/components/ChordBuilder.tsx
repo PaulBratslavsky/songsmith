@@ -30,6 +30,14 @@ export function ChordBuilder() {
   const [picks, setPicks] = useState<{ g: number; p: number; a: number }[]>([]);
   const addProg = (c: string) => { setProg((p) => [...p, c]); setPicks((p) => [...p, { g: 0, p: 0, a: 0 }]); };
   const removeProg = (i: number) => { setProg((pr) => pr.filter((_, j) => j !== i)); setPicks((pr) => pr.filter((_, j) => j !== i)); };
+  // swap a card for the chord currently built above (picks reset — new chord,
+  // new shape); plays it so the change is heard in place
+  const replaceProg = (i: number, c: string) => {
+    setProg((pr) => pr.map((x, j) => (j === i ? c : x)));
+    setPicks((pr) => pr.map((e, j) => (j === i ? { g: 0, p: 0, a: 0 } : e)));
+    const m = chordMidisByName(c);
+    if (m.length) playChord(m);
+  };
   const clearProg = () => { setProg([]); setPicks([]); };
   const loadProg = (chords: string[]) => { setProg(chords); setPicks(chords.map(() => ({ g: 0, p: 0, a: 0 }))); };
   const [name, setName] = useState("");
@@ -229,7 +237,10 @@ export function ChordBuilder() {
                       <span className="faint" style={{ fontSize: 10, minWidth: 64, textAlign: "center" }}>{sub} ({idx + 1}/{count})</span>
                       <button className="sm ghost" disabled={count < 2} onClick={() => cycle(1)}>›</button>
                     </div>
-                    <button className="sm ghost danger" onClick={() => removeProg(i)}>remove</button>
+                    <div className="row" style={{ gap: 4 }}>
+                      <button className="sm ghost" title={`replace with ${built} (the chord built above)`} onClick={() => replaceProg(i, built)}>replace</button>
+                      <button className="sm ghost danger" onClick={() => removeProg(i)}>remove</button>
+                    </div>
                   </div>
                 );
               })}
