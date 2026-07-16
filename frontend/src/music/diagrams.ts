@@ -42,9 +42,37 @@ export function diagramSvg(name: string): string {
 }
 
 /** A printable chart for a progression (grid of best-voicing diagrams + notes). */
-export function chartSvg(names: string[], title = "Chord chart", voicings?: number[]): { svg: string; width: number; height: number } {
+export function chartSvg(
+  names: string[],
+  title = "Chord chart",
+  voicings?: number[],
+  instrument: "guitar" | "piano" | "ableton" = "guitar",
+): { svg: string; width: number; height: number } {
   const cols = Math.min(4, Math.max(1, names.length));
-  const cw = 100, ch = 130, pad = 16, top = 40;
+  const pad = 16, top = 40;
+  const idxOf = (i: number) => voicings?.[i] ?? 0;
+  // per-instrument cell size + inner renderer, each honoring the picked
+  // voicing (guitar) / inversion (piano, pads)
+  let cw = 100, ch = 130;
+  let innerAt: (n: string, i: number, cx: number, cy: number) => string;
+  if (instrument === "piano") {
+    const widths = names.map((n, i) => pianoVoicedInner(voicedMidisByName(n, idxOf(i)), 0, 0, 10).width);
+    cw = Math.max(96, ...widths, 0) + 14;
+    ch = 96;
+    innerAt = (n, i, cx, cy) => {
+      const inn = pianoVoicedInner(voicedMidisByName(n, idxOf(i)), 0, 0, 10);
+      return `<g transform="translate(${(cx + (cw - inn.width) / 2).toFixed(1)},${cy + 18})">${inn.markup}</g>`;
+    };
+  } else if (instrument === "ableton") {
+    cw = 96;
+    ch = 118;
+    innerAt = (n, i, cx, cy) => {
+      const p = padChordInner(n, 11, idxOf(i));
+      return p ? `<g transform="translate(${(cx + (cw - p.width) / 2).toFixed(1)},${cy + 18})">${p.markup}</g>` : "";
+    };
+  } else {
+    innerAt = (n, i, cx, cy) => guitarInner(guitarFretsByName(n, idxOf(i)), cx, cy);
+  }
   const rows = Math.ceil(names.length / cols);
   const W = pad * 2 + cols * cw, H = top + pad + rows * ch;
   let body = `<rect width="${W}" height="${H}" fill="#0e0f10"/>` +
@@ -52,9 +80,10 @@ export function chartSvg(names: string[], title = "Chord chart", voicings?: numb
   names.forEach((n, i) => {
     const cx = pad + (i % cols) * cw, cy = top + Math.floor(i / cols) * ch;
     const notes = chordPcsByName(n).map((pc) => NOTE_NAMES[pc]).join(" ");
-    body += `<text x="${cx + 43}" y="${cy + 12}" fill="${INK}" font-size="13" font-weight="bold" text-anchor="middle" font-family="monospace">${n}</text>`;
-    body += guitarInner(guitarFretsByName(n, voicings?.[i] ?? 0), cx, cy);
-    body += `<text x="${cx + 43}" y="${cy + 122}" fill="${LINE}" font-size="9" text-anchor="middle" font-family="monospace">${notes}</text>`;
+    const mid = instrument === "guitar" ? cx + 43 : cx + cw / 2;
+    body += `<text x="${mid}" y="${cy + 12}" fill="${INK}" font-size="13" font-weight="bold" text-anchor="middle" font-family="monospace">${n}</text>`;
+    body += innerAt(n, i, cx, cy);
+    body += `<text x="${mid}" y="${cy + ch - 8}" fill="${LINE}" font-size="9" text-anchor="middle" font-family="monospace">${notes}</text>`;
   });
   return { svg: `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${body}</svg>`, width: W, height: H };
 }

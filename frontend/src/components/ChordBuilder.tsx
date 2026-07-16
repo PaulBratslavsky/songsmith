@@ -171,7 +171,9 @@ export function ChordBuilder() {
               ))}
               {prog.length > 0 && <button className="sm" title="stub this progression in Ableton Live (AbletonMCP must be on)" onClick={() => buildInAbleton(prog)}>⚡ Ableton</button>}
               {prog.length > 0 && <button className="sm" onClick={async () => {
-                const chart = chartSvg(prog, name || "Chord chart", picks.map((k) => k.g));
+                // the chart follows the ACTIVE view — guitar voicings, piano
+                // inversions, or pad shapes, exactly as picked per chord
+                const chart = chartSvg(prog, name || "Chord chart", picks.map((k) => (progView === "guitar" ? k.g : progView === "piano" ? k.p : k.a)), progView);
                 const fname = `${(name || "chord-chart").replace(/[^\w.-]+/g, "_")}.png`;
                 if (inTauri) {
                   const bytes = await pngBytes(chart.svg, chart.width, chart.height);
