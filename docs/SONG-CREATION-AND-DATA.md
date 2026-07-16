@@ -103,9 +103,13 @@ copy in the lyrics artifact.
 
 ## Regenerate · Approve · History (what each button really does)
 
-- **Run / Re-run** saves the result IMMEDIATELY as a new artifact revision. It does
-  not wait for approval. Your previous version is never lost — History keeps every
-  revision, restorable whole or per-section.
+- **Run** (first time) saves the result directly as revision v1. **Re-run** parks
+  its output as a PENDING DRAFT (one per stage, stored outside History): the
+  current version stays live until you click **Accept draft** — which re-guards
+  the content (frozen sections, spine) and journals it as a new revision — or
+  **Discard**, which deletes it without a trace. A newer re-run replaces an
+  unreviewed draft. (Built 2026-07-16; closes the "it updated without approve"
+  gap noted below.)
 - **Approve & advance** does NOT accept content — content is already saved. It marks
   the stage done and moves the song to the next stage (it's the advancement gate,
   and downstream stages treat approved content as settled).
@@ -116,10 +120,8 @@ copy in the lyrics artifact.
   new revision (append-only, so a restore is also undoable) and restores the section
   spine from the revision's snapshot when it differs.
 
-Known gap (2026-07-15, user-hit): people expect Re-run to produce a DRAFT they accept
-or discard, not an immediate replacement. Candidate flow fix: regeneration lands as a
-pending revision with an accept/discard bar, current version stays displayed until
-accepted. Tracked in BACKLOG.md.
+(The 2026-07-15 known gap — Re-run replacing content without approval — is closed by
+the regenerate-as-draft flow above.)
 
 ## Where to look when something's wrong
 
