@@ -16,7 +16,18 @@ const suffix = (q: ChordQuality) => { const l = labelFor(q); return l === "maj" 
 export function ChordBuilder() {
   const [root, setRoot] = useState(0);
   const [quality, setQuality] = useState<ChordQuality>("maj");
-  const [prog, setProg] = useState<string[]>([]);
+  // the working progression + per-chord shape picks survive reloads (they
+  // used to live in bare component state — a hot reload or page hop wiped
+  // freshly picked inversions right before an export; user-hit 2026-07-16)
+  const WORKBENCH_KEY = "songsmith-builder-workbench";
+  const loadBench = (): { prog: string[]; picks: { g: number; p: number; a: number }[] } => {
+    try {
+      const v = JSON.parse(localStorage.getItem(WORKBENCH_KEY) || "");
+      if (Array.isArray(v?.prog) && Array.isArray(v?.picks)) return { prog: v.prog, picks: v.picks };
+    } catch {}
+    return { prog: [], picks: [] };
+  };
+  const [prog, setProg] = useState<string[]>(() => loadBench().prog);
   // per-entry shape picks for the progression cards (view-only — the library
   // stores chord NAMES): guitar voicing / piano inversion / pad inversion
   const [progView, setProgView] = useState<"guitar" | "piano" | "ableton">("guitar");
@@ -27,7 +38,10 @@ export function ChordBuilder() {
     setAbMsg("Stubbing the progression in Ableton…");
     try { setAbMsg(await api.abletonBuildProgression(chords, inversions)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); }
   };
-  const [picks, setPicks] = useState<{ g: number; p: number; a: number }[]>([]);
+  const [picks, setPicks] = useState<{ g: number; p: number; a: number }[]>(() => loadBench().picks);
+  useEffect(() => {
+    try { localStorage.setItem(WORKBENCH_KEY, JSON.stringify({ prog, picks })); } catch {}
+  }, [prog, picks]);
   const addProg = (c: string) => { setProg((p) => [...p, c]); setPicks((p) => [...p, { g: 0, p: 0, a: 0 }]); };
   const removeProg = (i: number) => { setProg((pr) => pr.filter((_, j) => j !== i)); setPicks((pr) => pr.filter((_, j) => j !== i)); };
   // swap a card for the chord currently built above (picks reset — new chord,
