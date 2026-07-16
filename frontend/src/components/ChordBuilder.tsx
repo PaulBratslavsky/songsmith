@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../ipc/api";
-import { NOTE_NAMES } from "../music/theory";
+import { NOTE_NAMES, diatonicChords } from "../music/theory";
 import { playChord } from "../music/synth";
 import { diagramSvg, chartSvg, downloadSvg, pianoVoicedSvg } from "../music/diagrams";
 import { padChordSvg } from "../music/pads";
@@ -19,6 +19,13 @@ export function ChordBuilder() {
   const [prog, setProg] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [view, setView] = useState<"guitar" | "piano" | "ableton">("guitar");
+  // scale lens: highlights the key's diatonic chords on the circle and lists
+  // them as one-click chips (root + quality land in the builder)
+  const [scale, setScale] = useState<{ root: number; mode: "major" | "minor" } | null>(null);
+  const diatonic = scale ? diatonicChords(scale.root, scale.mode) : [];
+  const scalePcs = new Set(diatonic.map((d) => {
+    const m = d.name.match(/^([A-G]#?)/); return m ? NOTE_NAMES.indexOf(m[1]) : -1;
+  }));
   const [vIdx, setVIdx] = useState(0);
   const [inversion, setInversion] = useState(0);
   const qc = useQueryClient();
@@ -42,7 +49,7 @@ export function ChordBuilder() {
           <h3>Build a chord</h3>
           <label>Root</label>
           <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
-            {NOTE_NAMES.map((n, i) => (<button key={n} className={"sm" + (i === root ? " primary" : "")} onClick={() => setRoot(i)}>{n}</button>))}
+            {NOTE_NAMES.map((n, i) => (<button key={n} className={"sm" + (i === root ? " primary" : "")} style={scale && scalePcs.has(i) && i !== root ? { borderColor: "var(--accent)" } : undefined} title={scale && scalePcs.has(i) ? "in the selected scale" : undefined} onClick={() => setRoot(i)}>{n}</button>))}
           </div>
           <label>Quality</label>
           <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
@@ -97,10 +104,47 @@ export function ChordBuilder() {
 
         <div className="card">
           <h3>Circle of fifths</h3>
-          <div style={{ display: "flex", justifyContent: "center" }}>
-            <CircleOfFifths rootPc={root} quality={quality === "min" ? "m" : ""} onPick={(pc, q) => { setRoot(pc); setQuality(q === "m" ? "min" : "maj"); }} />
+          <div className="row" style={{ gap: 8, alignItems: "flex-end", marginBottom: 6 }}>
+            <div>
+              <label>Scale</label>
+              <select
+                value={scale ? String(scale.root) : ""}
+                onChange={(e) => setScale(e.target.value === "" ? null : { root: Number(e.target.value), mode: scale?.mode ?? "minor" })}
+              >
+                <option value="">(none)</option>
+                {NOTE_NAMES.map((n, pc) => <option key={n} value={pc}>{n}</option>)}
+              </select>
+            </div>
+            <select disabled={!scale} value={scale?.mode ?? "minor"} onChange={(e) => scale && setScale({ ...scale, mode: e.target.value as "major" | "minor" })}>
+              <option value="minor">minor</option>
+              <option value="major">major</option>
+            </select>
+            {scale && <span className="faint" style={{ fontSize: 11 }}>diatonic chords highlighted below — click a chip to build it</span>}
           </div>
-          <p className="faint">Outer ring = major, inner = relative minor. Click to pick &amp; hear.</p>
+          {scale && (
+            <div className="row" style={{ flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+              {diatonic.map((d) => (
+                <button
+                  key={d.roman}
+                  className="sm"
+                  onClick={() => {
+                    const m = d.name.match(/^([A-G]#?)(.*)$/);
+                    if (!m) return;
+                    setRoot(NOTE_NAMES.indexOf(m[1]));
+                    setQuality(m[2] === "dim" ? "dim" : m[2] === "m" ? "min" : "maj");
+                    const midis = chordMidisByName(d.name);
+                    if (midis.length) playChord(midis);
+                  }}
+                >
+                  {d.name} <span className="faint">{d.roman}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <CircleOfFifths rootPc={root} quality={quality === "min" ? "m" : ""} onPick={(pc, q) => { setRoot(pc); setQuality(q === "m" ? "min" : "maj"); }} highlightNames={scale ? new Set(diatonic.map((d) => d.name)) : undefined} />
+          </div>
+          <p className="faint">Outer ring = major, inner = relative minor. Click to pick &amp; hear.{scale ? " Ringed = in the selected scale." : ""}</p>
         </div>
       </div>
 

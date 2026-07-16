@@ -12,10 +12,13 @@ export function CircleOfFifths({
   rootPc,
   quality,
   onPick,
+  highlightNames,
 }: {
   rootPc: number;
   quality: string;
   onPick: (pc: number, quality: string) => void;
+  /** chord names (e.g. "F#m", "D") to ring-highlight — the selected scale's diatonic chords */
+  highlightNames?: Set<string>;
 }) {
   const size = 220, c = size / 2, rOut = 92, rIn = 60;
   const pick = (pc: number, q: string) => {
@@ -27,9 +30,10 @@ export function CircleOfFifths({
     const ang = (i * 30 - 90) * (Math.PI / 180);
     const x = c + r * Math.cos(ang), y = c + r * Math.sin(ang);
     const sel = rootPc === pc && (quality === q || (q === "" && quality === "") );
+    const hl = !sel && (highlightNames?.has(NOTE_NAMES[pc] + q) ?? false);
     return (
       <g key={lbl + r} style={{ cursor: "pointer" }} onClick={() => pick(pc, q)}>
-        <circle cx={x} cy={y} r={15} fill={sel ? "var(--accent)" : "var(--paper-3)"} stroke="var(--line)" />
+        <circle cx={x} cy={y} r={15} fill={sel ? "var(--accent)" : "var(--paper-3)"} stroke={hl ? "var(--accent)" : "var(--line)"} strokeWidth={hl ? 2 : 1} />
         <text x={x} y={y + 3.5} textAnchor="middle" fontSize={q ? 9 : 10} fontFamily="monospace"
           fill={sel ? "#11140a" : "var(--ink)"}>{lbl}</text>
       </g>
