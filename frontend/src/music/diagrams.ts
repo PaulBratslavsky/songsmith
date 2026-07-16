@@ -42,7 +42,7 @@ export function diagramSvg(name: string): string {
 }
 
 /** A printable chart for a progression (grid of best-voicing diagrams + notes). */
-export function chartSvg(names: string[], title = "Chord chart"): string {
+export function chartSvg(names: string[], title = "Chord chart", voicings?: number[]): { svg: string; width: number; height: number } {
   const cols = Math.min(4, Math.max(1, names.length));
   const cw = 100, ch = 130, pad = 16, top = 40;
   const rows = Math.ceil(names.length / cols);
@@ -53,10 +53,10 @@ export function chartSvg(names: string[], title = "Chord chart"): string {
     const cx = pad + (i % cols) * cw, cy = top + Math.floor(i / cols) * ch;
     const notes = chordPcsByName(n).map((pc) => NOTE_NAMES[pc]).join(" ");
     body += `<text x="${cx + 43}" y="${cy + 12}" fill="${INK}" font-size="13" font-weight="bold" text-anchor="middle" font-family="monospace">${n}</text>`;
-    body += guitarInner(guitarFretsByName(n), cx, cy);
+    body += guitarInner(guitarFretsByName(n, voicings?.[i] ?? 0), cx, cy);
     body += `<text x="${cx + 43}" y="${cy + 122}" fill="${LINE}" font-size="9" text-anchor="middle" font-family="monospace">${notes}</text>`;
   });
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${body}</svg>`;
+  return { svg: `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${body}</svg>`, width: W, height: H };
 }
 
 const ROOT_COL = "#c8ff3d", SCALE_COL = "#5cff9d";

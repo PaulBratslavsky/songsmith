@@ -49,7 +49,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "delete_section", description: "Delete a section from a song's spine (stage content keyed to it is orphaned — deletion of a content-bearing section is a user decision).", destructive: true, input_schema: obj(json!({"id": s("section id")}), &["id"]) },
         ToolSpec { name: "reorder_sections", description: "Reorder a song's spine: pass EVERY section id of the song, each exactly once, in the new order.", destructive: false, input_schema: obj(json!({"song_id": s(""),"section_ids": {"type":"array","items":{"type":"string"},"description":"all of the song's section ids in the new order"}}), &["song_id","section_ids"]) },
         ToolSpec { name: "get_stage", description: "Get a stage with its current artifact and active skill.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
-        ToolSpec { name: "run_stage", description: "Run a stage: load skill + style preset + prior approved artifacts, call Claude, write the artifact.", destructive: false, input_schema: obj(json!({"stage_id": s(""),"user_input": s("optional seed (your own chords/lyrics/title)")}), &["stage_id"]) },
+        ToolSpec { name: "run_stage", description: "Run a stage: load skill + style preset + prior approved artifacts, call Claude. FIRST run saves the artifact directly; a RE-run lands as a PENDING DRAFT (the current artifact is untouched) — review it with get_stage, then accept_stage_draft or discard_stage_draft.", destructive: false, input_schema: obj(json!({"stage_id": s(""),"user_input": s("optional seed (your own chords/lyrics/title)")}), &["stage_id"]) },
+        ToolSpec { name: "accept_stage_draft", description: "Accept a stage's pending regeneration draft: it becomes the new current revision (frozen sections still protected); the draft clears.", destructive: false, input_schema: obj(json!({"stage_id": s("")}), &["stage_id"]) },
+        ToolSpec { name: "discard_stage_draft", description: "Discard a stage's pending regeneration draft — the current artifact was never touched.", destructive: false, input_schema: obj(json!({"stage_id": s("")}), &["stage_id"]) },
         ToolSpec { name: "approve_stage", description: "Approve a stage's current artifact, mark it done, advance the song.", destructive: false, input_schema: obj(json!({"stage_id": s("")}), &["stage_id"]) },
         ToolSpec { name: "advance_stage", description: "Move a song to its next pending stage.", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
         ToolSpec { name: "get_artifact", description: "Get an artifact by id.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
@@ -73,6 +75,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "add_render", description: "Add a final render: a label + file path on disk (Suno/Udio/Ableton take).", destructive: false, input_schema: obj(json!({"song_id": s(""),"label": s(""),"file_path": s(""),"source": s(""),"notes": s("")}), &["song_id","file_path"]) },
         ToolSpec { name: "set_render_pick", description: "Mark a render as the chosen winner for its song.", destructive: false, input_schema: obj(json!({"id": s(""),"is_pick": {"type":"boolean"}}), &["id","is_pick"]) },
         ToolSpec { name: "delete_render", description: "Remove a render reference (does not delete the file).", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
+        ToolSpec { name: "ableton_build_progression", description: "Stub a bare chord progression in Ableton Live's Arrangement (no song needed): one Progression section, one bar per chord, full Bass/Chords/Pad/Melody/Filler/Arp MIDI parts. Live must be open with AbletonMCP enabled.", destructive: false, input_schema: obj(json!({"chords": {"type":"array","items":{"type":"string"},"description":"chord names in order, e.g. [\"Bm\",\"A\",\"E\"]"},"bpm": {"type":"integer","description":"tempo (default 120)"}}), &["chords"]) },
         ToolSpec { name: "ableton_build_song", description: "Stub the whole song in Ableton Live's Arrangement view: a named, color-coded Sections clip track plus Bass/Chords/Pad/Chord melody/Filler/Arp MIDI parts generated deterministically from the song's chord progression (per-section density follows the energy arc). Talks straight to the AbletonMCP Remote Script socket — Live must be open with the control surface enabled. MIDI-only; re-running clears and rebuilds the same tracks. Returns a per-section build log.", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
         ToolSpec { name: "analyze_reference", description: "Analyze a local audio file (the perception layer for importing a reference): returns raw tempo, a key guess, bar-level chord candidates, and rough section boundaries as JSON. Interpret it with the Reference Analyst method — correct the key from the chord content, snap tempo, clean chords to the diatonic set, derive form from chord repetition — then create a song and save its Structure + Chords.", destructive: false, input_schema: obj(json!({"audio_path": s("absolute path to the local audio file")}), &["audio_path"]) },
         ToolSpec { name: "get_settings", description: "Get app settings.", destructive: false, input_schema: obj(json!({}), &[]) },
@@ -238,7 +241,12 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             v(db::reorder_sections(conn, arg(args, "song_id")?, &ids).await?)
         }
         "get_stage" => v(db::get_stage_detail(conn, arg(args, "id")?).await?),
-        "run_stage" => v(agent::run_stage(conn, settings, arg(args, "stage_id")?, arg_opt(args, "user_input").map(String::from), |_| {}, None).await?.artifact),
+        "run_stage" => {
+            let o = agent::run_stage(conn, settings, arg(args, "stage_id")?, arg_opt(args, "user_input").map(String::from), |_| {}, None).await?;
+            v(RunResult { artifact: o.artifact, draft: o.draft })
+        }
+        "accept_stage_draft" => v(agent::accept_stage_draft(conn, arg(args, "stage_id")?).await?),
+        "discard_stage_draft" => { agent::discard_stage_draft(conn, arg(args, "stage_id")?).await?; Ok(json!({ "discarded": true })) }
         "approve_stage" => approve_stage(conn, arg(args, "stage_id")?).await,
         "advance_stage" => advance_song(conn, arg(args, "song_id")?).await,
         "get_artifact" => v(db::get_artifact(conn, arg(args, "id")?).await?),
@@ -272,6 +280,15 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "add_render" => v(db::create_render(conn, arg(args, "song_id")?, arg_opt(args, "label").unwrap_or("Render"), arg(args, "file_path")?, arg_opt(args, "source").unwrap_or(""), arg_opt(args, "notes").unwrap_or("")).await?),
         "set_render_pick" => { db::set_render_pick(conn, arg(args, "id")?, args.get("is_pick").and_then(|b| b.as_bool()).unwrap_or(true)).await?; Ok(json!({ "ok": true })) }
         "delete_render" => { db::delete_render(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "ableton_build_progression" => {
+            let chords: Vec<String> = args.get("chords").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let bpm = args.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
+            Ok(json!(tokio::task::spawn_blocking(move || {
+                ableton::build_progression(bpm, &chords, &crate::midi::POP_DEFAULT, &|_| {})
+            }).await??))
+        }
         "ableton_build_song" => Ok(json!(ableton::build_song_for(conn, arg(args, "song_id")?, |_| {}).await?)),
         "analyze_reference" => run_analyzer(settings, arg(args, "audio_path")?).await,
         "get_settings" => v(db::get_settings(conn).await?),

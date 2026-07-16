@@ -36,7 +36,11 @@ pub fn kind_for_stage(stage_type: &str) -> &'static str {
 }
 
 pub struct RunOutcome {
-    pub artifact: Artifact,
+    /// Some on a FIRST run (saved directly); None when the run landed as a draft.
+    pub artifact: Option<Artifact>,
+    /// Some on a REGENERATION (regenerate-as-draft): the pending draft awaiting
+    /// Accept/Discard — the stage's current artifact is untouched.
+    pub draft: Option<StageDraft>,
     pub raw_output: String,
 }
 
@@ -103,8 +107,18 @@ where
         // without spine rows.
         let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str())).await?;
 
+        // Regenerate-as-draft (user decision 2026-07-15): a stage that already
+        // has an artifact keeps it — the run's output lands as THE pending
+        // draft (a newer run replaces an unreviewed one). Accept turns it into
+        // a revision; Discard deletes it. First runs save directly.
+        if prior_artifact.is_some() {
+            let draft = db::set_stage_draft(conn, stage_id, &song.id, kind_for_stage(&stage.r#type), &content).await?;
+            db::set_stage_status(conn, stage_id, &prior_status).await?;
+            return Ok::<RunOutcome, anyhow::Error>(RunOutcome { artifact: None, draft: Some(draft), raw_output: text });
+        }
+
         let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
-        Ok::<RunOutcome, anyhow::Error>(RunOutcome { artifact, raw_output: text })
+        Ok::<RunOutcome, anyhow::Error>(RunOutcome { artifact: Some(artifact), draft: None, raw_output: text })
     };
 
     match run.await {
@@ -115,6 +129,23 @@ where
             Err(e)
         }
     }
+}
+
+/// Accept a stage's pending draft: the draft content is RE-GUARDED against the
+/// stage's CURRENT state (the spine or frozen sections may have changed since
+/// the run) and saved as a new revision; the draft is cleared. The freeze
+/// splice therefore still protects locked sections at accept time.
+pub async fn accept_stage_draft(conn: &Connection, stage_id: &str) -> Result<Artifact> {
+    let draft = db::get_stage_draft(conn, stage_id).await?
+        .ok_or_else(|| anyhow!("no pending draft on this stage — run it first"))?;
+    let artifact = save_artifact_guarded(conn, &draft.song_id, Some(stage_id), &draft.kind, &draft.content).await?;
+    db::delete_stage_draft(conn, stage_id).await?;
+    Ok(artifact)
+}
+
+/// Throw a stage's pending draft away — the current artifact was never touched.
+pub async fn discard_stage_draft(conn: &Connection, stage_id: &str) -> Result<()> {
+    db::delete_stage_draft(conn, stage_id).await
 }
 
 /// Self-test + refine pass: the model critiques its own stage output against the
@@ -1503,7 +1534,11 @@ mod tests {
         let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}, None).await.unwrap();
         std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
 
-        let new = serde_json::from_str::<Value>(&outcome.artifact.content).unwrap();
+        // regenerate-as-draft: the regen parks as a DRAFT (current untouched);
+        // its content already carries the frozen merge the user will preview
+        assert!(outcome.artifact.is_none(), "a regen must not save a revision directly");
+        let draft = outcome.draft.expect("a regen lands as a pending draft");
+        let new = serde_json::from_str::<Value>(&draft.content).unwrap();
         let new_secs = new["data"]["sections"].as_array().unwrap();
         let new_verse = new_secs.iter().find(|s| s["label"] == "Verse 1").unwrap();
         let new_chorus = new_secs.iter().find(|s| s["label"] == "Chorus").unwrap();
@@ -1543,7 +1578,8 @@ mod tests {
         std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
 
         let expected = json!({ "kind": "chords", "text": claude_out, "data": extract_json(&claude_out) }).to_string();
-        assert_eq!(outcome.artifact.content, expected, "no-frozen path must match the legacy content exactly");
+        let artifact = outcome.artifact.expect("a FIRST run saves directly (no draft)");
+        assert_eq!(artifact.content, expected, "no-frozen path must match the legacy content exactly");
     }
 
     /// Shared fixture: a song whose chords stage has a current artifact with

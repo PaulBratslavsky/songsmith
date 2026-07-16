@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, listen, STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
 import { StageChecklist, staleStageIds } from "../components/StageChecklist";
+import { DraftBar } from "../components/DraftBar";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { HistoryButton } from "../components/RevisionHistory";
 import { AIRunPanel } from "../components/AIRunPanel";
@@ -238,6 +239,7 @@ export function SongWorkspace() {
               ⚠ <b>Out of date.</b> An earlier stage changed after this was generated. Re-run this stage to rebuild it from the current upstream content.
             </div>
           )}
+          {sd?.draft && <DraftBar draft={sd.draft} onChanged={invalidate} />}
           {stage.isLoading && <div className="empty">Loading stage…</div>}
           {sd && !sd.artifact && (
             <div className="banner">

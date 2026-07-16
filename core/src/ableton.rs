@@ -299,6 +299,21 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], prof
     Ok(log.join("\n"))
 }
 
+/// Stub a bare chord PROGRESSION in Ableton (the Chord Builder's export): one
+/// "Progression" section, one bar per chord, through the same track builder a
+/// song uses — Sections/Bass/Chords/Pad/etc. follow the given profile.
+pub fn build_progression(bpm: i64, chords: &[String], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
+    if chords.is_empty() {
+        return Ok("Nothing to build — add chords to the progression first.".into());
+    }
+    let sections = vec![(
+        "Progression".to_string(),
+        chords.len() as i64,
+        chords.iter().map(|c| (c.clone(), 4i64)).collect::<Vec<_>>(),
+    )];
+    build_song(bpm, &sections, profile, progress)
+}
+
 // ---- Song-level orchestrators (fetch from the DB, then build) ---------------
 // Shared by the Tauri commands AND the MCP `ableton_build_song` tool.
 

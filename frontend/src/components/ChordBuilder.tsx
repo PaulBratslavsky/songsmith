@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../ipc/api";
+import { api, inTauri, savePng, revealFile } from "../ipc/api";
 import { NOTE_NAMES, diatonicChords } from "../music/theory";
 import { playChord } from "../music/synth";
-import { diagramSvg, chartSvg, downloadSvg, pianoVoicedSvg } from "../music/diagrams";
+import { chartSvg, downloadPng, pngBytes, diagramSvgShape, pianoVoicedSvg } from "../music/diagrams";
 import { padChordSvg } from "../music/pads";
-import { QUALITY_OPTIONS, guitarFrets, guitarCount, chordPcsIdx, voicedMidis, voicedNotes, chordMidisByName } from "../music/engineAdapter";
+import { QUALITY_OPTIONS, guitarFrets, guitarCount, chordPcsIdx, voicedMidis, voicedNotes, chordMidisByName, guitarFretsByName, guitarCountByName, chordSizeByName, voicedMidisByName } from "../music/engineAdapter";
 import type { ChordQuality } from "../lib/music/types";
 import { CircleOfFifths } from "./CircleOfFifths";
 import { GuitarView } from "./GuitarView";
@@ -17,6 +17,19 @@ export function ChordBuilder() {
   const [root, setRoot] = useState(0);
   const [quality, setQuality] = useState<ChordQuality>("maj");
   const [prog, setProg] = useState<string[]>([]);
+  // per-entry shape picks for the progression cards (view-only — the library
+  // stores chord NAMES): guitar voicing / piano inversion / pad inversion
+  const [progView, setProgView] = useState<"guitar" | "piano" | "ableton">("guitar");
+  const [abMsg, setAbMsg] = useState("");
+  const buildInAbleton = async (chords: string[]) => {
+    setAbMsg("Stubbing the progression in Ableton…");
+    try { setAbMsg(await api.abletonBuildProgression(chords)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); }
+  };
+  const [picks, setPicks] = useState<{ g: number; p: number; a: number }[]>([]);
+  const addProg = (c: string) => { setProg((p) => [...p, c]); setPicks((p) => [...p, { g: 0, p: 0, a: 0 }]); };
+  const removeProg = (i: number) => { setProg((pr) => pr.filter((_, j) => j !== i)); setPicks((pr) => pr.filter((_, j) => j !== i)); };
+  const clearProg = () => { setProg([]); setPicks([]); };
+  const loadProg = (chords: string[]) => { setProg(chords); setPicks(chords.map(() => ({ g: 0, p: 0, a: 0 }))); };
   const [name, setName] = useState("");
   const [view, setView] = useState<"guitar" | "piano" | "ableton">("guitar");
   // scale lens: highlights the key's diatonic chords on the circle and lists
@@ -60,7 +73,7 @@ export function ChordBuilder() {
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <b style={{ fontSize: 18 }}>{built}{inversion > 0 ? ` (inv ${inversion})` : ""}</b>
               <button className="sm" onClick={() => playChord(voicedMidis(root, quality, inversion))}>♪ play</button>
-              <button className="sm primary" onClick={() => setProg((p) => [...p, built])}>+ add</button>
+              <button className="sm primary" onClick={() => addProg(built)}>+ add</button>
             </div>
             <div className="row" style={{ gap: 4 }}>
               <button className={"sm" + (view === "guitar" ? " primary" : "")} onClick={() => setView("guitar")}>Guitar</button>
@@ -152,25 +165,77 @@ export function ChordBuilder() {
         <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h3 style={{ margin: 0 }}>Progression</h3>
-            {prog.length > 0 && <button className="sm" onClick={() => downloadSvg(chartSvg(prog, name || "Chord chart"), "chord-chart.svg")}>⬇ Export chart</button>}
+            <div className="row" style={{ gap: 4 }}>
+              {prog.length > 0 && (["guitar", "piano", "ableton"] as const).map((vw) => (
+                <button key={vw} className={"sm" + (progView === vw ? " primary" : "")} onClick={() => setProgView(vw)}>{vw === "guitar" ? "Guitar" : vw === "piano" ? "Piano" : "Push"}</button>
+              ))}
+              {prog.length > 0 && <button className="sm" title="stub this progression in Ableton Live (AbletonMCP must be on)" onClick={() => buildInAbleton(prog)}>⚡ Ableton</button>}
+              {prog.length > 0 && <button className="sm" onClick={async () => {
+                const chart = chartSvg(prog, name || "Chord chart", picks.map((k) => k.g));
+                const fname = `${(name || "chord-chart").replace(/[^\w.-]+/g, "_")}.png`;
+                if (inTauri) {
+                  const bytes = await pngBytes(chart.svg, chart.width, chart.height);
+                  const path = await savePng(fname, bytes);
+                  if (path) await revealFile(path); // open the containing folder
+                } else {
+                  downloadPng(chart.svg, chart.width, chart.height, fname);
+                }
+              }}>⬇ Export chart</button>}
+            </div>
           </div>
+          {abMsg && <div className="banner" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>{abMsg}<button className="sm ghost" style={{ marginLeft: 8 }} onClick={() => setAbMsg("")}>×</button></div>}
           {prog.length === 0 ? (
             <p className="faint">No chords yet — build a chord and “+ add”.</p>
           ) : (
-            <div className="row" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-              {prog.map((c, i) => (
-                <div key={i} className="col" style={{ alignItems: "center", gap: 2 }}>
-                  <div dangerouslySetInnerHTML={{ __html: diagramSvg(c) }} onClick={() => { const m = chordMidisByName(c); if (m.length) playChord(m); }} style={{ cursor: "pointer" }} />
-                  <button className="sm ghost danger" onClick={() => setProg((pr) => pr.filter((_, j) => j !== i))}>remove</button>
-                </div>
-              ))}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8, marginTop: 8, justifyItems: "center" }}>
+              {prog.map((c, i) => {
+                const k = picks[i] ?? { g: 0, p: 0, a: 0 };
+                const idx = progView === "guitar" ? k.g : progView === "piano" ? k.p : k.a;
+                const count = Math.max(1, progView === "guitar" ? guitarCountByName(c) : chordSizeByName(c));
+                const svg = progView === "guitar"
+                  ? diagramSvgShape(guitarFretsByName(c, idx), c)
+                  : progView === "piano"
+                  ? pianoVoicedSvg(voicedMidisByName(c, idx), c)
+                  : (padChordSvg(c, 20, idx) ?? `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="60"></svg>`);
+                const sub = progView === "guitar" ? (guitarFretsByName(c, idx)?.label ?? "—") : ["root", "1st inv", "2nd inv", "3rd inv", "4th inv"][idx] ?? `inv ${idx}`;
+                const cycle = (dir: number) => setPicks((pr) => pr.map((e, j) => {
+                  if (j !== i) return e;
+                  const next = ((idx + dir) % count + count) % count;
+                  return progView === "guitar" ? { ...e, g: next } : progView === "piano" ? { ...e, p: next } : { ...e, a: next };
+                }));
+                const play = () => {
+                  const m = progView === "guitar" ? chordMidisByName(c) : voicedMidisByName(c, idx);
+                  if (m.length) playChord(m);
+                };
+                // fixed-size SVGs (esp. the piano's keyboard span) must fit the
+                // 4-col grid cell — scale oversized ones down with EXPLICIT
+                // width/height (the WebView renders style-only svg at height 0)
+                const fitted = svg.replace(/<svg width="([\d.]+)" height="([\d.]+)"/, (m, w, h) => {
+                  const W = parseFloat(w); const H = parseFloat(h); const MAX = 150;
+                  if (W <= MAX) return m;
+                  const s = MAX / W;
+                  // the original viewBox attribute follows and keeps the aspect
+                  return `<svg width="${Math.round(W * s)}" height="${Math.round(H * s)}"`;
+                });
+                return (
+                  <div key={i} className="col" style={{ alignItems: "center", gap: 2, minWidth: 0, width: "100%" }}>
+                    <div dangerouslySetInnerHTML={{ __html: fitted }} onClick={play} style={{ cursor: "pointer", maxWidth: "100%", display: "flex", justifyContent: "center" }} />
+                    <div className="row" style={{ gap: 4, alignItems: "center" }}>
+                      <button className="sm ghost" disabled={count < 2} onClick={() => cycle(-1)}>‹</button>
+                      <span className="faint" style={{ fontSize: 10, minWidth: 64, textAlign: "center" }}>{sub} ({idx + 1}/{count})</span>
+                      <button className="sm ghost" disabled={count < 2} onClick={() => cycle(1)}>›</button>
+                    </div>
+                    <button className="sm ghost danger" onClick={() => removeProg(i)}>remove</button>
+                  </div>
+                );
+              })}
             </div>
           )}
           {prog.length > 0 && (
             <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Progression name" style={{ width: 200 }} />
               <button className="primary" onClick={() => save.mutate()} disabled={save.isPending}>Save to library</button>
-              <button className="ghost" onClick={() => setProg([])}>clear</button>
+              <button className="ghost" onClick={clearProg}>clear</button>
             </div>
           )}
         </div>
@@ -185,8 +250,19 @@ export function ChordBuilder() {
                   <span className="faint">{p.chords.join(" · ")}</span>
                 </div>
                 <div className="row" style={{ gap: 6 }}>
-                  <button className="sm ghost" onClick={() => setProg(p.chords)}>load</button>
-                  <button className="sm" onClick={() => downloadSvg(chartSvg(p.chords, p.name), `${p.name}.svg`)}>export</button>
+                  <button className="sm ghost" onClick={() => loadProg(p.chords)}>load</button>
+                  <button className="sm" title="stub in Ableton" onClick={() => buildInAbleton(p.chords)}>⚡</button>
+                  <button className="sm" onClick={async () => {
+                    const chart = chartSvg(p.chords, p.name);
+                    const fname = `${p.name.replace(/[^\w.-]+/g, "_")}.png`;
+                    if (inTauri) {
+                      const bytes = await pngBytes(chart.svg, chart.width, chart.height);
+                      const path = await savePng(fname, bytes);
+                      if (path) await revealFile(path);
+                    } else {
+                      downloadPng(chart.svg, chart.width, chart.height, fname);
+                    }
+                  }}>export</button>
                   <button className="sm danger" onClick={() => del.mutate(p.id)}>delete</button>
                 </div>
               </div>

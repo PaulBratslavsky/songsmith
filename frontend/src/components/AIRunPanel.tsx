@@ -121,6 +121,9 @@ export function AIRunPanel({
         {hasArtifact && (
           <button onClick={approve} disabled={approved}>{approved ? "Approved ✓" : "Approve & advance"}</button>
         )}
+        {hasArtifact && !running && (
+          <span className="faint" style={{ fontSize: 11 }}>a re-run lands as a DRAFT — accept or discard it above; the current version stays until then</span>
+        )}
       </div>
 
       {error && <div className="banner err" style={{ marginTop: 10 }}>{error}</div>}

@@ -2,8 +2,14 @@
 import type { Artifact } from "./Artifact";
 import type { Skill } from "./Skill";
 import type { Stage } from "./Stage";
+import type { StageDraft } from "./StageDraft";
 
 /**
  * A stage plus its current artifact, returned together for the workspace view.
  */
-export type StageDetail = { stage: Stage, artifact: Artifact | null, skill: Skill | null, };
+export type StageDetail = { stage: Stage, artifact: Artifact | null, skill: Skill | null, 
+/**
+ * A pending regeneration draft (regenerate-as-draft): the last run's
+ * output awaiting Accept/Discard. None = nothing pending.
+ */
+draft: StageDraft | null, };

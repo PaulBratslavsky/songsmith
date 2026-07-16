@@ -1,6 +1,8 @@
 // Barrel for the Rust-generated TypeScript types (ts-rs). Regenerate with
 // `cargo test -p song_core export_bindings`.
 export type { Artifact } from "./Artifact";
+export type { RunResult } from "./RunResult";
+export type { StageDraft } from "./StageDraft";
 export type { CompositionMeta } from "./CompositionMeta";
 export type { CompositionRow } from "./CompositionRow";
 export type { Progression } from "./Progression";

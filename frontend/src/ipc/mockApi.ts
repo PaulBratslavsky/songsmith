@@ -679,7 +679,7 @@ const handlers: MockHandlers = {
   get_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.id);
     if (!stage) return null;
-    return { stage: toStage(withArtifactAt(stage)), artifact: toArtifact(currentArtifact(a.id)), skill: activeSkill(stage.type) };
+    return { stage: toStage(withArtifactAt(stage)), artifact: toArtifact(currentArtifact(a.id)), skill: activeSkill(stage.type), draft: (db.drafts ?? []).find((d: Any) => d.stage_id === a.id) ?? null };
   },
   run_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.stageId);
@@ -692,12 +692,33 @@ const handlers: MockHandlers = {
     const kind = KINDS[stage.type] ?? "artifact";
     const text = `# ${kind} (mock)\n\nSimulated ${stage.type} for this song. Run in the Tauri app with Claude for real output.\n` +
       (a.userInput ? `\nYour seed:\n${a.userInput}\n` : "");
-    const ver = (currentArtifact(a.stageId)?.version ?? 0) + 1;
+    // regenerate-as-draft parity: a stage that already has an artifact parks
+    // the run as THE pending draft; first runs save directly
+    if (currentArtifact(a.stageId)) {
+      db.drafts = (db.drafts ?? []).filter((d: Any) => d.stage_id !== a.stageId);
+      const draft = { stage_id: a.stageId, song_id: stage.song_id, kind,
+        content: JSON.stringify({ kind, text, data: null }), created_at: now() };
+      db.drafts.push(draft);
+      stage.status = "done";
+      return { artifact: null, draft };
+    }
     const art = { id: uid(), song_id: stage.song_id, stage_id: a.stageId, kind,
-      content: JSON.stringify({ kind, text, data: null }), version: ver, approved: false, created_at: now() };
+      content: JSON.stringify({ kind, text, data: null }), version: 1, approved: false, created_at: now() };
     db.artifacts.push(art);
+    return { artifact: toArtifact(art), draft: null };
+  },
+  accept_stage_draft: (a) => {
+    const d = (db.drafts ?? []).find((x: Any) => x.stage_id === a.stageId);
+    if (!d) throw new Error("no pending draft on this stage");
+    const ver = (currentArtifact(a.stageId)?.version ?? 0) + 1;
+    const art = { id: uid(), song_id: d.song_id, stage_id: a.stageId, kind: d.kind,
+      content: d.content, version: ver, approved: false, created_at: now() };
+    db.artifacts.push(art);
+    db.drafts = db.drafts.filter((x: Any) => x.stage_id !== a.stageId);
     return toArtifact(art);
   },
+  discard_stage_draft: (a) => { db.drafts = (db.drafts ?? []).filter((x: Any) => x.stage_id !== a.stageId); return null; },
+  ableton_build_progression: (a) => `(mock) would stub ${a.chords.length} chords in Ableton`,
   cancel_stage: () => undefined, // mock runs finish instantly — nothing to cancel
   approve_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.stageId);
@@ -872,12 +893,12 @@ const MOCK_TOOLS = [
   "list_style_presets","get_style_preset","create_style_preset","update_style_preset","generate_style_preset","set_preset_arrangement","generate_preset_arrangement",
   "create_song","create_song_from_lyrics","import_lyrics","list_songs","get_song","update_song_status","update_song_title","update_song_intent","delete_song",
   "list_sections","create_section","update_section","delete_section","reorder_sections",
-  "get_stage","run_stage","approve_stage","advance_stage",
+  "get_stage","run_stage","accept_stage_draft","discard_stage_draft","approve_stage","advance_stage",
   "get_artifact","save_artifact","list_artifact_revisions","revert_artifact","set_artifact_label",
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",
   "list_progressions","save_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
-  "ableton_build_song","analyze_reference",
+  "ableton_build_song","ableton_build_progression","analyze_reference",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" || name === "delete_section" }));

@@ -220,7 +220,7 @@ async fn get_stage(state: State<'_, AppState>, id: String) -> R<Option<StageDeta
 /// Run a stage. Streams `stage_token` then a final `stage_done`. Deduped and
 /// cancellable via `cancel_stage`.
 #[tauri::command]
-async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: String, user_input: Option<String>) -> R<Artifact> {
+async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: String, user_input: Option<String>) -> R<RunResult> {
     {
         let mut set = state.inflight.lock().unwrap();
         if set.contains(&stage_id) {
@@ -240,8 +240,25 @@ async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: 
     state.running.lock().unwrap().remove(&stage_id);
     state.inflight.lock().unwrap().remove(&stage_id);
     let outcome = result.map_err(e2s)?;
-    let _ = app.emit("stage_done", serde_json::json!({ "stage_id": stage_id, "artifact_id": outcome.artifact.id }));
-    Ok(outcome.artifact)
+    let _ = app.emit("stage_done", serde_json::json!({
+        "stage_id": stage_id,
+        "artifact_id": outcome.artifact.as_ref().map(|a| a.id.clone()),
+        "drafted": outcome.draft.is_some(),
+    }));
+    Ok(RunResult { artifact: outcome.artifact, draft: outcome.draft })
+}
+
+/// Accept a stage's pending regeneration draft → it becomes a real revision
+/// (re-guarded against the current spine/frozen sections); the draft clears.
+#[tauri::command]
+async fn accept_stage_draft(state: State<'_, AppState>, stage_id: String) -> R<Artifact> {
+    agent::accept_stage_draft(&state.conn, &stage_id).await.map_err(e2s)
+}
+
+/// Throw a stage's pending draft away — the current artifact is untouched.
+#[tauri::command]
+async fn discard_stage_draft(state: State<'_, AppState>, stage_id: String) -> R<()> {
+    agent::discard_stage_draft(&state.conn, &stage_id).await.map_err(e2s)
 }
 
 /// Cancel an in-flight stage run: fire its cancel token — the run's Claude child
@@ -1006,6 +1023,17 @@ async fn ableton_build_song(app: tauri::AppHandle, state: State<'_, AppState>, s
     .map_err(e2s)
 }
 
+/// Stub a bare chord progression in Ableton (Chord Builder export).
+#[tauri::command]
+async fn ableton_build_progression(chords: Vec<String>, bpm: Option<i64>) -> R<String> {
+    tokio::task::spawn_blocking(move || {
+        song_core::ableton::build_progression(bpm.unwrap_or(120), &chords, &song_core::midi::POP_DEFAULT, &|_| {})
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(e2s)
+}
+
 /// Free the single Ableton socket by stopping stray standalone `ableton-mcp`
 /// processes squatting on it (run this when Test reports "busy").
 #[tauri::command]
@@ -1072,6 +1100,8 @@ pub fn run() {
             delete_song,
             get_stage,
             run_stage,
+            accept_stage_draft,
+            discard_stage_draft,
             cancel_stage,
             approve_stage,
             advance_stage,
@@ -1117,6 +1147,7 @@ pub fn run() {
             ableton_build,
             ableton_build_clips,
             ableton_build_song,
+            ableton_build_progression,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

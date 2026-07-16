@@ -99,6 +99,18 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     // per-preset Ableton arrangement profile JSON (Phase 2; '' = keyword fallback)
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN arrangement TEXT NOT NULL DEFAULT ''", ()).await;
     let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
+    // regenerate-as-draft: at most ONE pending draft per stage, stored outside
+    // the artifact history (discarded drafts never pollute revisions)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS stage_draft (
+            stage_id TEXT PRIMARY KEY,
+            song_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )",
+        (),
+    ).await?;
     // retrofit the Lyric Spec stage (added between Chords and Lyrics) into existing
     // songs that predate it — make room by shifting Lyrics/Prompt, then insert.
     // TRANSACTIONAL: the shift + insert must land together — a crash between them
@@ -662,6 +674,7 @@ pub async fn set_song_current_stage(conn: &Connection, id: &str, stage_type: &st
 pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
     // all-or-nothing — never leave orphaned stages/artifacts behind
     let tx = conn.transaction().await?;
+    tx.execute("DELETE FROM stage_draft WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM artifact WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM render WHERE song_id = ?1", params![id]).await?;
@@ -842,7 +855,36 @@ pub async fn get_stage_detail(conn: &Connection, id: &str) -> Result<Option<Stag
     let Some(stage) = get_stage(conn, id).await? else { return Ok(None) };
     let artifact = current_artifact(conn, id).await?;
     let skill = get_active_skill_for_stage(conn, &stage.r#type).await?;
-    Ok(Some(StageDetail { stage, artifact, skill }))
+    let draft = get_stage_draft(conn, id).await?;
+    Ok(Some(StageDetail { stage, artifact, skill, draft }))
+}
+
+// ---- Regeneration drafts (regenerate-as-draft) ------------------------------
+
+const DRAFT_COLS: &str = "stage_id, song_id, kind, content, created_at";
+fn map_draft(r: &libsql::Row) -> StageDraft {
+    StageDraft { stage_id: s(r, 0), song_id: s(r, 1), kind: s(r, 2), content: s(r, 3), created_at: s(r, 4) }
+}
+
+/// Upsert THE pending draft for a stage (a newer re-run replaces an
+/// unreviewed older draft — there is never a queue of them).
+pub async fn set_stage_draft(conn: &Connection, stage_id: &str, song_id: &str, kind: &str, content: &str) -> Result<StageDraft> {
+    conn.execute(
+        "INSERT INTO stage_draft (stage_id, song_id, kind, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(stage_id) DO UPDATE SET song_id=?2, kind=?3, content=?4, created_at=?5",
+        params![stage_id, song_id, kind, content, now()],
+    ).await?;
+    get_stage_draft(conn, stage_id).await?.ok_or_else(|| anyhow!("draft not found after upsert"))
+}
+
+pub async fn get_stage_draft(conn: &Connection, stage_id: &str) -> Result<Option<StageDraft>> {
+    let mut rows = conn.query(&format!("SELECT {DRAFT_COLS} FROM stage_draft WHERE stage_id = ?1"), params![stage_id]).await?;
+    Ok(rows.next().await?.as_ref().map(map_draft))
+}
+
+pub async fn delete_stage_draft(conn: &Connection, stage_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM stage_draft WHERE stage_id = ?1", params![stage_id]).await?;
+    Ok(())
 }
 
 // ---- Artifacts (journaled) -------------------------------------------------

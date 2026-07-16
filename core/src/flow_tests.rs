@@ -131,9 +131,12 @@ async fn run_mock(conn: &Connection, fake: &FakeClaude, stage_id: &str, mock: &s
             Ok(out) if out.raw_output == mock => return out,
             Ok(out) => {
                 // another module's canned value leaked in — undo and retry
-                conn.execute("DELETE FROM artifact WHERE id = ?1", params![out.artifact.id.clone()])
-                    .await
-                    .unwrap();
+                if let Some(a) = &out.artifact {
+                    conn.execute("DELETE FROM artifact WHERE id = ?1", params![a.id.clone()])
+                        .await
+                        .unwrap();
+                }
+                db::delete_stage_draft(conn, stage_id).await.unwrap();
                 restore_spine(conn, &stage.song_id, &spine_before).await;
             }
             Err(_) => {} // interference errored the run; nothing was saved
@@ -141,6 +144,18 @@ async fn run_mock(conn: &Connection, fake: &FakeClaude, stage_id: &str, mock: &s
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     }
     panic!("run_mock: could not complete a clean scripted run for stage {stage_id}");
+}
+
+/// The artifact a scripted run LANDED: a first run's direct artifact, or (for
+/// a regeneration, which now parks as a pending draft — regenerate-as-draft)
+/// the draft auto-ACCEPTED into a revision. For tests whose subject isn't the
+/// draft flow itself; the draft tests use run_mock + the draft API directly.
+async fn run_mock_landed(conn: &Connection, fake: &FakeClaude, stage_id: &str, mock: &str) -> Artifact {
+    let out = run_mock(conn, fake, stage_id, mock).await;
+    match out.artifact {
+        Some(a) => a,
+        None => agent::accept_stage_draft(conn, stage_id).await.unwrap(),
+    }
 }
 
 async fn make_song(conn: &Connection, title: &str) -> Song {
@@ -200,11 +215,11 @@ async fn flow_happy_path_full_lifecycle() {
         "theme": "finding each other in a flooded city",
         "emotionalArc": "lonely → found", "mood": ["wet", "electric"]
     }));
-    let out = run_mock(&conn, &fake, &stage("concept").id, &concept_out).await;
-    assert_eq!(out.artifact.kind, "concept");
-    assert_eq!(out.artifact.version, 1);
-    assert!(!out.artifact.approved, "a run never self-approves");
-    let v = content(&out.artifact);
+    let a = run_mock_landed(&conn, &fake, &stage("concept").id, &concept_out).await;
+    assert_eq!(a.kind, "concept");
+    assert_eq!(a.version, 1);
+    assert!(!a.approved, "a run never self-approves");
+    let v = content(&a);
     assert_eq!(v["text"].as_str().unwrap(), concept_out, "non-section stage keeps the raw model text");
     assert_eq!(v["data"]["hook"], "we dance where the rain glows");
     assert_eq!(stage_status(&conn, &stage("concept").id).await, "in_progress", "run leaves the stage unapproved");
@@ -222,8 +237,8 @@ async fn flow_happy_path_full_lifecycle() {
             { "type": "bridge", "label": "Bridge",  "bars": 4, "role": "the turn" }
         ]
     }));
-    let out = run_mock(&conn, &fake, &stage("structure").id, &structure_out).await;
-    let v = content(&out.artifact);
+    let a = run_mock_landed(&conn, &fake, &stage("structure").id, &structure_out).await;
+    let v = content(&a);
     // Phase 4: notes-only data — the SPINE owns the sections, the SONG the key/bpm
     assert_eq!(v["data"], json!({ "keyNote": "minor key carries the ache", "tempoNote": "steady mid-tempo" }));
     let rows = db::list_sections(&conn, &song.id).await.unwrap();
@@ -243,8 +258,8 @@ async fn flow_happy_path_full_lifecycle() {
         { "label": "Chorus",  "chords": [{"name":"C","beats":4},{"name":"G","beats":4}] },
         { "label": "Bridge",  "chords": [{"name":"Dm","beats":4}] }
     ]}));
-    let out = run_mock(&conn, &fake, &stage("chords").id, &chords_out).await;
-    let v = content(&out.artifact);
+    let a = run_mock_landed(&conn, &fake, &stage("chords").id, &chords_out).await;
+    let v = content(&a);
     assert_eq!(v["text"].as_str().unwrap(), render_stage_text("chords", &v["data"]).unwrap(), "text rebuilt from data");
     assert!(v["text"].as_str().unwrap().contains("Verse 1: Am F"));
     assert!(!v["text"].as_str().unwrap().contains('⚠'), "clean run carries no warn lines");
@@ -267,8 +282,8 @@ async fn flow_happy_path_full_lifecycle() {
         ],
         "imageBank": ["neon on black water"], "avoid": ["generic rain clichés"]
     }));
-    let out = run_mock(&conn, &fake, &stage("lyric_spec").id, &spec_out).await;
-    let v = content(&out.artifact);
+    let a = run_mock_landed(&conn, &fake, &stage("lyric_spec").id, &spec_out).await;
+    let v = content(&a);
     assert_eq!(v["text"].as_str().unwrap(), render_stage_text("lyric_spec", &v["data"]).unwrap(), "text rebuilt from data");
     assert!(v["text"].as_str().unwrap().contains("**HOOK:** we dance where the rain glows"));
     assert_eq!(v["data"]["beats"][0]["section_id"], json!(rows[0].id), "beats keyed to the spine");
@@ -282,8 +297,8 @@ async fn flow_happy_path_full_lifecycle() {
         { "label": "Chorus",  "lines": ["[C]We dance where the [G]rain glows", "Nothing cold can find us now"] },
         { "label": "Bridge",  "lines": ["[Dm]Maybe the flood was the only way home"] }
     ]}));
-    let out = run_mock(&conn, &fake, &stage("lyrics").id, &lyrics_out).await;
-    let v = content(&out.artifact);
+    let a = run_mock_landed(&conn, &fake, &stage("lyrics").id, &lyrics_out).await;
+    let v = content(&a);
     assert_eq!(v["text"].as_str().unwrap(), render_stage_text("lyrics", &v["data"]).unwrap(), "text rebuilt from data");
     assert!(v["text"].as_str().unwrap().contains("[Am]Streetlights drown in [F]silver water"));
     assert_eq!(v["data"]["sections"][2]["section_id"], json!(rows[2].id));
@@ -301,9 +316,9 @@ async fn flow_happy_path_full_lifecycle() {
         [Verse 1]\n[Am]Streetlights drown in [F]silver water\nI count the ripples where you were\n\n\
         [Chorus]\n[C]We dance where the [G]rain glows\nNothing cold can find us now\n\n\
         [Bridge]\n[Dm]Maybe the flood was the only way home\n";
-    let out = run_mock(&conn, &fake, &stage("prompt").id, prompt_out).await;
-    assert_eq!(out.artifact.kind, "generation_prompt");
-    let v = content(&out.artifact);
+    let a = run_mock_landed(&conn, &fake, &stage("prompt").id, prompt_out).await;
+    assert_eq!(a.kind, "generation_prompt");
+    let v = content(&a);
     let text = v["text"].as_str().unwrap();
     assert_eq!(text, prompt_out, "the prompt stage keeps the model text verbatim");
     assert!(!text.contains("{PASTE"), "no paste-here placeholder may survive to the final prompt");
@@ -344,13 +359,13 @@ async fn flow_song_facts_cannot_be_clobbered() {
         "keyNote": "steady and dark", "tempoNote": "",
         "sections": [ { "type": "verse", "label": "Verse 1", "bars": 8, "role": "open" } ]
     }));
-    let out = run_mock(&conn, &fake, &structure.id, &out).await;
+    let a = run_mock_landed(&conn, &fake, &structure.id, &out).await;
 
     // the song row is untouched
     let after = db::get_song(&conn, &song.id).await.unwrap().unwrap();
     assert_eq!((after.key_root.as_str(), after.key_mode.as_str(), after.bpm), ("F#", "minor", 109), "song facts survive the run");
     // the saved data carries NO key/bpm fields at all
-    let v = content(&out.artifact);
+    let v = content(&a);
     assert!(v["data"].get("key").is_none(), "structure data must not carry a key, got: {}", v["data"]);
     assert!(v["data"].get("bpm").is_none(), "structure data must not carry a bpm, got: {}", v["data"]);
     assert_eq!(v["data"], json!({ "keyNote": "steady and dark", "tempoNote": "" }));
@@ -387,9 +402,9 @@ async fn flow_ai_cannot_invent_or_drop_sections() {
         { "label": "Chorus",  "chords": [{"name":"C","beats":4}] },
         { "label": "Outro",   "chords": [{"name":"G","beats":4}] }
     ]}));
-    let out = run_mock(&conn, &fake, &chords_stage.id, &chords_out).await;
+    let a = run_mock_landed(&conn, &fake, &chords_stage.id, &chords_out).await;
     assert_eq!(spine_fp(&conn, &song.id).await, before, "a chords run must not create/rename/delete spine rows (D3)");
-    let v = content(&out.artifact);
+    let v = content(&a);
     let secs = v["data"]["sections"].as_array().unwrap();
     assert_eq!(secs.len(), 2, "the invented Outro is dropped, never created");
     assert!(secs.iter().all(|s| s["label"] != "Outro"));
@@ -407,12 +422,12 @@ async fn flow_ai_cannot_invent_or_drop_sections() {
             { "type": "",      "label": "Bridge",  "bars": 4, "role": "" }
         ]
     }));
-    let out = run_mock(&conn, &fake, &structure_stage.id, &structure_out).await;
+    let a = run_mock_landed(&conn, &fake, &structure_stage.id, &structure_out).await;
     let rows = db::list_sections(&conn, &song.id).await.unwrap();
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(labels, ["Verse 1", "Chorus", "Bridge"], "the content-bearing Chorus is KEPT near its old spot (D2)");
     assert_eq!(rows[1].id, chorus.id, "the kept row keeps its identity");
-    let text = content(&out.artifact)["text"].as_str().unwrap().to_string();
+    let text = content(&a)["text"].as_str().unwrap().to_string();
     assert!(text.contains('⚠') && text.contains("Chorus") && text.contains("kept"),
         "the keep is surfaced where reconcile_structure_run puts it (the artifact text), got: {text}");
 }
@@ -579,15 +594,19 @@ async fn flow_revision_history_and_revert() {
         { "label": "Verse 1", "lines": ["version one verse"] },
         { "label": "Chorus",  "lines": ["version one chorus"] }
     ]}));
-    let v1 = run_mock(&conn, &fake, &lyrics_stage.id, &out_a).await.artifact;
+    let v1 = run_mock_landed(&conn, &fake, &lyrics_stage.id, &out_a).await;
     assert_eq!(v1.version, 1);
 
     let out_b = fenced(&json!({ "sections": [
         { "label": "Verse 1", "lines": ["version two verse, reworked"] },
         { "label": "Chorus",  "lines": ["version two chorus, reworked"] }
     ]}));
-    let v2 = run_mock(&conn, &fake, &lyrics_stage.id, &out_b).await.artifact;
+    // the regen parks as a draft (regenerate-as-draft); accepting journals v2
+    let out = run_mock(&conn, &fake, &lyrics_stage.id, &out_b).await;
+    assert!(out.artifact.is_none() && out.draft.is_some(), "a regen lands as a pending draft");
+    let v2 = agent::accept_stage_draft(&conn, &lyrics_stage.id).await.unwrap();
     assert_eq!(v2.version, 2);
+    assert!(db::get_stage_draft(&conn, &lyrics_stage.id).await.unwrap().is_none(), "accept clears the draft");
 
     let revs = db::list_artifact_revisions(&conn, &lyrics_stage.id).await.unwrap();
     assert_eq!(revs.iter().map(|a| a.version).collect::<Vec<_>>(), vec![2, 1], "both runs journaled");
@@ -613,10 +632,11 @@ async fn flow_revision_history_and_revert() {
     assert_eq!(v["data"]["sections"][1]["section_id"], json!(chorus.id));
 }
 
-/// Scenario 8 — APPROVE GATES ADVANCEMENT ONLY: regenerating an unapproved
-/// stage stacks a new revision without touching approval; `approve_stage`
-/// marks done (+ approves the current revision) and advancement moves the song
-/// pointer; a later stage's run approves NOTHING.
+/// Scenario 8 — APPROVE GATES ADVANCEMENT ONLY (regenerate-as-draft): a regen
+/// parks as a PENDING DRAFT leaving the current revision untouched; ACCEPT
+/// stacks the new revision without touching approval; DISCARD throws the draft
+/// away; `approve_stage` marks done (+ approves the current revision) and
+/// advancement moves the song pointer; a later stage's run approves NOTHING.
 #[tokio::test]
 async fn flow_approve_gates_advancement_only() {
     let (_db, conn) = mem_conn().await;
@@ -629,12 +649,27 @@ async fn flow_approve_gates_advancement_only() {
         "title": "Gate", "alternates": [], "hook": hook, "theme": "t", "emotionalArc": "a", "mood": ["m"]
     }));
 
-    // run + regenerate the unapproved concept: two revisions, nothing approved
-    let v1 = run_mock(&conn, &fake, &concept.id, &mk_concept("first hook")).await.artifact;
-    let v2 = run_mock(&conn, &fake, &concept.id, &mk_concept("second, better hook")).await.artifact;
-    assert_eq!((v1.version, v2.version), (1, 2), "a regen overwrites by stacking a new revision");
+    // first run saves directly; the REGEN parks as a draft, current untouched
+    let v1 = run_mock_landed(&conn, &fake, &concept.id, &mk_concept("first hook")).await;
+    let out = run_mock(&conn, &fake, &concept.id, &mk_concept("second, better hook")).await;
+    let draft = out.draft.expect("a regen lands as a pending draft");
+    assert!(out.artifact.is_none());
+    assert!(draft.content.contains("second, better hook"));
+    let cur = db::current_artifact(&conn, &concept.id).await.unwrap().unwrap();
+    assert_eq!((cur.id.as_str(), cur.version), (v1.id.as_str(), 1), "the draft leaves the current revision alone");
+
+    // DISCARD throws it away without a trace in History
+    agent::discard_stage_draft(&conn, &concept.id).await.unwrap();
+    assert!(db::get_stage_draft(&conn, &concept.id).await.unwrap().is_none());
+    assert_eq!(db::list_artifact_revisions(&conn, &concept.id).await.unwrap().len(), 1, "a discarded draft never journals");
+
+    // regen again and ACCEPT → v2 stacks; nothing approved
+    let out = run_mock(&conn, &fake, &concept.id, &mk_concept("second, better hook")).await;
+    assert!(out.draft.is_some());
+    let v2 = agent::accept_stage_draft(&conn, &concept.id).await.unwrap();
+    assert_eq!((v1.version, v2.version), (1, 2), "accepting the draft stacks the new revision");
     let revs = db::list_artifact_revisions(&conn, &concept.id).await.unwrap();
-    assert!(revs.iter().all(|a| !a.approved), "regenerating never touches approval");
+    assert!(revs.iter().all(|a| !a.approved), "regenerating/accepting never touches approval");
     assert_ne!(stage_status(&conn, &concept.id).await, "done", "running is not approving");
     assert_eq!(current_stage(&conn, &song.id).await, "concept", "the song pointer has not advanced");
 
@@ -653,7 +688,7 @@ async fn flow_approve_gates_advancement_only() {
         "keyNote": "", "tempoNote": "",
         "sections": [ { "type": "verse", "label": "Verse 1", "bars": 8, "role": "" } ]
     }));
-    let s1 = run_mock(&conn, &fake, &structure.id, &structure_out).await.artifact;
+    let s1 = run_mock_landed(&conn, &fake, &structure.id, &structure_out).await;
     assert!(!s1.approved, "a run never self-approves");
     assert_ne!(stage_status(&conn, &structure.id).await, "done");
     assert_eq!(stage_status(&conn, &concept.id).await, "done", "the earlier approval is untouched");

@@ -260,6 +260,33 @@ pub struct StageDetail {
     pub stage: Stage,
     pub artifact: Option<Artifact>,
     pub skill: Option<Skill>,
+    /// A pending regeneration draft (regenerate-as-draft): the last run's
+    /// output awaiting Accept/Discard. None = nothing pending.
+    #[serde(default)]
+    pub draft: Option<StageDraft>,
+}
+
+/// A pending regeneration draft — one per stage, stored OUTSIDE the artifact
+/// revision history (discarded drafts never pollute History). Re-running a
+/// stage that already has an artifact writes here; Accept turns it into a
+/// real revision (re-guarded), Discard deletes it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/ipc/generated/")]
+pub struct StageDraft {
+    pub stage_id: String,
+    pub song_id: String,
+    pub kind: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// What a stage run returned: a direct artifact (first run) OR a pending
+/// draft (regeneration). Exactly one is Some.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/ipc/generated/")]
+pub struct RunResult {
+    pub artifact: Option<Artifact>,
+    pub draft: Option<StageDraft>,
 }
 
 /// A song plus its style preset and ordered stages, for the workspace.
