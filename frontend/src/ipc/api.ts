@@ -75,7 +75,7 @@ export type CommandMap = {
   get_stage: { args: { id: string }; result: StageDetail | null };
   run_stage: { args: { stageId: string; userInput: string | null }; result: RunResult };
   accept_stage_draft: { args: { stageId: string }; result: Artifact };
-  ableton_build_progression: { args: { chords: string[]; bpm: number | null }; result: string };
+  ableton_build_progression: { args: { chords: string[]; inversions: number[] | null; bpm: number | null }; result: string };
   discard_stage_draft: { args: { stageId: string }; result: null };
   cancel_stage: { args: { stageId: string }; result: void };
   self_check_stage: { args: { stageId: string }; result: Artifact };
@@ -268,7 +268,7 @@ export const api = {
   selfCheckStage: (stageId: string) => call("self_check_stage", { stageId }),
   approveStage: (stageId: string) => call("approve_stage", { stageId }),
   acceptStageDraft: (stageId: string) => call("accept_stage_draft", { stageId }),
-  abletonBuildProgression: (chords: string[], bpm?: number) => call("ableton_build_progression", { chords, bpm: bpm ?? null }),
+  abletonBuildProgression: (chords: string[], inversions?: number[], bpm?: number) => call("ableton_build_progression", { chords, inversions: inversions ?? null, bpm: bpm ?? null }),
   discardStageDraft: (stageId: string) => call("discard_stage_draft", { stageId }),
   advanceStage: (songId: string) => call("advance_stage", { songId }),
 

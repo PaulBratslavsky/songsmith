@@ -237,7 +237,10 @@ pub fn build_clips(bpm: i64, sections: &[(String, i64)]) -> Result<String> {
 /// plus Bass / Chords / Pad / Chord melody / Filler / Arp MIDI parts generated
 /// from the chord progression — direct socket, no MCP/LLM. MIDI-only (you pick
 /// the sounds).
-pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
+/// `section_invs` (optional, aligned with `sections` by index) carries each
+/// section's per-chord inversion picks — the Chord Builder's progression
+/// export uses it; song builds pass `&[]` (root position).
+pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], section_invs: &[Vec<i64>], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
     progress("Connecting to Ableton (port 9877)…".into());
     let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
@@ -283,7 +286,7 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], prof
             if part == "Sections" {
                 let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
             } else {
-                let notes = part_notes(part, chords, *bars, profile);
+                let notes = part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[]));
                 if !notes.is_empty() {
                     let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                 }
@@ -302,7 +305,7 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], prof
 /// Stub a bare chord PROGRESSION in Ableton (the Chord Builder's export): one
 /// "Progression" section, one bar per chord, through the same track builder a
 /// song uses — Sections/Bass/Chords/Pad/etc. follow the given profile.
-pub fn build_progression(bpm: i64, chords: &[String], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
+pub fn build_progression(bpm: i64, chords: &[String], inversions: &[i64], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
     if chords.is_empty() {
         return Ok("Nothing to build — add chords to the progression first.".into());
     }
@@ -311,7 +314,7 @@ pub fn build_progression(bpm: i64, chords: &[String], profile: &crate::midi::Arr
         chords.len() as i64,
         chords.iter().map(|c| (c.clone(), 4i64)).collect::<Vec<_>>(),
     )];
-    build_song(bpm, &sections, profile, progress)
+    build_song(bpm, &sections, &[inversions.to_vec()], profile, progress)
 }
 
 // ---- Song-level orchestrators (fetch from the DB, then build) ---------------
@@ -354,7 +357,7 @@ pub async fn build_song_for(conn: &Connection, song_id: &str, progress: impl Fn(
         .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
         .unwrap_or_else(|| *preset.as_ref().map(|p| crate::midi::profile_for_genre(&p.genre)).unwrap_or(&crate::midi::POP_DEFAULT));
     let bpm = song.bpm;
-    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &profile, &progress)).await?
+    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &[], &profile, &progress)).await?
 }
 
 #[cfg(test)]

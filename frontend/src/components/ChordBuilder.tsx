@@ -21,9 +21,11 @@ export function ChordBuilder() {
   // stores chord NAMES): guitar voicing / piano inversion / pad inversion
   const [progView, setProgView] = useState<"guitar" | "piano" | "ableton">("guitar");
   const [abMsg, setAbMsg] = useState("");
-  const buildInAbleton = async (chords: string[]) => {
+  // the MIDI voicing honors the picked inversions — Push picks in Push view,
+  // else the piano picks (guitar voicings don't map to closed inversions)
+  const buildInAbleton = async (chords: string[], inversions?: number[]) => {
     setAbMsg("Stubbing the progression in Ableton…");
-    try { setAbMsg(await api.abletonBuildProgression(chords)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); }
+    try { setAbMsg(await api.abletonBuildProgression(chords, inversions)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); }
   };
   const [picks, setPicks] = useState<{ g: number; p: number; a: number }[]>([]);
   const addProg = (c: string) => { setProg((p) => [...p, c]); setPicks((p) => [...p, { g: 0, p: 0, a: 0 }]); };
@@ -169,7 +171,7 @@ export function ChordBuilder() {
               {prog.length > 0 && (["guitar", "piano", "ableton"] as const).map((vw) => (
                 <button key={vw} className={"sm" + (progView === vw ? " primary" : "")} onClick={() => setProgView(vw)}>{vw === "guitar" ? "Guitar" : vw === "piano" ? "Piano" : "Push"}</button>
               ))}
-              {prog.length > 0 && <button className="sm" title="stub this progression in Ableton Live (AbletonMCP must be on)" onClick={() => buildInAbleton(prog)}>⚡ Ableton</button>}
+              {prog.length > 0 && <button className="sm" title="stub this progression in Ableton Live (AbletonMCP must be on)" onClick={() => buildInAbleton(prog, picks.map((k) => (progView === "ableton" ? k.a : k.p)))}>⚡ Ableton</button>}
               {prog.length > 0 && <button className="sm" onClick={async () => {
                 // the chart follows the ACTIVE view — guitar voicings, piano
                 // inversions, or pad shapes, exactly as picked per chord

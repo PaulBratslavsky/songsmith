@@ -176,32 +176,48 @@ pub fn section_parts(label: &str) -> &'static [&'static str] {
 }
 
 /// Lay the looped progression along the section timeline using each chord's beats,
-/// returning (chord, start_beat, duration_beats) events filling `bars` × 4 beats.
-pub fn chord_events(chords: &[(String, i64)], bars: i64) -> Vec<(String, f64, f64)> {
+/// returning (source_index, chord, start_beat, duration_beats) events filling
+/// `bars` × 4 beats — the source index keys per-chord options (inversions).
+pub fn chord_events(chords: &[(String, i64)], bars: i64) -> Vec<(usize, String, f64, f64)> {
     let total = (bars * 4) as f64;
     let mut out = Vec::new();
     if chords.is_empty() { return out; }
     let (mut t, mut i) = (0.0_f64, 0usize);
     while t < total - 0.01 {
-        let (name, beats) = &chords[i % chords.len()];
+        let idx = i % chords.len();
+        let (name, beats) = &chords[idx];
         let len = (*beats as f64).max(0.5);
-        out.push((name.clone(), t, len.min(total - t)));
+        out.push((idx, name.clone(), t, len.min(total - t)));
         t += len;
         i += 1;
     }
     out
 }
 
+/// Rotate chord tones into closed-voicing inversion `k` — wrapped tones jump
+/// an octave (same convention as the piano/pad views).
+pub fn invert_tones(tones: &[i64], k: i64) -> Vec<i64> {
+    let n = tones.len() as i64;
+    if n == 0 { return Vec::new(); }
+    let k = ((k % n) + n) % n;
+    (0..n).map(|i| tones[((k + i) % n) as usize] + if k + i >= n { 12 } else { 0 }).collect()
+}
+
 /// Generate the MIDI notes for one part over a section, honoring each chord's beats
 /// (chord events of any length). The profile picks each track's pattern —
 /// bass figure, chord treatment, arp rate, pad presence, melody density —
 /// and scales velocities (soft washes vs punchy mixes).
-pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &ArrangementProfile) -> Vec<Value> {
+/// `invs` aligns with `chords` by index (empty = all root position): the
+/// picked closed-voicing inversion rotates the tone stack for the harmonic
+/// tracks; the BASS stays on the root (a picked inversion is a voicing
+/// choice, not a slash-bass instruction).
+pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &ArrangementProfile, invs: &[i64]) -> Vec<Value> {
     let mut out = Vec::new();
     let v = |base: i64| ((base as f64 * p.vel_scale) as i64).clamp(20, 127);
     let mut prev_bass = -1i64; // for bass voice-leading across the section
-    for (name, start, dur) in chord_events(chords, bars) {
-        let Some((pc, tones)) = chord_tones(&name) else { continue };
+    for (idx, name, start, dur) in chord_events(chords, bars) {
+        let Some((pc, root_tones)) = chord_tones(&name) else { continue };
+        let tones = invert_tones(&root_tones, invs.get(idx).copied().unwrap_or(0));
         let third = tones.get(1).copied().unwrap_or(4);
         let top = tones.last().copied().unwrap_or(7);
         match part {
@@ -304,9 +320,9 @@ mod tests {
         // 2 bars = 8 beats; Am(4) F(2) loops → Am@0(4), F@4(2), Am@6 clipped to 2
         let evs = chord_events(&[("Am".into(), 4), ("F".into(), 2)], 2);
         assert_eq!(evs, vec![
-            ("Am".into(), 0.0, 4.0),
-            ("F".into(), 4.0, 2.0),
-            ("Am".into(), 6.0, 2.0),
+            (0, "Am".into(), 0.0, 4.0),
+            (1, "F".into(), 4.0, 2.0),
+            (0, "Am".into(), 6.0, 2.0),
         ]);
         assert!(chord_events(&[], 4).is_empty());
     }
@@ -316,18 +332,18 @@ mod tests {
         let chords = vec![("Am".to_string(), 4), ("F".to_string(), 4)];
         // Bass (pop default = Walking): notes exist and stay in the walking-bass
         // register (roots clamped 31–47, fifths at most +7 above)
-        let bass = part_notes("Bass", &chords, 2, &POP_DEFAULT);
+        let bass = part_notes("Bass", &chords, 2, &POP_DEFAULT, &[]);
         assert!(!bass.is_empty());
         for n in &bass {
             let p = n["pitch"].as_i64().unwrap();
             assert!((31..=54).contains(&p), "bass pitch {p} out of register");
         }
         // Arp (pop default = Eighths): 8th-note subdivision → 8 notes per 4-beat chord
-        let arp = part_notes("Arp", &chords, 2, &POP_DEFAULT);
+        let arp = part_notes("Arp", &chords, 2, &POP_DEFAULT, &[]);
         assert_eq!(arp.len(), 16);
         // an unknown part yields nothing; unparseable chords are skipped
-        assert!(part_notes("Kazoo", &chords, 2, &FOUR_FLOOR).is_empty());
-        assert!(part_notes("Bass", &[("??".into(), 4)], 2, &FOUR_FLOOR).is_empty());
+        assert!(part_notes("Kazoo", &chords, 2, &FOUR_FLOOR, &[]).is_empty());
+        assert!(part_notes("Bass", &[("??".into(), 4)], 2, &FOUR_FLOOR, &[]).is_empty());
     }
 
     /// The style-aware profiles change the actual notes: dark half-time gets
@@ -337,8 +353,8 @@ mod tests {
         let chords = vec![("F#m".to_string(), 4), ("D".to_string(), 4)];
         // dark half-time: one ringing hit per 4-beat chord (no >=4.0-only ghost
         // fires at exactly 4.0 → 2 notes), all in the sub register
-        let dark = part_notes("Bass", &chords, 2, &DARK_HALFTIME);
-        let drive = part_notes("Bass", &chords, 2, &SYNTHWAVE);
+        let dark = part_notes("Bass", &chords, 2, &DARK_HALFTIME, &[]);
+        let drive = part_notes("Bass", &chords, 2, &SYNTHWAVE, &[]);
         assert!(dark.len() < drive.len(), "half-time 808 must be sparser than eighth drive ({} vs {})", dark.len(), drive.len());
         for n in &dark {
             let p = n["pitch"].as_i64().unwrap();
@@ -347,14 +363,34 @@ mod tests {
         // eighth drive: 8 root hits per 4-beat chord
         assert_eq!(drive.len(), 16);
         // arp rates: dark = off, synthwave = 16ths (16 notes per 4-beat chord)
-        assert!(part_notes("Arp", &chords, 2, &DARK_HALFTIME).is_empty());
-        assert_eq!(part_notes("Arp", &chords, 2, &SYNTHWAVE).len(), 32);
+        assert!(part_notes("Arp", &chords, 2, &DARK_HALFTIME, &[]).is_empty());
+        assert_eq!(part_notes("Arp", &chords, 2, &SYNTHWAVE, &[]).len(), 32);
         // pad presence follows the profile
-        assert!(part_notes("Pad", &chords, 2, &TRAP_808).is_empty());
-        assert!(!part_notes("Pad", &chords, 2, &DARK_HALFTIME).is_empty());
+        assert!(part_notes("Pad", &chords, 2, &TRAP_808, &[]).is_empty());
+        assert!(!part_notes("Pad", &chords, 2, &DARK_HALFTIME, &[]).is_empty());
         // ambient wash scales velocities down
-        let wash = part_notes("Chords", &chords, 2, &AMBIENT_WASH);
+        let wash = part_notes("Chords", &chords, 2, &AMBIENT_WASH, &[]);
         assert!(wash.iter().all(|n| n["velocity"].as_i64().unwrap() <= 60));
+    }
+
+    /// Closed-voicing inversion rotation + its effect on the Chords track:
+    /// inversion picks change the voiced pitches, bass root stays put.
+    #[test]
+    fn inversions_rotate_voicings_but_not_the_bass() {
+        assert_eq!(invert_tones(&[0, 4, 7], 0), vec![0, 4, 7]);
+        assert_eq!(invert_tones(&[0, 4, 7], 1), vec![4, 7, 12]);
+        assert_eq!(invert_tones(&[0, 4, 7], 2), vec![7, 12, 16]);
+        assert_eq!(invert_tones(&[0, 3, 7, 10], 3), vec![10, 12, 15, 19]);
+        let chords = vec![("C".to_string(), 4)];
+        let root_pos: Vec<i64> = part_notes("Chords", &chords, 1, &POP_DEFAULT, &[])
+            .iter().map(|n| n["pitch"].as_i64().unwrap()).collect();
+        let inv2: Vec<i64> = part_notes("Chords", &chords, 1, &POP_DEFAULT, &[2])
+            .iter().map(|n| n["pitch"].as_i64().unwrap()).collect();
+        assert_eq!(root_pos, vec![48, 52, 55]);
+        assert_eq!(inv2, vec![55, 60, 64], "2nd inversion voices G C E");
+        let bass_a = part_notes("Bass", &chords, 1, &POP_DEFAULT, &[]);
+        let bass_b = part_notes("Bass", &chords, 1, &POP_DEFAULT, &[2]);
+        assert_eq!(bass_a, bass_b, "the bass stays on the root regardless of inversion");
     }
 
     /// Preset-stored arrangement JSON: valid JSON parses (with defaults for
