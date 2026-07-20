@@ -141,6 +141,50 @@ function padSectionToBars(
 }
 
 /**
+ * Build a Composition from a bare chord progression (the Chord Builder's
+ * "→ Composer" export): one span per chord, one bar each, a single
+ * "Progression" section, melody/bass empty and editable. The key defaults to
+ * the first chord's root (+ its quality's mode) when none is given.
+ */
+export function compositionFromProgression(
+  names: string[],
+  keyRoot?: string,
+  keyMode?: string,
+): Composition | null {
+  const clean = names.map((n) => n.trim()).filter(Boolean);
+  if (!clean.length) return null;
+  const first = parseChordSymbol(clean[0]);
+  const root: PitchClass = normalizePitchClass(keyRoot ?? '') ?? first?.root ?? 'C';
+  const mode: KeyMode = keyMode === 'major' || keyMode === 'minor'
+    ? keyMode
+    : /m(?!aj)/.test(clean[0].slice(1)) ? 'minor' : 'major';
+  const chords: ChordSpan[] = clean.map((name, i) => ({
+    id: uid('span'),
+    degree: degreeForChordName(name, root, mode),
+    seventh: false,
+    name,
+    start: i * TICKS_PER_BAR,
+    length: TICKS_PER_BAR,
+  }));
+  const totalTicks = clean.length * TICKS_PER_BAR;
+  const draft: Composition = {
+    id: `prog-${clean.join('-')}`,
+    version: SCHEMA_VERSION,
+    name: 'Progression sketch',
+    key: { root, mode },
+    bpm: DEFAULT_BPM,
+    bars: clean.length,
+    totalTicks,
+    chords,
+    melody: [],
+    bass: [],
+    sections: [{ id: uid('sec'), name: 'Progression', startTick: 0, lengthTicks: totalTicks }],
+    lyrics: [],
+  };
+  return parseStoredComposition(draft) ?? draft;
+}
+
+/**
  * Build a Composition spanning the whole song.
  *
  * @param keyRoot  song key root (e.g. "A"); accepts flat/sharp spellings

@@ -305,16 +305,56 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
 /// Stub a bare chord PROGRESSION in Ableton (the Chord Builder's export): one
 /// "Progression" section, one bar per chord, through the same track builder a
 /// song uses — Sections/Bass/Chords/Pad/etc. follow the given profile.
-pub fn build_progression(bpm: i64, chords: &[String], inversions: &[i64], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
+/// Lay a bare chord PROGRESSION into Ableton as ONE MIDI track (user decision
+/// 2026-07-20: just the chords, not the 7-track song stub): a single
+/// "Progression" track, one bar per chord, held triads voiced at the picked
+/// inversions. Re-running clears and rebuilds only that track.
+/// `beats` aligns with `chords` (empty = 4 beats each — one bar per chord).
+pub fn build_progression(bpm: i64, chords: &[String], beats: &[i64], inversions: &[i64], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
     if chords.is_empty() {
         return Ok("Nothing to build — add chords to the progression first.".into());
     }
-    let sections = vec![(
-        "Progression".to_string(),
-        chords.len() as i64,
-        chords.iter().map(|c| (c.clone(), 4i64)).collect::<Vec<_>>(),
-    )];
-    build_song(bpm, &sections, &[inversions.to_vec()], profile, progress)
+    progress("Connecting to Ableton (port 9877)…".into());
+    let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+        .map_err(|e| anyhow!("Can't reach Ableton on 9877 ({e}). Open Live (AbletonMCP on) and free the connection."))?;
+    s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+    s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
+    let nap = || std::thread::sleep(Duration::from_millis(35));
+    let _ = ableton_cmd(&mut s, json!({"type":"set_tempo","params":{"tempo": bpm as f64}}));
+    let _ = ableton_cmd(&mut s, json!({"type":"switch_to_arrangement_view","params":{}}));
+
+    // rebuild-clean, but ONLY our own track — a song stub's tracks are left alone
+    let _ = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": ["Progression"]}}));
+    nap();
+    let ti = ableton_cmd(&mut s, json!({"type":"create_midi_track","params":{"index":-1}}))
+        .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()))
+        .unwrap_or(0);
+    let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": "Progression"}}));
+    nap();
+
+    progress(format!("Placing {} chords…", chords.len()));
+    let ch: Vec<(String, i64)> = chords.iter().enumerate()
+        .map(|(i, c)| (c.clone(), beats.get(i).copied().filter(|&b| b > 0).unwrap_or(4)))
+        .collect();
+    let total_beats: i64 = ch.iter().map(|(_, b)| b).sum();
+    let bars = (total_beats + 3) / 4;
+    let notes = part_notes("Chords", &ch, bars, profile, inversions);
+    let length = (bars * 4) as f64;
+    let _ = ableton_cmd(&mut s, json!({"type":"create_clip","params":{"track_index": ti, "clip_index": 0, "length": length}}));
+    if !notes.is_empty() {
+        let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": 0, "notes": notes}}));
+    }
+    let _ = ableton_cmd(&mut s, json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": 0, "name": chords.join(" · ")}}));
+    let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": 0, "color": part_color("Chords")}}));
+    let _ = ableton_cmd(&mut s, json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": 0, "destination_time": 0.0}}));
+
+    let voiced = inversions.iter().any(|&i| i != 0);
+    Ok(format!(
+        "✓ Progression track: {} chords · {bars} bars @ {bpm} BPM{}",
+        chords.len(),
+        if voiced { " · picked inversions voiced" } else { "" }
+    ))
 }
 
 // ---- Song-level orchestrators (fetch from the DB, then build) ---------------

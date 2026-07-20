@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, inTauri, savePng, revealFile } from "../ipc/api";
 import { NOTE_NAMES, diatonicChords } from "../music/theory";
@@ -32,6 +33,14 @@ export function ChordBuilder() {
   // stores chord NAMES): guitar voicing / piano inversion / pad inversion
   const [progView, setProgView] = useState<"guitar" | "piano" | "ableton">("guitar");
   const [abMsg, setAbMsg] = useState("");
+  const nav = useNavigate();
+  // hand the progression to the Composer: chord lane seeded (one bar each),
+  // melody/bass empty; the scale lens (when set) fixes the key
+  const openInComposer = (chords: string[]) => {
+    const search: Record<string, string> = { prog: chords.join(",") };
+    if (scale) { search.prog_root = NOTE_NAMES[scale.root]; search.prog_mode = scale.mode; }
+    nav({ to: "/composer", search: search as never });
+  };
   // the MIDI voicing honors the picked inversions — Push picks in Push view,
   // else the piano picks (guitar voicings don't map to closed inversions)
   const buildInAbleton = async (chords: string[], inversions?: number[]) => {
@@ -193,6 +202,7 @@ export function ChordBuilder() {
               {prog.length > 0 && (["guitar", "piano", "ableton"] as const).map((vw) => (
                 <button key={vw} className={"sm" + (progView === vw ? " primary" : "")} onClick={() => setProgView(vw)}>{vw === "guitar" ? "Guitar" : vw === "piano" ? "Piano" : "Push"}</button>
               ))}
+              {prog.length > 0 && <button className="sm" title="open this progression in the Composer — chord lane seeded, melody/bass yours" onClick={() => openInComposer(prog)}>🎹 Composer</button>}
               {prog.length > 0 && <button className="sm" title="stub this progression in Ableton Live (AbletonMCP must be on)" onClick={() => buildInAbleton(prog, picks.map((k) => (progView === "ableton" ? k.a : k.p)))}>⚡ Ableton</button>}
               {prog.length > 0 && <button className="sm" onClick={async () => {
                 // the chart follows the ACTIVE view — guitar voicings, piano
@@ -280,6 +290,7 @@ export function ChordBuilder() {
                 </div>
                 <div className="row" style={{ gap: 6 }}>
                   <button className="sm ghost" onClick={() => loadProg(p.chords)}>load</button>
+                  <button className="sm" title="open in the Composer" onClick={() => openInComposer(p.chords)}>🎹</button>
                   <button className="sm" title="stub in Ableton" onClick={() => buildInAbleton(p.chords)}>⚡</button>
                   <button className="sm" onClick={async () => {
                     const chart = chartSvg(p.chords, p.name);

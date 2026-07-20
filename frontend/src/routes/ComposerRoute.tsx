@@ -3,7 +3,7 @@ import { useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { Sketchpad } from "../components/compose/Sketchpad";
-import { compositionFromSong } from "../lib/music/compose/compositionFromSong";
+import { compositionFromSong, compositionFromProgression } from "../lib/music/compose/compositionFromSong";
 import type { Composition } from "../lib/music/compose/types";
 import type { PitchClass } from "../lib/music/types";
 import { normalizePitchClass } from "../lib/music/theory/notes";
@@ -18,6 +18,24 @@ function useSongParam(): string | null {
   // TanStack may parse search into an object
   const v = (search as Record<string, unknown> | undefined)?.song;
   return typeof v === "string" && v ? v : null;
+}
+
+/** Read a `?prog=Bm,A,E` progression hand-off (the Chord Builder's
+ *  "→ Composer" button), with optional prog_root / prog_mode key hints. */
+function useProgParam(): { chords: string[]; root?: string; mode?: string } | null {
+  const search = useRouterState({ select: (s) => s.location.search });
+  const get = (k: string): string | null => {
+    if (typeof search === "string") return new URLSearchParams(search).get(k);
+    const v = (search as Record<string, unknown> | undefined)?.[k];
+    return typeof v === "string" && v ? v : null;
+  };
+  const prog = get("prog");
+  if (!prog) return null;
+  return {
+    chords: prog.split(",").map((c) => c.trim()).filter(Boolean),
+    root: get("prog_root") ?? undefined,
+    mode: get("prog_mode") ?? undefined,
+  };
 }
 
 /** Fetch a song's chords+lyrics and build a full-song Composition. */
@@ -75,7 +93,13 @@ function useSongComposition(songId: string | null): {
 
 export function ComposerRoute() {
   const songId = useSongParam();
-  const { comp, title, loading } = useSongComposition(songId);
+  const { comp: songComp, title, loading } = useSongComposition(songId);
+  const progParam = useProgParam();
+  const progComp = useMemo(
+    () => (!songId && progParam ? compositionFromProgression(progParam.chords, progParam.root, progParam.mode) : null),
+    [songId, progParam?.chords.join(","), progParam?.root, progParam?.mode], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const comp = songComp ?? progComp;
 
   // The song's key seeds a blank sketch too (so "New blank" starts in the
   // song's key when you came from a song).

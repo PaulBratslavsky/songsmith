@@ -1025,9 +1025,9 @@ async fn ableton_build_song(app: tauri::AppHandle, state: State<'_, AppState>, s
 
 /// Stub a bare chord progression in Ableton (Chord Builder export).
 #[tauri::command]
-async fn ableton_build_progression(chords: Vec<String>, inversions: Option<Vec<i64>>, bpm: Option<i64>) -> R<String> {
+async fn ableton_build_progression(chords: Vec<String>, beats: Option<Vec<i64>>, inversions: Option<Vec<i64>>, bpm: Option<i64>) -> R<String> {
     tokio::task::spawn_blocking(move || {
-        song_core::ableton::build_progression(bpm.unwrap_or(120), &chords, &inversions.unwrap_or_default(), &song_core::midi::POP_DEFAULT, &|_| {})
+        song_core::ableton::build_progression(bpm.unwrap_or(120), &chords, &beats.unwrap_or_default(), &inversions.unwrap_or_default(), &song_core::midi::POP_DEFAULT, &|_| {})
     })
     .await
     .map_err(|e| e.to_string())?

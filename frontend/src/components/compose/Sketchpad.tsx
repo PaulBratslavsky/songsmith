@@ -28,6 +28,7 @@ import {
 } from '../../lib/music/compose/types';
 import { LABEL_W, BAR_MIN_PX } from './laneLayout';
 import { CompositionSchema, parseStoredComposition } from '../../lib/music/compose/schema';
+import { resolveCompositionSections } from '../../lib/music/compose/compositionToSong';
 import { useCompositionState } from '../../lib/music/compose/useCompositionState';
 import {
   useCompositionPlayback,
@@ -573,6 +574,23 @@ export function Sketchpad({
           title="Export this composition into a song — update the linked song's Chords + Structure stages, or create a new song from it (degrees resolve to absolute chords in the composition's key)"
         >
           ⤴ Export
+        </button>
+        <button
+          type="button"
+          className="sm"
+          title="Lay this composition's chord lane into Ableton as ONE Progression track — chords only, at their real lengths (Live must be open with AbletonMCP on)"
+          onClick={async () => {
+            const flat = resolveCompositionSections(comp).flatMap((s) => s.chords);
+            if (!flat.length) { setSaveMsg('no chords to export'); return; }
+            setSaveMsg('Stubbing chords in Ableton…');
+            try {
+              setSaveMsg(await api.abletonBuildProgression(flat.map((c) => c.name), undefined, comp.bpm, flat.map((c) => c.beats)));
+            } catch (e) {
+              setSaveMsg(String((e as Error)?.message ?? e));
+            }
+          }}
+        >
+          ⚡ Ableton
         </button>
         <button type="button" className="sm ghost" onClick={newBlank}>
           New blank
