@@ -1034,6 +1034,20 @@ async fn ableton_build_progression(chords: Vec<String>, beats: Option<Vec<i64>>,
     .map_err(e2s)
 }
 
+#[derive(serde::Deserialize)]
+struct CompTrackIn { name: String, notes: Vec<serde_json::Value> }
+
+/// The Composer's full export: chords + melody + bass lanes as named MIDI
+/// tracks (notes pre-resolved to absolute MIDI by the frontend).
+#[tauri::command]
+async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<CompTrackIn>) -> R<String> {
+    let t: Vec<(String, Vec<serde_json::Value>)> = tracks.into_iter().map(|x| (x.name, x.notes)).collect();
+    tokio::task::spawn_blocking(move || song_core::ableton::build_midi_tracks(bpm, length_beats, &t, &|_| {}))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(e2s)
+}
+
 /// Free the single Ableton socket by stopping stray standalone `ableton-mcp`
 /// processes squatting on it (run this when Test reports "busy").
 #[tauri::command]
@@ -1148,6 +1162,7 @@ pub fn run() {
             ableton_build_clips,
             ableton_build_song,
             ableton_build_progression,
+            ableton_build_composition,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -29,6 +29,7 @@ import {
 import { LABEL_W, BAR_MIN_PX } from './laneLayout';
 import { CompositionSchema, parseStoredComposition } from '../../lib/music/compose/schema';
 import { resolveCompositionSections } from '../../lib/music/compose/compositionToSong';
+import { TICKS_PER_BEAT } from '../../lib/music/compose/types';
 import { useCompositionState } from '../../lib/music/compose/useCompositionState';
 import {
   useCompositionPlayback,
@@ -41,6 +42,7 @@ import {
   keyToScaleSelection,
   resolveMelodyMidi,
   resolveBassMidi,
+  resolveNamedChordMidis,
 } from '../../lib/music/compose/playback';
 import { getScalePitchClasses } from '../../lib/music/theory/scales';
 import { getDiatonicChords } from '../../lib/music/theory/diatonic';
@@ -578,13 +580,30 @@ export function Sketchpad({
         <button
           type="button"
           className="sm"
-          title="Lay this composition's chord lane into Ableton as ONE Progression track — chords only, at their real lengths (Live must be open with AbletonMCP on)"
+          title="Lay THIS composition into Ableton — Composer Chords / Melody / Bass as separate MIDI tracks, exactly the notes on the grid (Live must be open with AbletonMCP on)"
           onClick={async () => {
-            const flat = resolveCompositionSections(comp).flatMap((s) => s.chords);
-            if (!flat.length) { setSaveMsg('no chords to export'); return; }
-            setSaveMsg('Stubbing chords in Ableton…');
+            // everything you composed, lane by lane — resolved to absolute
+            // MIDI with the SAME resolvers playback uses, so what you hear
+            // in the Composer is what lands in Live
+            const b = (t: number) => t / TICKS_PER_BEAT;
+            const mk = (pitch: number | null, start: number, length: number, velocity: number) =>
+              pitch == null ? null : { pitch, start_time: b(start), duration: Math.max(0.1, b(length) * 0.98), velocity, mute: false };
+            const tracks = [
+              {
+                name: 'Composer Chords',
+                notes: comp.chords.flatMap((s) =>
+                  resolveNamedChordMidis(comp, s).map((m) => mk(m, s.start, s.length, 78)),
+                ),
+              },
+              { name: 'Composer Melody', notes: comp.melody.map((n) => mk(resolveMelodyMidi(comp, n), n.start, n.length, 96)) },
+              { name: 'Composer Bass', notes: comp.bass.map((n) => mk(resolveBassMidi(comp, n), n.start, n.length, 100)) },
+            ]
+              .map((t) => ({ ...t, notes: t.notes.filter((n): n is NonNullable<typeof n> => n != null) }))
+              .filter((t) => t.notes.length > 0);
+            if (!tracks.length) { setSaveMsg('nothing to export — the grid is empty'); return; }
+            setSaveMsg('Laying Composer tracks in Ableton…');
             try {
-              setSaveMsg(await api.abletonBuildProgression(flat.map((c) => c.name), undefined, comp.bpm, flat.map((c) => c.beats)));
+              setSaveMsg(await api.abletonBuildComposition(comp.bpm, comp.totalTicks / TICKS_PER_BEAT, tracks));
             } catch (e) {
               setSaveMsg(String((e as Error)?.message ?? e));
             }

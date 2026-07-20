@@ -357,6 +357,49 @@ pub fn build_progression(bpm: i64, chords: &[String], beats: &[i64], inversions:
     ))
 }
 
+/// Lay named MIDI tracks into Ableton — the Composer's FULL export (chords +
+/// melody + bass lanes, notes already resolved to absolute MIDI by the
+/// frontend's own playback resolvers, so this stays theory-free). Clears and
+/// rebuilds ONLY the given track names; one clip per track at bar 1.
+pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Value>)], progress: &dyn Fn(String)) -> Result<String> {
+    let live: Vec<&(String, Vec<Value>)> = tracks.iter().filter(|(_, n)| !n.is_empty()).collect();
+    if live.is_empty() {
+        return Ok("Nothing to build — the composition has no notes.".into());
+    }
+    progress("Connecting to Ableton (port 9877)…".into());
+    let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+        .map_err(|e| anyhow!("Can't reach Ableton on 9877 ({e}). Open Live (AbletonMCP on) and free the connection."))?;
+    s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+    s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
+    let nap = || std::thread::sleep(Duration::from_millis(35));
+    let _ = ableton_cmd(&mut s, json!({"type":"set_tempo","params":{"tempo": bpm as f64}}));
+    let _ = ableton_cmd(&mut s, json!({"type":"switch_to_arrangement_view","params":{}}));
+
+    let names: Vec<&str> = live.iter().map(|(n, _)| n.as_str()).collect();
+    let _ = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": names}}));
+    nap();
+
+    let length = length_beats.max(4.0);
+    let mut log = vec![format!("tempo {bpm} BPM · {} bars", (length / 4.0).ceil() as i64)];
+    for (name, notes) in &live {
+        progress(format!("Building {name} ({} notes)…", notes.len()));
+        let ti = ableton_cmd(&mut s, json!({"type":"create_midi_track","params":{"index":-1}}))
+            .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()))
+            .unwrap_or(0);
+        let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": name}}));
+        let _ = ableton_cmd(&mut s, json!({"type":"create_clip","params":{"track_index": ti, "clip_index": 0, "length": length}}));
+        let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": 0, "notes": notes}}));
+        let part = if name.contains("Bass") { "Bass" } else if name.contains("Melody") { "Chord melody" } else { "Chords" };
+        let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": 0, "color": part_color(part)}}));
+        let _ = ableton_cmd(&mut s, json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": 0, "name": name}}));
+        let _ = ableton_cmd(&mut s, json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": 0, "destination_time": 0.0}}));
+        log.push(format!("✓ {name} · {} notes", notes.len()));
+        nap();
+    }
+    Ok(log.join("\n"))
+}
+
 // ---- Song-level orchestrators (fetch from the DB, then build) ---------------
 // Shared by the Tauri commands AND the MCP `ableton_build_song` tool.
 
