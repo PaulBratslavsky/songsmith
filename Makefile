@@ -25,3 +25,10 @@ test:
 # Regenerate the TypeScript types from the Rust models.
 types:
 	cargo test -p song_core export_bindings
+
+# Tier B flowcheck: walk a scratch song through the whole flow with REAL
+# Claude (subscription auth), then run deterministic coherence checks.
+# Several minutes; needs a logged-in `claude` CLI. See scripts/flowcheck.py.
+flowcheck:
+	cargo build -p mcp-shim
+	python3 scripts/flowcheck.py

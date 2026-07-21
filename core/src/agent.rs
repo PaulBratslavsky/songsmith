@@ -2182,6 +2182,39 @@ mod tests {
         assert!(!text.contains("commentary"), "commentary must not survive as text, got: {text}");
     }
 
+    /// FIRST-RUN chord coercion (Tier B flowcheck finding, 2026-07-21): a
+    /// first chords run saves through build_run_content + plain save_artifact
+    /// — NOT the guarded path — so string chords slipped through there. The
+    /// run pipeline itself must normalize.
+    #[tokio::test]
+    async fn run_stage_first_run_normalizes_string_chords() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_db, conn) = mem_conn().await;
+        let settings = db::get_settings(&conn).await.unwrap();
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "Norm First").await.unwrap();
+        let stages = db::list_stages(&conn, &song.id).await.unwrap();
+        let chords_stage = stages.iter().find(|s| s.r#type == "chords").unwrap();
+        db::create_section(&conn, &song.id, "Verse 1", "verse", 8, "", None).await.unwrap();
+
+        let claude_out = "```json\n".to_string() + &json!({ "sections": [
+            { "label": "Verse 1", "chords": ["F#m", "D", { "name": "Bm", "beats": 2 }], "romans": ["i", "VI", "iv"] }
+        ]}).to_string() + "\n```";
+        std::env::set_var("SONGSMITH_MOCK_CLAUDE", &claude_out);
+        let outcome = run_stage(&conn, &settings, &chords_stage.id, None, |_| {}, None).await.unwrap();
+        std::env::remove_var("SONGSMITH_MOCK_CLAUDE");
+
+        let a = outcome.artifact.expect("first run saves directly");
+        let v: Value = serde_json::from_str(&a.content).unwrap();
+        let cs = v["data"]["sections"][0]["chords"].as_array().unwrap();
+        assert_eq!(cs[0], json!({ "name": "F#m", "beats": 4 }), "string coerced on the FIRST-run path");
+        assert_eq!(cs[1], json!({ "name": "D", "beats": 4 }));
+        assert_eq!(cs[2], json!({ "name": "Bm", "beats": 2 }), "objects pass untouched");
+    }
+
     /// Write-boundary chord coercion (found in the wild — "Fade Away" regen):
     /// a chords RUN whose model output listed chords as bare strings ("F#m")
     /// saved data the Arrange editor showed as "no chords". The guarded save

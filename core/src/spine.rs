@@ -375,6 +375,14 @@ pub(crate) async fn build_run_content(
         return legacy(raw_text); // not section-shaped output — never touch the spine
     }
 
+    // model-output tolerance BEFORE anything reads the chords: bare-string
+    // entries ("F#m") become {name, beats} objects. The guarded (chat/MCP)
+    // save normalizes too — but FIRST runs land through this pipeline via a
+    // plain save, and the Tier B flowcheck caught a string slipping through.
+    if stage_type == "chords" {
+        crate::freeze::normalize_chord_entries(&mut nd);
+    }
+
     let mut warns: Vec<String> = Vec::new();
     if stage_type != "structure" {
         attach_ids_non_structure(stage_type, &mut nd, &spine, &mut warns);

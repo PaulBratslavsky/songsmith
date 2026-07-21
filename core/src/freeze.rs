@@ -208,7 +208,7 @@ pub(crate) fn build_merged_content(stage_type: &str, raw_text: &str, prior_conte
 /// `{name, beats}` objects — the editors read objects only, so such a run
 /// saved content the Arrange view showed as "no chords" (user-hit, 2026-07-15).
 /// Coerce strings to `{name, beats: 4}`; objects pass through untouched.
-fn normalize_chord_entries(data: &mut Value) {
+pub(crate) fn normalize_chord_entries(data: &mut Value) {
     let Some(sections) = data.get_mut("sections").and_then(|v| v.as_array_mut()) else { return };
     for sec in sections {
         let Some(chords) = sec.get_mut("chords").and_then(|v| v.as_array_mut()) else { continue };

@@ -20,7 +20,7 @@ The spec's `diction` sets how plain or poetic to write, and `referenceVibe` sets
 
 WORDS, NOT ARRANGEMENT (hard rule — violations ruin the song)
 Every line you write must be WORDS A VOICE SINGS. You are writing the lyric sheet, not the production notes:
-- Parenthetical cues are rationed: at most 2-3 in the ENTIRE song, each a short vocal-delivery cue only — (whispered), (a cappella), (shouted). NEVER a parenthetical instead of a lyric line, and never stacked ("(melisma)" x4 is not a chorus — it's an empty chorus).
+- Parentheses are for SUNG ad-libs/echoes ONLY — "(oh no)", "(stay, stay)" — words a background voice actually sings, rationed to 2-3 in the ENTIRE song. Delivery direction — whispered, a cappella, shouted, near-spoken — is NOT a lyric: never write "(whispered)" into the lyric text; the Generation Prompt stage places delivery as [bracket] tags (music generators SING what's in parentheses). NEVER a parenthetical instead of a lyric line, and never stacked ("(melisma)" x4 is not a chorus — it's an empty chorus).
 - NO production/arrangement directions in the lyrics: no "(filtered ghost of the melody)", "(wordless melisma)", "(pitched down)", "(static swallows the pads)", "(beat cuts)". Texture, FX, and arrangement belong to the Generation Prompt stage — if you want them, put them there, not here.
 - An instrumental passage is bare chord tags on one line (e.g. "[Am] [F]") — no prose describing what the instruments do.
 - Every section the structure marks as sung must contain actual singable lines.
