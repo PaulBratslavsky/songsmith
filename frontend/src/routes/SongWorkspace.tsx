@@ -21,6 +21,7 @@ import { SongSheet } from "../components/SongSheet";
 import { SongNotation } from "../components/SongNotation";
 import { ArrangementBuilder } from "../components/ArrangementBuilder";
 import { parseArtifact } from "../lib/artifacts";
+import { NOTE_NAMES } from "../music/theory";
 import { useSpineSections } from "../lib/sections";
 
 export function SongWorkspace() {
@@ -124,6 +125,13 @@ export function SongWorkspace() {
   // 🎯 the producer's one-line brief — the north star every stage honors (title-edit pattern)
   const setIntent = useMutation({ mutationFn: (t: string) => api.updateSongIntent(id, t), onSuccess: invalidate });
   const [editIntent, setEditIntent] = useState<string | null>(null);
+  // header key/BPM click-to-edit — live views of the SONG facts (write-through
+  // via update_song_key, same policy as every other picker; docs/SONG-FACTS.md)
+  const [editKey, setEditKey] = useState(false);
+  const setSongKey = async (root: string, mode: string, bpm: number) => {
+    await api.updateSongKey(id, root, mode, bpm);
+    invalidate();
+  };
   const del = useMutation({
     mutationFn: () => api.deleteSong(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["songs"] }); nav({ to: "/" }); },
@@ -183,7 +191,26 @@ export function SongWorkspace() {
           )}
           <div className="row" style={{ gap: 8 }}>
             <span className={"badge " + v.status}>{v.status.replace("_", " ")}</span>
-            <span className="faint">{preset.name} · {v.key_root} {v.key_mode} · {String(v.bpm)} BPM</span>
+            <span className="faint">
+              {preset.name} ·{" "}
+              {editKey ? (
+                <span className="row" style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                  <select value={v.key_root} onChange={(e) => setSongKey(e.target.value, v.key_mode, Number(v.bpm))}>
+                    {NOTE_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                  <select value={v.key_mode} onChange={(e) => setSongKey(v.key_root, e.target.value, Number(v.bpm))}>
+                    <option value="minor">minor</option>
+                    <option value="major">major</option>
+                  </select>
+                  <input type="number" value={Number(v.bpm)} onChange={(e) => setSongKey(v.key_root, v.key_mode, Number(e.target.value) || 120)} style={{ width: 62 }} /> BPM
+                  <button className="sm ghost" title="done" onClick={() => setEditKey(false)}>✓</button>
+                </span>
+              ) : (
+                <span title="click to edit the song's key/BPM — applies instantly, every stage follows it" style={{ cursor: "pointer", textDecoration: "underline dotted" }} onClick={() => setEditKey(true)}>
+                  {v.key_root} {v.key_mode} · {String(v.bpm)} BPM
+                </span>
+              )}
+            </span>
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
