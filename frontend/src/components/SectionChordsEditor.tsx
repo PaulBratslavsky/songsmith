@@ -10,6 +10,7 @@ import { diatonicChords, pitchClassOf, NOTE_NAMES } from "../music/theory";
 import { isValidName, chordMidisByName, chordPcsByName, voicedMidisByName, voicedNotesByName, chordSizeByName } from "../music/engineAdapter";
 import { pianoVoicedSvg } from "../music/diagrams";
 import { playChord, playSequence } from "../music/synth";
+import { ChordSwapPopover } from "./ChordSwapPopover";
 import { ImportProgression } from "./ImportProgression";
 import type { ChordsData } from "../lib/artifacts";
 
@@ -94,6 +95,8 @@ export function SectionChordsEditor({
   const spine = spineSections ?? [];
   const [sections, setSections] = useState<Section[]>(() => seedFromSpine(fromData(initialData), spine));
   const [selected, setSelected] = useState<{ s: number; c: number } | null>(null);
+  // which chord cell has the swap popover open (chips/wheel picker)
+  const [swap, setSwap] = useState<{ s: number; c: number } | null>(null);
   const [playingIdx, setPlayingIdx] = useState<{ s: number; c: number } | null>(null);
   const [dirty, setDirty] = useState(false);
 
@@ -278,13 +281,29 @@ export function SectionChordsEditor({
                       const playing = playingIdx?.s === si && playingIdx?.c === ci;
                       const ok = isValidName(c.name);
                       return (
-                        <div key={c.id} className="chord-cell" style={{ borderColor: playing ? "var(--accent)" : active ? "var(--accent-dim)" : ok ? "var(--line)" : "var(--danger)" }} onClick={() => setSelected({ s: si, c: ci })}>
+                        <div key={c.id} className="chord-cell" style={{ position: "relative", borderColor: playing ? "var(--accent)" : active ? "var(--accent-dim)" : ok ? "var(--line)" : "var(--danger)" }} onClick={() => setSelected({ s: si, c: ci })}>
                           <input value={c.name} onChange={(e) => setChordName(si, ci, e.target.value)} placeholder="Am" style={{ width: 56, padding: "2px 4px", textAlign: "center", border: "none", background: "transparent" }} />
                           <div className="row" style={{ gap: 4, justifyContent: "center" }}>
                             <button className="sm ghost" title="play" onClick={(e) => { e.stopPropagation(); playOne(c.name); }}>♪</button>
+                            {!sec.frozen && (
+                              <button
+                                className={"sm ghost" + (swap?.s === si && swap?.c === ci ? " primary" : "")}
+                                title="swap this chord — in-scale chips, variations, or the wheel"
+                                onClick={(e) => { e.stopPropagation(); setSelected({ s: si, c: ci }); setSwap(swap?.s === si && swap?.c === ci ? null : { s: si, c: ci }); }}
+                              >▾</button>
+                            )}
                             <input type="number" min={1} value={c.beats} onChange={(e) => setChordBeats(si, ci, Number(e.target.value))} title="beats" style={{ width: 34, padding: "1px 3px" }} />
-                            <button className="sm ghost danger" title="remove" onClick={(e) => { e.stopPropagation(); removeChord(si, ci); }}>×</button>
+                            <button className="sm ghost danger" title="remove" onClick={(e) => { e.stopPropagation(); removeChord(si, ci); setSwap(null); }}>×</button>
                           </div>
+                          {swap?.s === si && swap?.c === ci && (
+                            <ChordSwapPopover
+                              current={c.name}
+                              keyRoot={keyRoot}
+                              keyMode={keyMode}
+                              onPick={(name) => setChordName(si, ci, name)}
+                              onClose={() => setSwap(null)}
+                            />
+                          )}
                         </div>
                       );
                     })}
