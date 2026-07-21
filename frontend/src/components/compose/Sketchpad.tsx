@@ -15,7 +15,7 @@
 // reidentifies spans).
 
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../../ipc/api';
+import { api, listen } from '../../ipc/api';
 import type { CompositionMeta } from '../../ipc/generated';
 import { PITCH_CLASSES, type PitchClass } from '../../lib/music/types';
 import {
@@ -165,6 +165,27 @@ export function Sketchpad({
 
   const [muted, setMuted] = useState(false);
   const [durTicks, setDurTicks] = useState(4); // default 1/4 note
+
+  // ---- N3: MIDI keyboard STEP ENTRY (midir bridge → `midi_note` events).
+  // Arm a lane, play notes: each note-on lands at the step cursor as the
+  // nearest scale degree at the current Note length, and the cursor advances.
+  const [midiDevices, setMidiDevices] = useState<string[] | null>(null);
+  const [midiName, setMidiName] = useState<string | null>(null);
+  const [midiLane, setMidiLane] = useState<'melody' | 'bass'>('melody');
+  const [midiStep, setMidiStep] = useState(0);
+  const midiRef = useRef({ armed: false, lane: 'melody' as 'melody' | 'bass', step: 0, dur: 4 });
+  midiRef.current.lane = midiLane;
+  midiRef.current.dur = durTicks;
+  midiRef.current.armed = midiName != null;
+  midiRef.current.step = midiStep;
+  const armMidi = async (index: number) => {
+    try { setMidiName(await api.midiOpenInput(index)); } catch (e) { setSaveMsg(String((e as Error)?.message ?? e)); }
+  };
+  const disarmMidi = async () => {
+    try { await api.midiCloseInput(); } catch { /* already gone */ }
+    setMidiName(null);
+    setMidiDevices(null);
+  };
   const [loop, setLoop] = useState(true);
   // Sticky placement mode: newly-dropped chords are sevenths while on.
   const [seventhMode, setSeventhMode] = useState(false);
@@ -213,6 +234,32 @@ export function Sketchpad({
     for (const c of getDiatonicChords(scaleSel)) m[c.degree] = degreeLabel(c);
     return m;
   }, [scaleSel]);
+
+  // N3: incoming MIDI notes → step entry (armed lane, nearest scale degree)
+  useEffect(() => {
+    let un = () => {};
+    (async () => {
+      un = await listen<{ note: number; velocity: number; on: boolean }>('midi_note', (m) => {
+        const st = midiRef.current;
+        if (!st.armed || !m.on) return;
+        // pitch → nearest scale degree (grid lanes are degree-based)
+        const scaleSemis = pcs.map((pc) => PITCH_CLASSES.indexOf(pc));
+        const notePc = m.note % 12;
+        let best = 0;
+        let bestDist = 99;
+        scaleSemis.forEach((semi, i) => {
+          const d = Math.min((notePc - semi + 12) % 12, (semi - notePc + 12) % 12);
+          if (d < bestDist) { bestDist = d; best = i; }
+        });
+        const tick = st.step;
+        if (tick >= comp.totalTicks) return;
+        actions.placeNote(st.lane, (best + 1) as Degree, tick, st.dur);
+        setMidiStep(Math.min(tick + st.dur, comp.totalTicks));
+      });
+    })();
+    return () => un();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs carry per-note state
+  }, [pcs, comp.totalTicks, actions]);
 
   // Latest preview fns (depend on key) read through a ref so the stable
   // handler bundles don't change identity when the composition edits.
@@ -480,6 +527,40 @@ export function Sketchpad({
               </button>
             ))}
           </div>
+        </div>
+
+        {/* N3: MIDI step entry — device picker, lane arm, step cursor */}
+        <div className="row" style={{ alignItems: 'center', gap: 3 }}>
+          {midiName == null && midiDevices == null && (
+            <button type="button" className="sm" title="enter notes from a MIDI keyboard (step entry at the Note length)" onClick={async () => {
+              try {
+                const d = await api.midiListInputs();
+                if (!d.length) { setSaveMsg('no MIDI inputs found — plug the keyboard in and try again'); return; }
+                setMidiDevices(d);
+                if (d.length === 1) armMidi(0);
+              } catch (e) { setSaveMsg(String((e as Error)?.message ?? e)); }
+            }}>🎹 MIDI</button>
+          )}
+          {midiName == null && midiDevices != null && (
+            <select autoFocus onChange={(e) => { const i = Number(e.target.value); if (!Number.isNaN(i)) armMidi(i); }} defaultValue="">
+              <option value="" disabled>pick a MIDI input…</option>
+              {midiDevices.map((d, i) => <option key={i} value={i}>{d}</option>)}
+            </select>
+          )}
+          {midiName != null && (
+            <>
+              <button type="button" className="sm primary" title={`armed: ${midiName} — click to disarm`} onClick={disarmMidi}>🎹 {midiName.length > 14 ? midiName.slice(0, 14) + '…' : midiName}</button>
+              <div className="row" style={{ gap: 2 }}>
+                {(['melody', 'bass'] as const).map((l) => (
+                  <button key={l} type="button" className={'sm' + (midiLane === l ? ' primary' : '')} onClick={() => setMidiLane(l)}>{l}</button>
+                ))}
+              </div>
+              <span className="faint" style={{ fontSize: 11 }} title="step cursor — each played note lands here then advances by the Note length">
+                @ bar {Math.floor(midiStep / TICKS_PER_BAR) + 1}.{Math.floor((midiStep % TICKS_PER_BAR) / 4) + 1}
+              </span>
+              <button type="button" className="sm ghost" title="rewind the step cursor to bar 1" onClick={() => setMidiStep(0)}>⏮</button>
+            </>
+          )}
         </div>
 
         {/* N2: sound — mute toggle + Synth (oscillators) / Sampled picker */}

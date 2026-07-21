@@ -20,6 +20,9 @@ struct AppState {
     /// the live `claude auth login --claudeai` child, kept alive so its stdin
     /// stays open for the pasted OAuth code (see `claude_login`).
     login_child: Mutex<Option<std::process::Child>>,
+    /// the open MIDI input (Composer note entry) — kept alive here; replaced
+    /// or dropped by midi_open_input / midi_close_input.
+    midi: Mutex<Option<midir::MidiInputConnection<()>>>,
 }
 
 type R<T> = Result<T, String>;
@@ -1048,6 +1051,44 @@ async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<Comp
         .map_err(e2s)
 }
 
+/// MIDI keyboard note entry (Composer N3): list the machine's MIDI inputs.
+#[tauri::command]
+fn midi_list_inputs() -> R<Vec<String>> {
+    let input = midir::MidiInput::new("songsmith").map_err(|e| e.to_string())?;
+    Ok(input.ports().iter().map(|p| input.port_name(p).unwrap_or_else(|_| "unknown".into())).collect())
+}
+
+/// Open a MIDI input by index; every note lands in the webview as a
+/// `midi_note` event {note, velocity, on}. Replaces any prior connection.
+#[tauri::command]
+fn midi_open_input(app: tauri::AppHandle, state: State<'_, AppState>, index: usize) -> R<String> {
+    let input = midir::MidiInput::new("songsmith").map_err(|e| e.to_string())?;
+    let ports = input.ports();
+    let port = ports.get(index).ok_or_else(|| "no such MIDI input".to_string())?;
+    let name = input.port_name(port).unwrap_or_else(|_| "MIDI input".into());
+    let conn = input
+        .connect(port, "songsmith-composer", move |_ts, msg, _| {
+            if msg.len() < 3 { return; }
+            let status = msg[0] & 0xF0;
+            let (note, vel) = (msg[1] as i64, msg[2] as i64);
+            let on = status == 0x90 && vel > 0;
+            let off = status == 0x80 || (status == 0x90 && vel == 0);
+            if on || off {
+                let _ = app.emit("midi_note", serde_json::json!({ "note": note, "velocity": vel, "on": on }));
+            }
+        }, ())
+        .map_err(|e| e.to_string())?;
+    *state.midi.lock().unwrap() = Some(conn);
+    Ok(name)
+}
+
+/// Drop the open MIDI input (disarm).
+#[tauri::command]
+fn midi_close_input(state: State<'_, AppState>) -> R<()> {
+    *state.midi.lock().unwrap() = None;
+    Ok(())
+}
+
 /// Free the single Ableton socket by stopping stray standalone `ableton-mcp`
 /// processes squatting on it (run this when Test reports "busy").
 #[tauri::command]
@@ -1078,7 +1119,7 @@ pub fn run() {
             std::mem::forget(database);
 
             ensure_claude_bin(&conn);
-            app.manage(AppState { conn, db_path: db_path_str, inflight: Mutex::new(HashSet::new()), running: Mutex::new(HashMap::new()), login_child: Mutex::new(None) });
+            app.manage(AppState { conn, db_path: db_path_str, inflight: Mutex::new(HashSet::new()), running: Mutex::new(HashMap::new()), login_child: Mutex::new(None), midi: Mutex::new(None) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1163,6 +1204,9 @@ pub fn run() {
             ableton_build_song,
             ableton_build_progression,
             ableton_build_composition,
+            midi_list_inputs,
+            midi_open_input,
+            midi_close_input,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -720,6 +720,9 @@ const handlers: MockHandlers = {
   discard_stage_draft: (a) => { db.drafts = (db.drafts ?? []).filter((x: Any) => x.stage_id !== a.stageId); return null; },
   ableton_build_progression: (a) => `(mock) would stub ${a.chords.length} chords in Ableton`,
   ableton_build_composition: (a) => `(mock) would lay ${a.tracks.length} Composer tracks in Ableton`,
+  midi_list_inputs: () => [],
+  midi_open_input: () => { throw new Error("MIDI input needs the desktop app"); },
+  midi_close_input: () => null,
   cancel_stage: () => undefined, // mock runs finish instantly — nothing to cancel
   approve_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.stageId);
