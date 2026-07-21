@@ -253,7 +253,7 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
 
     // clear our previously-built tracks so re-running rebuilds cleanly instead
     // of stacking duplicate track sets (needs the patched Remote Script)
-    let track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp"];
+    let track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp", "Drums"];
     progress("Clearing previously built tracks…".into());
     let cleared = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": track_names}}))
         .ok().and_then(|v| v.get("result").and_then(|r| r.get("deleted")).and_then(|n| n.as_i64())).unwrap_or(0);

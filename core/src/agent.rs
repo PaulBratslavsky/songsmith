@@ -282,10 +282,13 @@ Pick the values that make a producer nod — the bass figure and density are wha
 Respond with ONLY a single fenced ```json block of exactly this shape (these exact keys and enum spellings):\n\
 {\"bass\":\"sustain|half_time_808|eighth_drive|walking|offbeat_sync\",\"sub_bass\":true|false,\
 \"chords\":\"held|stabs|pulse_8ths\",\"pad\":true|false,\"arp\":\"off|eighths|sixteenths\",\
-\"sparse_melody\":true|false,\"vel_scale\":0.4-1.2}\n\
+\"sparse_melody\":true|false,\"vel_scale\":0.4-1.2,\"swing\":0.0-1.0,\"humanize\":0.0-1.0,\
+\"drums\":\"off|four_floor|half_time|backbeat\"}\n\
 Guidance: half_time_808 + sub_bass for trap/witch-house/darkwave weight; eighth_drive for synthwave/rock momentum; \
 offbeat_sync for house/funk bounce; sustain for folk/ambient. pad=true for washed/atmospheric styles. \
-arp sixteenths only when the style genuinely arpeggiates. vel_scale below 0.9 for soft/hazy mixes, 1.0+ for punchy.";
+arp sixteenths only when the style genuinely arpeggiates. vel_scale below 0.9 for soft/hazy mixes, 1.0+ for punchy. \
+drums: four_floor for dance, half_time for trap/heavy, backbeat for pop/rock, off for ambient/folk. \
+swing 0.1-0.3 only for shuffled/laid-back grooves. humanize 0.1 tight machine, 0.4+ loose human.";
     let user = format!(
         "STYLE PRESET\nName: {}\nGenre: {}\nMood: {}\nInfluences: {}\nKey/tempo feel: {}\n\nProduce the arrangement JSON now.",
         preset.name, preset.genre, preset.mood, preset.influences, preset.key_tempo_feel

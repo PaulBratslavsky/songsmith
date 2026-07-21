@@ -87,8 +87,8 @@ function PresetForm({ initial, editingId, onDone }: { initial: StyleInput; editi
   );
 }
 
-type Arrangement = { bass: string; sub_bass: boolean; chords: string; pad: boolean; arp: string; sparse_melody: boolean; vel_scale: number };
-const ARR_DEFAULT: Arrangement = { bass: "walking", sub_bass: false, chords: "held", pad: true, arp: "eighths", sparse_melody: false, vel_scale: 1.0 };
+type Arrangement = { bass: string; sub_bass: boolean; chords: string; pad: boolean; arp: string; sparse_melody: boolean; vel_scale: number; swing: number; humanize: number; drums: string };
+const ARR_DEFAULT: Arrangement = { bass: "walking", sub_bass: false, chords: "held", pad: true, arp: "eighths", sparse_melody: false, vel_scale: 1.0, swing: 0, humanize: 0.2, drums: "backbeat" };
 
 /** Per-preset Ableton arrangement profile (style-aware builds, Phase 2):
  *  what the Build-in-Ableton stub plays for this style — bass figure, chord
@@ -125,7 +125,7 @@ function ArrangementEditor({ preset }: { preset: StylePreset }) {
     catch (e: any) { setMsg(String(e?.message ?? e)); }
     setBusy(false);
   };
-  const sel = (k: "bass" | "chords" | "arp", opts: [string, string][]) => (
+  const sel = (k: "bass" | "chords" | "arp" | "drums", opts: [string, string][]) => (
     <select value={a[k]} onChange={(e) => setA({ ...a, [k]: e.target.value })}>
       {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
     </select>
@@ -146,7 +146,10 @@ function ArrangementEditor({ preset }: { preset: StylePreset }) {
         <div><label>Bass</label>{sel("bass", [["sustain", "sustained roots"], ["half_time_808", "half-time 808"], ["eighth_drive", "eighth-note drive"], ["walking", "root–fifth walk"], ["offbeat_sync", "off-beat bounce"]])}</div>
         <div><label>Chords</label>{sel("chords", [["held", "held"], ["stabs", "stabs"], ["pulse_8ths", "pulsing 8ths"]])}</div>
         <div><label>Arp</label>{sel("arp", [["off", "off"], ["eighths", "8ths"], ["sixteenths", "16ths"]])}</div>
+        <div><label>Drums</label>{sel("drums", [["off", "off"], ["four_floor", "four-on-the-floor"], ["half_time", "half-time"], ["backbeat", "backbeat"]])}</div>
         <div><label>Velocity</label><input type="number" step={0.05} min={0.4} max={1.2} value={a.vel_scale} onChange={(e) => setA({ ...a, vel_scale: Number(e.target.value) || 1.0 })} style={{ width: 70 }} /></div>
+        <div><label>Swing</label><input type="number" step={0.05} min={0} max={1} value={a.swing} onChange={(e) => setA({ ...a, swing: Number(e.target.value) || 0 })} title="off-beat 8ths lag (1 ≈ triplet feel)" style={{ width: 64 }} /></div>
+        <div><label>Humanize</label><input type="number" step={0.05} min={0} max={1} value={a.humanize} onChange={(e) => setA({ ...a, humanize: Number(e.target.value) || 0 })} title="deterministic timing/velocity looseness" style={{ width: 64 }} /></div>
       </div>
       <div className="row" style={{ gap: 14, marginTop: 8 }}>
         {chk("sub_bass", "sub-bass register")}

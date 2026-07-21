@@ -79,6 +79,17 @@ pub enum ArpRate {
     Sixteenths,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrumPattern {
+    Off,
+    /// kick every beat, hats on the off-8ths, snare on 2 & 4
+    FourFloor,
+    /// kick on 1, snare on 3 — the weight sits half-time (trap, witch house)
+    HalfTime,
+    /// kick 1 & the and-of-3, snare 2 & 4, straight 8th hats (pop, rock)
+    Backbeat,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArrangementProfile {
     pub name: &'static str,
@@ -93,16 +104,22 @@ pub struct ArrangementProfile {
     pub sparse_melody: bool,
     /// velocity multiplier — soft washes vs punchy mixes
     pub vel_scale: f64,
+    /// Phase 3 — swing 0..1: how far off-beat 8ths lag (1.0 ≈ triplet feel)
+    pub swing: f64,
+    /// Phase 3 — humanize 0..1: deterministic timing/velocity jitter depth
+    pub humanize: f64,
+    /// Phase 3 — the GM drum stub pattern (kick 36 / snare 38 / closed hat 42)
+    pub drums: DrumPattern,
 }
 
-pub static DARK_HALFTIME: ArrangementProfile = ArrangementProfile { name: "dark half-time", bass: BassPattern::HalfTime808, sub_bass: true, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.85 };
-pub static TRAP_808: ArrangementProfile = ArrangementProfile { name: "trap 808", bass: BassPattern::HalfTime808, sub_bass: true, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Off, sparse_melody: true, vel_scale: 1.0 };
-pub static SYNTHWAVE: ArrangementProfile = ArrangementProfile { name: "synthwave drive", bass: BassPattern::EighthDrive, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Sixteenths, sparse_melody: false, vel_scale: 1.0 };
-pub static FOUR_FLOOR: ArrangementProfile = ArrangementProfile { name: "four-on-the-floor", bass: BassPattern::OffbeatSync, sub_bass: false, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0 };
-pub static ROCK_DRIVE: ArrangementProfile = ArrangementProfile { name: "rock drive", bass: BassPattern::EighthDrive, sub_bass: false, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Off, sparse_melody: false, vel_scale: 1.0 };
-pub static FOLK_ACOUSTIC: ArrangementProfile = ArrangementProfile { name: "folk acoustic", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: false, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 0.9 };
-pub static AMBIENT_WASH: ArrangementProfile = ArrangementProfile { name: "ambient wash", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.7 };
-pub static POP_DEFAULT: ArrangementProfile = ArrangementProfile { name: "pop default", bass: BassPattern::Walking, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0 };
+pub static DARK_HALFTIME: ArrangementProfile = ArrangementProfile { name: "dark half-time", bass: BassPattern::HalfTime808, sub_bass: true, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.85, swing: 0.0, humanize: 0.35, drums: DrumPattern::HalfTime };
+pub static TRAP_808: ArrangementProfile = ArrangementProfile { name: "trap 808", bass: BassPattern::HalfTime808, sub_bass: true, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Off, sparse_melody: true, vel_scale: 1.0, swing: 0.12, humanize: 0.25, drums: DrumPattern::HalfTime };
+pub static SYNTHWAVE: ArrangementProfile = ArrangementProfile { name: "synthwave drive", bass: BassPattern::EighthDrive, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Sixteenths, sparse_melody: false, vel_scale: 1.0, swing: 0.0, humanize: 0.12, drums: DrumPattern::FourFloor };
+pub static FOUR_FLOOR: ArrangementProfile = ArrangementProfile { name: "four-on-the-floor", bass: BassPattern::OffbeatSync, sub_bass: false, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0, swing: 0.08, humanize: 0.15, drums: DrumPattern::FourFloor };
+pub static ROCK_DRIVE: ArrangementProfile = ArrangementProfile { name: "rock drive", bass: BassPattern::EighthDrive, sub_bass: false, chords: ChordStyle::Stabs, pad: false, arp: ArpRate::Off, sparse_melody: false, vel_scale: 1.0, swing: 0.0, humanize: 0.3, drums: DrumPattern::Backbeat };
+pub static FOLK_ACOUSTIC: ArrangementProfile = ArrangementProfile { name: "folk acoustic", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: false, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 0.9, swing: 0.15, humanize: 0.45, drums: DrumPattern::Off };
+pub static AMBIENT_WASH: ArrangementProfile = ArrangementProfile { name: "ambient wash", bass: BassPattern::Sustain, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Off, sparse_melody: true, vel_scale: 0.7, swing: 0.0, humanize: 0.4, drums: DrumPattern::Off };
+pub static POP_DEFAULT: ArrangementProfile = ArrangementProfile { name: "pop default", bass: BassPattern::Walking, sub_bass: false, chords: ChordStyle::Held, pad: true, arp: ArpRate::Eighths, sparse_melody: false, vel_scale: 1.0, swing: 0.0, humanize: 0.2, drums: DrumPattern::Backbeat };
 
 /// Parse a preset's stored arrangement JSON into a profile (Phase 2 — the
 /// style-skill-generated, user-editable per-preset profile). Shape:
@@ -134,6 +151,13 @@ pub fn profile_from_json(s: &str) -> Option<ArrangementProfile> {
         "sixteenths" => ArpRate::Sixteenths,
         _ => d.arp,
     };
+    let drums = match o.get("drums").and_then(|x| x.as_str()).unwrap_or("") {
+        "off" => DrumPattern::Off,
+        "four_floor" => DrumPattern::FourFloor,
+        "half_time" => DrumPattern::HalfTime,
+        "backbeat" => DrumPattern::Backbeat,
+        _ => d.drums,
+    };
     Some(ArrangementProfile {
         name: "preset arrangement",
         bass,
@@ -143,6 +167,9 @@ pub fn profile_from_json(s: &str) -> Option<ArrangementProfile> {
         arp,
         sparse_melody: o.get("sparse_melody").and_then(|x| x.as_bool()).unwrap_or(d.sparse_melody),
         vel_scale: o.get("vel_scale").and_then(|x| x.as_f64()).unwrap_or(d.vel_scale).clamp(0.4, 1.2),
+        swing: o.get("swing").and_then(|x| x.as_f64()).unwrap_or(d.swing).clamp(0.0, 1.0),
+        humanize: o.get("humanize").and_then(|x| x.as_f64()).unwrap_or(d.humanize).clamp(0.0, 1.0),
+        drums,
     })
 }
 
@@ -169,10 +196,10 @@ pub fn section_parts(label: &str) -> &'static [&'static str] {
     let l = label.to_lowercase();
     // Pad is the atmospheric bed — it plays under everything
     if l.contains("intro") || l.contains("outro") { &["Sections", "Bass", "Chords", "Pad"] }
-    else if l.contains("pre") || l.contains("build") { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler"] }
+    else if l.contains("pre") || l.contains("build") { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Drums"] }
     else if l.contains("break") || l.contains("bridge") { &["Sections", "Bass", "Chords", "Pad", "Filler"] }
-    else if l.contains("verse") { &["Sections", "Bass", "Chords", "Pad", "Chord melody"] }
-    else { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp"] } // chorus / drop / hook / default
+    else if l.contains("verse") { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Drums"] }
+    else { &["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp", "Drums"] } // chorus / drop / hook / default
 }
 
 /// Lay the looped progression along the section timeline using each chord's beats,
@@ -296,7 +323,76 @@ pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &Arrangeme
             _ => {}
         }
     }
+    // Drums are bar-driven, not chord-driven — generate once over the section
+    // (GM: kick 36, snare 38, closed hat 42; you drop a drum rack on the track)
+    if part == "Drums" && p.drums != DrumPattern::Off {
+        let total = bars * 4;
+        let v = |base: i64| ((base as f64 * p.vel_scale) as i64).clamp(20, 127);
+        for beat in 0..total {
+            let b = beat as f64;
+            let pos = beat % 4; // beat within the bar
+            match p.drums {
+                DrumPattern::FourFloor => {
+                    out.push(mk_note(36, b, 0.4, v(112)));
+                    if pos == 1 || pos == 3 { out.push(mk_note(38, b, 0.3, v(96))); }
+                    out.push(mk_note(42, b + 0.5, 0.2, v(64)));
+                }
+                DrumPattern::HalfTime => {
+                    if pos == 0 { out.push(mk_note(36, b, 0.4, v(114))); }
+                    if pos == 2 { out.push(mk_note(38, b, 0.35, v(100))); }
+                    out.push(mk_note(42, b, 0.2, v(if pos == 0 { 70 } else { 52 })));
+                }
+                DrumPattern::Backbeat => {
+                    if pos == 0 { out.push(mk_note(36, b, 0.4, v(110))); }
+                    if pos == 2 { out.push(mk_note(36, b + 0.5, 0.35, v(88))); }
+                    if pos == 1 || pos == 3 { out.push(mk_note(38, b, 0.3, v(102))); }
+                    out.push(mk_note(42, b, 0.18, v(66)));
+                    out.push(mk_note(42, b + 0.5, 0.18, v(52)));
+                }
+                DrumPattern::Off => {}
+            }
+        }
+    }
+    apply_feel(&mut out, p);
     out
+}
+
+/// Phase 3 FEEL pass, applied to every generated part: swing (off-beat 8ths
+/// lag toward a triplet feel) then deterministic humanization (timing ±12ms-ish
+/// and velocity jitter scaled by `humanize`). Deterministic on purpose — a
+/// tiny xorshift seeded from each note's pitch/position, so tests and repeat
+/// builds are stable (no clock, no RNG state).
+fn apply_feel(notes: &mut [Value], p: &ArrangementProfile) {
+    if p.swing <= 0.0 && p.humanize <= 0.0 {
+        return;
+    }
+    let max_swing = 0.17; // beats — full triplet-ish lag at swing = 1.0
+    for (i, n) in notes.iter_mut().enumerate() {
+        let Some(start) = n.get("start_time").and_then(|v| v.as_f64()) else { continue };
+        let Some(vel) = n.get("velocity").and_then(|v| v.as_i64()) else { continue };
+        let pitch = n.get("pitch").and_then(|v| v.as_i64()).unwrap_or(60);
+        let mut t = start;
+        // swing: notes sitting on the off-8th (x.5 within the beat) lag
+        let frac = t - t.floor();
+        if p.swing > 0.0 && (frac - 0.5).abs() < 0.05 {
+            t += p.swing * max_swing;
+        }
+        if p.humanize > 0.0 {
+            // xorshift seeded from stable note identity → same build, same feel
+            let mut s = (pitch as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((start * 1000.0) as u64)
+                .wrapping_add(i as u64) | 1;
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            let r1 = ((s % 1000) as f64 / 1000.0) - 0.5; // -0.5..0.5
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            let r2 = ((s % 1000) as f64 / 1000.0) - 0.5;
+            t += r1 * p.humanize * 0.06; // up to ±30ms-ish at 100 BPM
+            let dv = (r2 * p.humanize * 24.0) as i64;
+            n["velocity"] = serde_json::json!((vel + dv).clamp(15, 127));
+        }
+        n["start_time"] = serde_json::json!((t.max(0.0) * 1000.0).round() / 1000.0);
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +507,34 @@ mod tests {
         // empty / non-JSON → None (keyword fallback)
         assert!(profile_from_json("").is_none());
         assert!(profile_from_json("not json").is_none());
+    }
+
+    /// Phase 3 feel: drums follow the pattern, swing lags off-8ths, humanize
+    /// jitters deterministically (same input → byte-identical output).
+    #[test]
+    fn phase3_drums_swing_and_deterministic_humanize() {
+        let chords = vec![("Am".to_string(), 4)];
+        // four-floor: per bar → 4 kicks + 2 snares + 4 hats = 10 notes
+        let ff = part_notes("Drums", &chords, 1, &SYNTHWAVE, &[]);
+        assert_eq!(ff.len(), 10, "four-floor bar = 4 kick + 2 snare + 4 hat");
+        assert!(ff.iter().any(|n| n["pitch"] == 36) && ff.iter().any(|n| n["pitch"] == 38) && ff.iter().any(|n| n["pitch"] == 42));
+        // half-time: 1 kick + 1 snare + 4 hats
+        assert_eq!(part_notes("Drums", &chords, 1, &DARK_HALFTIME, &[]).len(), 6);
+        // drums Off → nothing
+        assert!(part_notes("Drums", &chords, 1, &AMBIENT_WASH, &[]).is_empty());
+        // swing: an off-8th hat lands LATE vs the straight profile
+        let swung = ArrangementProfile { swing: 1.0, humanize: 0.0, ..SYNTHWAVE };
+        let straight = ArrangementProfile { swing: 0.0, humanize: 0.0, ..SYNTHWAVE };
+        let hat = |notes: &Vec<Value>| notes.iter().find(|n| n["pitch"] == 42 && n["start_time"].as_f64().unwrap() > 0.4 && n["start_time"].as_f64().unwrap() < 0.8).unwrap()["start_time"].as_f64().unwrap();
+        assert!(hat(&part_notes("Drums", &chords, 1, &swung, &[])) > hat(&part_notes("Drums", &chords, 1, &straight, &[])) + 0.1);
+        // humanize is deterministic: two identical builds are byte-identical
+        let a = part_notes("Chords", &chords, 1, &POP_DEFAULT, &[]);
+        let b = part_notes("Chords", &chords, 1, &POP_DEFAULT, &[]);
+        assert_eq!(a, b, "humanize must be deterministic");
+        // …and actually changes velocities vs humanize 0
+        let dry = ArrangementProfile { humanize: 0.0, swing: 0.0, ..POP_DEFAULT };
+        let c = part_notes("Chords", &chords, 1, &dry, &[]);
+        assert_ne!(a, c, "humanize must do SOMETHING");
     }
 
     /// The keyword fallback mapping — incl. the exact bug the old bool had:
