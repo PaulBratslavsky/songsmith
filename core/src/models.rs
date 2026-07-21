@@ -213,6 +213,11 @@ pub struct Progression {
     pub name: String,
     /// ordered chord names, e.g. ["Am","F","C","G"]
     pub chords: Vec<String>,
+    /// per-chord shape picks JSON, parallel to `chords`:
+    /// `[{"g":0,"p":2,"a":0}, …]` (guitar voicing / piano inv / pad inv).
+    /// "" = no picks saved (root/first everywhere).
+    #[serde(default)]
+    pub picks: String,
     pub created_at: String,
 }
 

@@ -364,8 +364,8 @@ async fn list_progressions(state: State<'_, AppState>) -> R<Vec<Progression>> {
     db::list_progressions(&state.conn).await.map_err(e2s)
 }
 #[tauri::command]
-async fn save_progression(state: State<'_, AppState>, name: String, chords: Vec<String>) -> R<Progression> {
-    db::create_progression(&state.conn, &name, &chords).await.map_err(e2s)
+async fn save_progression(state: State<'_, AppState>, name: String, chords: Vec<String>, picks: Option<String>) -> R<Progression> {
+    db::create_progression(&state.conn, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
 }
 #[tauri::command]
 async fn delete_progression(state: State<'_, AppState>, id: String) -> R<()> {

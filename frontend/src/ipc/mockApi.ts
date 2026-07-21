@@ -774,7 +774,7 @@ const handlers: MockHandlers = {
   update_skill: (a) => { const s = db.skills.find((x: Any) => x.id === a.id); Object.assign(s, a.input, { updated_at: now() }); return s; },
   set_skill_enabled: (a) => { const s = db.skills.find((x: Any) => x.id === a.id); s.enabled = a.enabled; return s; },
   list_progressions: () => db.progressions,
-  save_progression: (a) => { const p = { id: uid(), name: a.name, chords: a.chords, created_at: now() }; db.progressions.unshift(p); return p; },
+  save_progression: (a) => { const p = { id: uid(), name: a.name, chords: a.chords, picks: a.picks ?? "", created_at: now() }; (db.progressions ??= []).push(p); return p; },
   delete_progression: (a) => { db.progressions = db.progressions.filter((x: Any) => x.id !== a.id); },
   // saved compositions (`db.compositions ??= []` back-fills mock DBs seeded before Phase 3)
   list_compositions: () => {

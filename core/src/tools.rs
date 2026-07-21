@@ -65,7 +65,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "update_skill", description: "Update a skill's content.", destructive: false, input_schema: obj(json!({"id": s(""),"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["id"]) },
         ToolSpec { name: "set_skill_enabled", description: "Enable or disable a skill.", destructive: false, input_schema: obj(json!({"id": s(""),"enabled": {"type":"boolean"}}), &["id","enabled"]) },
         ToolSpec { name: "list_progressions", description: "List saved chord progressions (reusable across songs).", destructive: false, input_schema: obj(json!({}), &[]) },
-        ToolSpec { name: "save_progression", description: "Save a reusable chord progression by name.", destructive: false, input_schema: obj(json!({"name": s(""),"chords": {"type":"array","items":{"type":"string"}}}), &["name","chords"]) },
+        ToolSpec { name: "save_progression", description: "Save a reusable chord progression by name (optionally with per-chord shape picks JSON).", destructive: false, input_schema: obj(json!({"name": s(""),"chords": {"type":"array","items":{"type":"string"}},"picks": s("optional per-chord picks JSON: [{\"g\":0,\"p\":2,\"a\":0}, …]")}), &["name","chords"]) },
         ToolSpec { name: "delete_progression", description: "Delete a saved chord progression.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "list_compositions", description: "List saved Composer compositions (visual melody/chords/bass sketches): name, linked song, timestamps — no data blobs.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_composition", description: "Get a saved composition by id, including its full Composition JSON blob (`data`).", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
@@ -269,7 +269,7 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             let chords: Vec<String> = args.get("chords").and_then(|c| c.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            v(db::create_progression(conn, arg(args, "name")?, &chords).await?)
+            v(db::create_progression(conn, arg(args, "name")?, &chords, arg_opt(args, "picks").unwrap_or("")).await?)
         }
         "delete_progression" => { db::delete_progression(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
         "list_compositions" => v(db::list_compositions(conn).await?),

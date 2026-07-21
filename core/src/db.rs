@@ -98,6 +98,8 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN lyric_exemplars TEXT NOT NULL DEFAULT ''", ()).await;
     // per-preset Ableton arrangement profile JSON (Phase 2; '' = keyword fallback)
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN arrangement TEXT NOT NULL DEFAULT ''", ()).await;
+    // per-chord shape picks for saved progressions (voicings/inversions JSON)
+    let _ = conn.execute("ALTER TABLE progression ADD COLUMN picks TEXT NOT NULL DEFAULT ''", ()).await;
     let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
     // regenerate-as-draft: at most ONE pending draft per stage, stored outside
     // the artifact history (discarded drafts never pollute revisions)
@@ -1012,26 +1014,27 @@ pub async fn set_skill_enabled(conn: &Connection, id: &str, enabled: bool) -> Re
 // ---- Saved progressions ----------------------------------------------------
 
 pub async fn list_progressions(conn: &Connection) -> Result<Vec<Progression>> {
-    let mut rows = conn.query("SELECT id, name, chords, created_at FROM progression ORDER BY created_at DESC", ()).await?;
+    let mut rows = conn.query("SELECT id, name, chords, picks, created_at FROM progression ORDER BY created_at DESC", ()).await?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await? {
         out.push(Progression {
             id: s(&r, 0), name: s(&r, 1),
             chords: serde_json::from_str(&s(&r, 2)).unwrap_or_default(),
-            created_at: s(&r, 3),
+            picks: s(&r, 3),
+            created_at: s(&r, 4),
         });
     }
     Ok(out)
 }
-pub async fn create_progression(conn: &Connection, name: &str, chords: &[String]) -> Result<Progression> {
+pub async fn create_progression(conn: &Connection, name: &str, chords: &[String], picks: &str) -> Result<Progression> {
     let id = new_id();
     let ts = now();
     let json = serde_json::to_string(chords).unwrap_or_else(|_| "[]".into());
     conn.execute(
-        "INSERT INTO progression (id, name, chords, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![id.clone(), name, json, ts.clone()],
+        "INSERT INTO progression (id, name, chords, picks, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id.clone(), name, json, picks, ts.clone()],
     ).await?;
-    Ok(Progression { id, name: name.to_string(), chords: chords.to_vec(), created_at: ts })
+    Ok(Progression { id, name: name.to_string(), chords: chords.to_vec(), picks: picks.to_string(), created_at: ts })
 }
 pub async fn delete_progression(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM progression WHERE id = ?1", params![id]).await?;

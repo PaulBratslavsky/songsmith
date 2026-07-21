@@ -8,4 +8,10 @@ export type Progression = { id: string, name: string,
 /**
  * ordered chord names, e.g. ["Am","F","C","G"]
  */
-chords: Array<string>, created_at: string, };
+chords: Array<string>, 
+/**
+ * per-chord shape picks JSON, parallel to `chords`:
+ * `[{"g":0,"p":2,"a":0}, …]` (guitar voicing / piano inv / pad inv).
+ * "" = no picks saved (root/first everywhere).
+ */
+picks: string, created_at: string, };

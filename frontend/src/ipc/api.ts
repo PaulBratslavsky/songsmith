@@ -96,7 +96,7 @@ export type CommandMap = {
   set_skill_enabled: { args: { id: string; enabled: boolean }; result: Skill };
   // saved chord progressions
   list_progressions: { args: Record<string, never>; result: Progression[] };
-  save_progression: { args: { name: string; chords: string[] }; result: Progression };
+  save_progression: { args: { name: string; chords: string[]; picks: string | null }; result: Progression };
   delete_progression: { args: { id: string }; result: void };
   // saved compositions
   list_compositions: { args: Record<string, never>; result: CompositionMeta[] };
@@ -292,7 +292,7 @@ export const api = {
 
   // saved chord progressions (reusable across songs)
   listProgressions: () => call("list_progressions"),
-  saveProgression: (name: string, chords: string[]) => call("save_progression", { name, chords }),
+  saveProgression: (name: string, chords: string[], picks?: string) => call("save_progression", { name, chords, picks: picks ?? null }),
   deleteProgression: (id: string) => call("delete_progression", { id }),
 
   // saved compositions (Composer sketches / full-song exports; libSQL-backed)

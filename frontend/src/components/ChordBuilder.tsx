@@ -62,7 +62,13 @@ export function ChordBuilder() {
     if (m.length) playChord(m);
   };
   const clearProg = () => { setProg([]); setPicks([]); };
-  const loadProg = (chords: string[]) => { setProg(chords); setPicks(chords.map(() => ({ g: 0, p: 0, a: 0 }))); };
+  const loadProg = (chords: string[], picksJson?: string) => {
+    setProg(chords);
+    // restore the saved per-chord shapes when the row carries them
+    let saved: { g: number; p: number; a: number }[] = [];
+    try { const v = JSON.parse(picksJson || ""); if (Array.isArray(v)) saved = v; } catch {}
+    setPicks(chords.map((_, i) => ({ g: saved[i]?.g ?? 0, p: saved[i]?.p ?? 0, a: saved[i]?.a ?? 0 })));
+  };
   const [name, setName] = useState("");
   const [view, setView] = useState<"guitar" | "piano" | "ableton">("guitar");
   // scale lens: highlights the key's diatonic chords on the circle and lists
@@ -85,7 +91,7 @@ export function ChordBuilder() {
   useEffect(() => { setVIdx(0); setInversion(0); }, [root, quality]);
 
   const saved = useQuery({ queryKey: ["progressions"], queryFn: api.listProgressions });
-  const save = useMutation({ mutationFn: () => api.saveProgression(name.trim() || "Untitled progression", prog), onSuccess: () => { qc.invalidateQueries({ queryKey: ["progressions"] }); setName(""); } });
+  const save = useMutation({ mutationFn: () => api.saveProgression(name.trim() || "Untitled progression", prog, JSON.stringify(picks)), onSuccess: () => { qc.invalidateQueries({ queryKey: ["progressions"] }); setName(""); } });
   const del = useMutation({ mutationFn: (id: string) => api.deleteProgression(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["progressions"] }) });
 
   return (
@@ -289,7 +295,7 @@ export function ChordBuilder() {
                   <span className="faint">{p.chords.join(" · ")}</span>
                 </div>
                 <div className="row" style={{ gap: 6 }}>
-                  <button className="sm ghost" onClick={() => loadProg(p.chords)}>load</button>
+                  <button className="sm ghost" onClick={() => loadProg(p.chords, p.picks)}>load</button>
                   <button className="sm" title="open in the Composer" onClick={() => openInComposer(p.chords)}>🎹</button>
                   <button className="sm" title="stub in Ableton" onClick={() => buildInAbleton(p.chords)}>⚡</button>
                   <button className="sm" onClick={async () => {
