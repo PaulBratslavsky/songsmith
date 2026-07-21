@@ -151,7 +151,7 @@ pub async fn discard_stage_draft(conn: &Connection, stage_id: &str) -> Result<()
 /// Self-test + refine pass: the model critiques its own stage output against the
 /// skill and coherence checks (title lands as the hook, sections fit the spec, no
 /// clichés / over-writing), then returns a revised version saved as a new revision.
-pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: &str) -> Result<Artifact> {
+pub async fn self_check_stage(conn: &Connection, settings: &Settings, stage_id: &str) -> Result<StageDraft> {
     let stage = db::get_stage(conn, stage_id).await?.ok_or_else(|| anyhow!("stage not found"))?;
     let song = db::get_song(conn, &stage.song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let preset = db::get_preset(conn, &song.style_preset_id).await?.ok_or_else(|| anyhow!("style preset not found"))?;
@@ -207,12 +207,15 @@ Return ONLY the revised result as the single fenced ```json block your skill spe
         let text = call_claude(settings, &system, &user, &|_| {}, None).await?;
         // same Phase-3 write pipeline as run_stage (spine reconciliation + frozen merge)
         let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, Some(current.content.as_str())).await?;
-        let artifact = db::save_artifact(conn, &song.id, Some(stage_id), kind_for_stage(&stage.r#type), &content).await?;
-        Ok::<Artifact, anyhow::Error>(artifact)
+        // regenerate-as-draft: a self-check ALWAYS revises existing content, so
+        // it always parks as the pending draft — the last write path that used
+        // to replace content without an accept
+        let draft = db::set_stage_draft(conn, stage_id, &song.id, kind_for_stage(&stage.r#type), &content).await?;
+        Ok::<StageDraft, anyhow::Error>(draft)
     };
 
     match run.await {
-        Ok(artifact) => Ok(artifact),
+        Ok(draft) => Ok(draft),
         Err(e) => {
             let _ = db::set_stage_status(conn, stage_id, &prior_status).await;
             Err(e)

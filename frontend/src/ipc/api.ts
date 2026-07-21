@@ -79,7 +79,7 @@ export type CommandMap = {
   ableton_build_composition: { args: { bpm: number; lengthBeats: number; tracks: { name: string; notes: unknown[] }[] }; result: string };
   discard_stage_draft: { args: { stageId: string }; result: null };
   cancel_stage: { args: { stageId: string }; result: void };
-  self_check_stage: { args: { stageId: string }; result: Artifact };
+  self_check_stage: { args: { stageId: string }; result: StageDraft };
   approve_stage: { args: { stageId: string }; result: unknown };
   advance_stage: { args: { songId: string }; result: unknown };
   // artifacts

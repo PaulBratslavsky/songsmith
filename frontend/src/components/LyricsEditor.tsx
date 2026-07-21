@@ -296,10 +296,11 @@ export function LyricsEditor({
   });
 
   // self-test + refine: the model critiques its own lyrics (title lands as hook,
-  // sections coherent, no clichés) and rewrites them as a new revision
+  // sections coherent, no clichés) — the rewrite parks as a PENDING DRAFT
+  // (accept/discard in the bar above), the current lyrics stay untouched
   const selfCheck = useMutation({
     mutationFn: () => api.selfCheckStage(stageId),
-    onSuccess: () => { setDirty(false); onChanged(); },
+    onSuccess: () => { onChanged(); },
   });
 
   return (
@@ -310,7 +311,7 @@ export function LyricsEditor({
           <button className={"sm" + (mode === "text" ? " primary" : "")} onClick={() => setMode("text")} title="edit raw ChordPro: [C]word">✎ Text</button>
           {mode === "place" && <button className="sm" onClick={autoPlaceAll} title="spread each section's progression across its lyrics as a starting draft — then nudge">⚡ Auto-place</button>}
           <button className="sm" disabled={selfCheck.isPending || dirty} onClick={() => selfCheck.mutate()}
-            title={dirty ? "save your edits first" : "Claude self-tests the lyrics (title lands as the hook, sections coherent, no clichés) and rewrites them as a new revision"}>
+            title={dirty ? "save your edits first" : "Claude self-tests the lyrics (title lands as the hook, sections coherent, no clichés) — the rewrite lands as a DRAFT you accept or discard"}>
             {selfCheck.isPending ? "checking…" : "✓ Self-check & refine"}
           </button>
           <button className="sm" onClick={() => setPasteOpen(true)}

@@ -114,7 +114,7 @@ async fn import_reference(state: State<'_, AppState>, audio_path: String) -> R<S
     song_core::agent::import_reference(&state.conn, &settings, &audio_path).await.map_err(e2s)
 }
 #[tauri::command]
-async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<Artifact> {
+async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<StageDraft> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     song_core::agent::self_check_stage(&state.conn, &settings, &stage_id).await.map_err(e2s)
 }

@@ -843,7 +843,14 @@ const handlers: MockHandlers = {
     exportSectionsIntoSong(id, sections);
     return toSong(v);
   },
-  self_check_stage: (a) => toArtifact(currentArtifact(a.stageId)), // mock: no-op refine
+  self_check_stage: (a) => { // mock: park the current content as a draft
+    const cur = currentArtifact(a.stageId);
+    if (!cur) throw new Error("nothing to self-check yet");
+    db.drafts = (db.drafts ?? []).filter((d: Any) => d.stage_id !== a.stageId);
+    const draft = { stage_id: a.stageId, song_id: cur.song_id, kind: cur.kind, content: cur.content, created_at: now() };
+    db.drafts.push(draft);
+    return draft;
+  },
   get_settings: () => db.settings,
   set_settings: (a) => { db.settings = a.settings; return db.settings; },
   list_tools: () => MOCK_TOOLS,
