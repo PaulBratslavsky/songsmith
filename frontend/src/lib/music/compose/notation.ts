@@ -109,6 +109,9 @@ export type VoiceCell = {
   ticks: number;
   /** Resolved MIDI pitch, or null for a rest. */
   midi: number | null;
+  /** Chord stack (chords-on-staff mode): every MIDI of the voicing. When set,
+   *  `midi` carries the lowest for rest/tie plumbing. */
+  midis?: number[];
   /** True when the NEXT cell continues this pitch (tie across the bar). */
   tieToNext: boolean;
 };
@@ -209,4 +212,47 @@ export function chordSymbolText(
   const label = labels[span.degree];
   if (!label) return '';
   return span.seventh ? label.seventh.name : label.triad.name;
+}
+
+
+/**
+ * Chords-on-staff cells: the CHORD lane flattened to per-bar stacks (every
+ * voicing note in `midis`), gaps as rests — so the notation can show playable
+ * chord voicings on a staff before any melody exists. Bar-crossing spans
+ * re-strike per bar (no cross-bar tie chains for stacks; simpler and readable).
+ */
+export function chordVoiceCells(
+  spans: { start: number; length: number }[],
+  totalTicks: number,
+  resolve: (span: { start: number; length: number }) => number[],
+): VoiceCell[] {
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  const cells: VoiceCell[] = [];
+  const pushRun = (start: number, end: number, midis: number[] | null) => {
+    let s = start;
+    while (s < end) {
+      const barEnd = (Math.floor(s / TICKS_PER_BAR) + 1) * TICKS_PER_BAR;
+      const e = Math.min(end, barEnd);
+      cells.push({
+        bar: Math.floor(s / TICKS_PER_BAR),
+        ticks: e - s,
+        midi: midis?.length ? Math.min(...midis) : null,
+        ...(midis?.length ? { midis } : {}),
+        tieToNext: false,
+      });
+      s = e;
+    }
+  };
+  let cursor = 0;
+  for (const sp of sorted) {
+    const start = Math.max(sp.start, cursor);
+    const end = Math.min(sp.start + sp.length, totalTicks);
+    if (start >= end) continue;
+    if (start > cursor) pushRun(cursor, start, null);
+    const midis = resolve(sp);
+    pushRun(start, end, midis.length ? midis : null);
+    cursor = end;
+  }
+  if (cursor < totalTicks) pushRun(cursor, totalTicks, null);
+  return cells;
 }

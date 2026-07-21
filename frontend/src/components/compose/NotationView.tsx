@@ -36,6 +36,7 @@ import { TICKS_PER_BAR } from '../../lib/music/compose/types';
 import {
   resolveBassMidi,
   resolveMelodyMidi,
+  resolveNamedChordMidis,
 } from '../../lib/music/compose/playback';
 import {
   chordSymbolText,
@@ -43,6 +44,7 @@ import {
   midiSpeller,
   vexKeySpec,
   voiceCells,
+  chordVoiceCells,
   type VoiceCell,
 } from '../../lib/music/compose/notation';
 import type { DegreeLabel } from '../../lib/music/compose/labels';
@@ -86,6 +88,10 @@ export const NotationView = memo(function NotationView({
   activeBar: number | null;
 }) {
   const [melodyClef, setMelodyClef] = useState<ClefName>('treble');
+  // chords-on-staff: render the CHORD lane as stacked voicings on the melody
+  // staff — the sheet is playable before a melody exists (default: on when
+  // the melody lane is empty)
+  const [chordsOnStaff, setChordsOnStaff] = useState<boolean>(comp.melody.length === 0);
   const [bassClef, setBassClef] = useState<ClefName>('bass');
   const [width, setWidth] = useState(0);
   const [rects, setRects] = useState<MeasureRect[]>([]);
@@ -166,7 +172,7 @@ export const NotationView = memo(function NotationView({
         for (const atom of decomposeTicks(cell.ticks)) {
           const note = new StaveNote({
             clef,
-            keys: [rest ? REST_KEY[clef] : spell(cell.midi as number)],
+            keys: rest ? [REST_KEY[clef]] : (cell.midis ?? [cell.midi as number]).map(spell),
             duration: atom.duration + (rest ? 'r' : ''),
             autoStem: !rest,
           });
@@ -187,7 +193,9 @@ export const NotationView = memo(function NotationView({
     };
 
     const melodyBars = buildBars(
-      voiceCells(comp.melody, paddedTicks, (s) => resolveMelodyMidi(comp, s)),
+      chordsOnStaff
+        ? chordVoiceCells(comp.chords, paddedTicks, (s) => resolveNamedChordMidis(comp, s as never))
+        : voiceCells(comp.melody, paddedTicks, (s) => resolveMelodyMidi(comp, s)),
       melodyClef,
     );
     const bassBars = buildBars(
@@ -346,6 +354,14 @@ export const NotationView = memo(function NotationView({
             </select>
           </label>
         ))}
+        <button
+          type="button"
+          className={'sm' + (chordsOnStaff ? ' primary' : '')}
+          title="render the chord lane as stacked voicings on the top staff — a playable sheet before any melody exists"
+          onClick={() => setChordsOnStaff((v) => !v)}
+        >
+          ♫ Chords on staff
+        </button>
         <span className="faint" style={{ fontSize: 11, marginLeft: 'auto' }}>
           read-only — edit in ▦ Grid view
         </span>
