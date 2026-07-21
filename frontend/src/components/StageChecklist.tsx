@@ -1,6 +1,26 @@
 import { STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
 
+/** WHY a stage is stale: the earlier stages whose current artifact is NEWER
+ *  than this stage's — the provenance the banner names ("Structure changed
+ *  after this was generated"), ordinal order. Empty when not stale. */
+export function staleCauseLabels(stages: Stage[], stageId: string): string[] {
+  const sorted = [...stages].sort((a, b) => Number(a.ordinal) - Number(b.ordinal));
+  const me = sorted.find((s) => s.id === stageId);
+  if (!me?.artifact_at) return [];
+  return sorted
+    .filter((s) => Number(s.ordinal) < Number(me.ordinal) && s.artifact_at && s.artifact_at > me.artifact_at!)
+    .map((s) => STAGE_LABELS[s.type] ?? s.type);
+}
+
+/** The stale stages in run order — what "Refresh out-of-date stages" walks. */
+export function staleStagesInOrder(stages: Stage[]): Stage[] {
+  const stale = staleStageIds(stages);
+  return [...stages]
+    .sort((a, b) => Number(a.ordinal) - Number(b.ordinal))
+    .filter((s) => stale.has(s.id));
+}
+
 /** Stages whose current artifact is older than a later-edited upstream stage —
  *  i.e. out of date and worth re-running. Timestamps are ISO, so string-comparable. */
 export function staleStageIds(stages: Stage[]): Set<string> {

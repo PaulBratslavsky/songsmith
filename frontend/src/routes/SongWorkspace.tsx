@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, listen, STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
-import { StageChecklist, staleStageIds } from "../components/StageChecklist";
+import { StageChecklist, staleStageIds, staleCauseLabels, staleStagesInOrder } from "../components/StageChecklist";
 import { DraftBar } from "../components/DraftBar";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { HistoryButton } from "../components/RevisionHistory";
@@ -31,6 +31,28 @@ export function SongWorkspace() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [tab, setTab] = useState<"workspace" | "builder" | "sheet" | "notation" | "renders">("workspace");
   const [abMsg, setAbMsg] = useState("");
+  // batch "Refresh out-of-date stages": walks the stale stages in run order;
+  // every re-run lands as a DRAFT, so firing the whole batch is safe to review
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState("");
+  const refreshStale = async () => {
+    const stale = staleStagesInOrder(song.data?.stages ?? []);
+    if (!stale.length || refreshBusy) return;
+    setRefreshBusy(true);
+    let done = 0;
+    try {
+      for (const s of stale) {
+        setRefreshMsg(`Refreshing ${STAGE_LABELS[s.type] ?? s.type} (${done + 1}/${stale.length})…`);
+        await api.runStage(s.id);
+        done += 1;
+        invalidate();
+      }
+      setRefreshMsg(`✓ ${done} stage${done === 1 ? "" : "s"} refreshed — review the draft on each stage.`);
+    } catch (e: any) {
+      setRefreshMsg(`stopped after ${done}: ${String(e?.message ?? e)}`);
+    }
+    setRefreshBusy(false);
+  };
   const [showStyle, setShowStyle] = useState(false);
   const fd = useFieldDrawer();
   // the right inspector flyout is open when a field is focused or Style is toggled
@@ -196,6 +218,27 @@ export function SongWorkspace() {
         </div>
       )}
 
+      {(() => {
+        const stale = staleStagesInOrder(song.data.stages);
+        if ((!stale.length && !refreshMsg) || tab !== "workspace") return null;
+        return (
+          <div className="banner warn row" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {stale.length > 0 && (
+              <span>
+                ⚠ <b>{stale.length} stage{stale.length === 1 ? " is" : "s are"} out of date</b> — {stale.map((s) => STAGE_LABELS[s.type] ?? s.type).join(", ")}.
+              </span>
+            )}
+            {stale.length > 0 && (
+              <button className="sm primary" disabled={refreshBusy} onClick={refreshStale} title="re-run every out-of-date stage in order — each result lands as a draft you accept or discard">
+                {refreshBusy ? "Refreshing…" : "🔄 Refresh out-of-date stages"}
+              </button>
+            )}
+            {refreshMsg && <span className="faint">{refreshMsg}</span>}
+            {!refreshBusy && refreshMsg && <button className="sm ghost" title="clear" onClick={() => setRefreshMsg("")}>✕</button>}
+          </div>
+        );
+      })()}
+
       <div className="row" style={{ gap: 6, marginBottom: 12 }}>
         <button className={"sm" + (tab === "workspace" ? " primary" : "")} onClick={() => setTab("workspace")}>Workspace</button>
         <button className={"sm" + (tab === "builder" ? " primary" : "")} onClick={() => setTab("builder")}>Arrange</button>
@@ -234,9 +277,27 @@ export function SongWorkspace() {
               )}
             </div>
           </div>
-          {isStale && (
+          {isStale && sd?.stage && (
             <div className="banner warn" style={{ marginBottom: 8 }}>
-              ⚠ <b>Out of date.</b> An earlier stage changed after this was generated. Re-run this stage to rebuild it from the current upstream content.
+              ⚠ <b>Out of date.</b>{" "}
+              {(() => {
+                // name WHAT changed instead of "an earlier stage": the newer
+                // upstream stages, plus section-spine drift vs this artifact's
+                // snapshot (the lyrics-import back-fill case that confused)
+                const causes = staleCauseLabels(song.data.stages, sd.stage.id);
+                const snap: { label?: string }[] | null = (() => {
+                  try { const v = JSON.parse(sd.artifact?.content ?? ""); return Array.isArray(v?.spine_snapshot) ? v.spine_snapshot : null; } catch { return null; }
+                })();
+                const snapLabels = snap?.map((r) => r.label ?? "");
+                const liveLabels = spineSections.map((r) => r.label);
+                const drifted = !!snapLabels && (snapLabels.length !== liveLabels.length || snapLabels.some((l, i) => l !== liveLabels[i]));
+                const parts: string[] = [];
+                if (causes.length) parts.push(`${causes.join(" and ")} changed after this was generated`);
+                if (drifted) parts.push(`the section list changed (${snapLabels!.length} → ${liveLabels.length} sections)`);
+                if (!parts.length) parts.push("an earlier stage changed after this was generated");
+                return <>{parts.join(", and ")}. </>;
+              })()}
+              Re-run this stage to rebuild it — the result lands as a draft you accept or discard.
             </div>
           )}
           {sd?.draft && <DraftBar draft={sd.draft} onChanged={invalidate} />}
