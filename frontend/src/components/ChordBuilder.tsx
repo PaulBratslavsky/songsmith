@@ -275,11 +275,15 @@ export function ChordBuilder() {
                   return `<svg width="${Math.round(W * s)}" height="${Math.round(H * s)}"`;
                 });
                 return (
-                  <div key={i} className="col" style={{ alignItems: "center", gap: 2, minWidth: 0, width: "100%" }}>
-                    <div dangerouslySetInnerHTML={{ __html: fitted }} onClick={play} style={{ cursor: "pointer", maxWidth: "100%", display: "flex", justifyContent: "center" }} />
-                    <div className="row" style={{ gap: 4, alignItems: "center" }}>
+                  <div key={i} className="col" style={{ alignItems: "center", gap: 3, minWidth: 0, width: "100%", alignSelf: "stretch" }}>
+                    {/* diagram fills, controls pin to the bottom — cards align
+                        across the row no matter how tall the diagram is */}
+                    <div dangerouslySetInnerHTML={{ __html: fitted }} onClick={play} style={{ cursor: "pointer", maxWidth: "100%", display: "flex", justifyContent: "center", flex: 1, alignItems: "flex-start" }} />
+                    <div className="row" style={{ gap: 4, alignItems: "center", marginTop: "auto" }}>
                       <button className="sm ghost" disabled={count < 2} onClick={() => cycle(-1)}>‹</button>
-                      <span className="faint" style={{ fontSize: 10, minWidth: 64, textAlign: "center" }}>{sub} ({idx + 1}/{count})</span>
+                      <span className="faint" title={`${sub} (${idx + 1}/${count})`} style={{ fontSize: 10, width: 88, textAlign: "center", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {sub} ({idx + 1}/{count})
+                      </span>
                       <button className="sm ghost" disabled={count < 2} onClick={() => cycle(1)}>›</button>
                     </div>
                     <div className="row" style={{ gap: 4 }}>
