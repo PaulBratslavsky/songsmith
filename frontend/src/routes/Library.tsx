@@ -165,12 +165,65 @@ function NewFromLyricsButton() {
   );
 }
 
+// Genre song-outline templates (user-picked 2026-07-22): section skeletons
+// laid into Ableton as colored section clips + locators — no chords, no notes.
+const OUTLINES: { name: string; bpm: number; sections: [string, number][] }[] = [
+  { name: "Pop", bpm: 100, sections: [["Intro", 4], ["Verse 1", 16], ["Pre-Chorus", 8], ["Chorus", 16], ["Verse 2", 16], ["Pre-Chorus 2", 8], ["Chorus 2", 16], ["Bridge", 8], ["Final Chorus", 16], ["Outro", 8]] },
+  { name: "EDM / Dance", bpm: 126, sections: [["Intro", 16], ["Build 1", 16], ["Drop 1", 16], ["Breakdown", 16], ["Build 2", 16], ["Drop 2", 16], ["Outro", 16]] },
+  { name: "Hip-hop / Trap", bpm: 140, sections: [["Intro", 8], ["Hook", 8], ["Verse 1", 16], ["Hook 2", 8], ["Verse 2", 16], ["Hook 3", 8], ["Outro", 8]] },
+  { name: "Rock", bpm: 120, sections: [["Intro", 8], ["Verse 1", 16], ["Chorus", 8], ["Verse 2", 16], ["Chorus 2", 8], ["Solo", 8], ["Bridge", 8], ["Final Chorus", 16], ["Outro", 8]] },
+];
+
+/** "Song outline → Ableton": no song needed — pick a genre skeleton, tweak
+ *  the tempo, fire. Sections track + locators only; you build the music. */
+function OutlineToAbleton({ open, setOpen }: { open: boolean; setOpen: (v: boolean) => void }) {
+  const [idx, setIdx] = useState(0);
+  const [bpm, setBpm] = useState(OUTLINES[0].bpm);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const t = OUTLINES[idx];
+  const totalBars = t.sections.reduce((a, [, b]) => a + b, 0);
+  const fire = async () => {
+    setBusy(true);
+    setMsg("Laying the outline in Ableton…");
+    try { setMsg(await api.abletonBuildOutline(bpm, t.sections)); } catch (e: any) { setMsg(String(e?.message ?? e)); }
+    setBusy(false);
+  };
+  if (!open) return null;
+  return (
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <label style={{ margin: 0 }}>Song outline → Ableton <span className="faint">sections + locators only — no chords, no notes; Live must be open with AbletonMCP on</span></label>
+        <button className="sm ghost" onClick={() => setOpen(false)}>✕</button>
+      </div>
+      <div className="row" style={{ gap: 8, alignItems: "flex-end", marginTop: 8, flexWrap: "wrap" }}>
+        <div>
+          <label>Template</label>
+          <select value={idx} onChange={(e) => { const i = Number(e.target.value); setIdx(i); setBpm(OUTLINES[i].bpm); }}>
+            {OUTLINES.map((o, i) => <option key={o.name} value={i}>{o.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>BPM</label>
+          <input type="number" value={bpm} onChange={(e) => setBpm(Number(e.target.value) || t.bpm)} style={{ width: 70 }} />
+        </div>
+        <button className="primary" disabled={busy} onClick={fire}>{busy ? "building…" : "⚡ Build outline"}</button>
+      </div>
+      <p className="faint" style={{ fontSize: 11, margin: "8px 0 0" }}>
+        {t.sections.map(([l, b]) => `${l} ${b}`).join(" · ")} — {totalBars} bars
+      </p>
+      {msg && <pre className="artifact-text" style={{ whiteSpace: "pre-wrap", maxHeight: 140, marginTop: 8 }}>{msg}</pre>}
+    </div>
+  );
+}
+
 export function Library() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const songs = useQuery({ queryKey: ["songs"], queryFn: api.listSongs });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.listStylePresets });
   const [importMsg, setImportMsg] = useState("");
+  const [outlineOpen, setOutlineOpen] = useState(false);
 
   const importRef = useMutation({
     mutationFn: async () => {
@@ -198,11 +251,16 @@ export function Library() {
             title="Import an audio file → analyze locally → new song with Structure + Chords filled in">
             {importRef.isPending ? "Analyzing…" : "⤵ Import reference"}
           </button>
+          <button className={outlineOpen ? "primary" : ""} onClick={() => setOutlineOpen(!outlineOpen)}
+            title="stub a sections-only song skeleton in Ableton — no song, no chords, just the arrangement map">
+            ⚡ Song outline
+          </button>
           <NewFromLyricsButton />
           <NewSongButton />
         </div>
       </div>
       {importMsg && <div className="banner" style={{ marginBottom: 12 }}>{importMsg}</div>}
+      <OutlineToAbleton open={outlineOpen} setOpen={setOutlineOpen} />
 
       {presets.data && presets.data.length === 0 && (
         <div className="banner warn">No style presets yet. Create one in <b>Style presets</b> before starting a song.</div>

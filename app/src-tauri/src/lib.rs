@@ -1051,6 +1051,15 @@ async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<Comp
         .map_err(e2s)
 }
 
+/// Sections-only song outline in Ableton (Library page, no song needed).
+#[tauri::command]
+async fn ableton_build_outline(bpm: i64, sections: Vec<(String, i64)>) -> R<String> {
+    tokio::task::spawn_blocking(move || song_core::ableton::build_outline(bpm, &sections))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(e2s)
+}
+
 /// MIDI keyboard note entry (Composer N3): list the machine's MIDI inputs.
 #[tauri::command]
 fn midi_list_inputs() -> R<Vec<String>> {
@@ -1204,6 +1213,7 @@ pub fn run() {
             ableton_build_song,
             ableton_build_progression,
             ableton_build_composition,
+            ableton_build_outline,
             midi_list_inputs,
             midi_open_input,
             midi_close_input,

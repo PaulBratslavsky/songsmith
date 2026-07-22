@@ -305,6 +305,19 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
 /// Stub a bare chord PROGRESSION in Ableton (the Chord Builder's export): one
 /// "Progression" section, one bar per chord, through the same track builder a
 /// song uses — Sections/Bass/Chords/Pad/etc. follow the given profile.
+/// Sections-only song OUTLINE (Library "Song outline → Ableton"): a genre
+/// template's section map laid as the color-coded Sections clip track PLUS
+/// arrangement locators — no chords, no notes, just the skeleton to build in.
+pub fn build_outline(bpm: i64, sections: &[(String, i64)]) -> Result<String> {
+    if sections.is_empty() {
+        return Ok("Nothing to build — the outline has no sections.".into());
+    }
+    let clips = build_clips(bpm, sections)?;
+    let locators = build_locators(bpm, sections)?;
+    Ok(format!("{clips}
+{locators}"))
+}
+
 /// Lay a bare chord PROGRESSION into Ableton as ONE MIDI track (user decision
 /// 2026-07-20: just the chords, not the 7-track song stub): a single
 /// "Progression" track, one bar per chord, held triads voiced at the picked

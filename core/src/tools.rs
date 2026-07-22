@@ -75,6 +75,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "add_render", description: "Add a final render: a label + file path on disk (Suno/Udio/Ableton take).", destructive: false, input_schema: obj(json!({"song_id": s(""),"label": s(""),"file_path": s(""),"source": s(""),"notes": s("")}), &["song_id","file_path"]) },
         ToolSpec { name: "set_render_pick", description: "Mark a render as the chosen winner for its song.", destructive: false, input_schema: obj(json!({"id": s(""),"is_pick": {"type":"boolean"}}), &["id","is_pick"]) },
         ToolSpec { name: "delete_render", description: "Remove a render reference (does not delete the file).", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
+        ToolSpec { name: "ableton_build_outline", description: "Stub a sections-only song OUTLINE in Ableton Live (no song needed): named color-coded section clips + arrangement locators, no chords or notes — a genre skeleton to build into. Live must be open with AbletonMCP enabled.", destructive: false, input_schema: obj(json!({"sections": {"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"bars":{"type":"integer"}},"required":["label"]},"description":"ordered sections, e.g. [{\"label\":\"Intro\",\"bars\":8}, …]"},"bpm": {"type":"integer","description":"tempo (default 120)"}}), &["sections"]) },
         ToolSpec { name: "ableton_build_progression", description: "Stub a bare chord progression in Ableton Live's Arrangement (no song needed): one Progression section, one bar per chord, full Bass/Chords/Pad/Melody/Filler/Arp MIDI parts. Live must be open with AbletonMCP enabled.", destructive: false, input_schema: obj(json!({"chords": {"type":"array","items":{"type":"string"},"description":"chord names in order, e.g. [\"Bm\",\"A\",\"E\"]"},"inversions": {"type":"array","items":{"type":"integer"},"description":"optional closed-voicing inversion per chord (0 = root)"},"beats": {"type":"array","items":{"type":"integer"},"description":"optional beats per chord (default 4 = one bar each)"},"bpm": {"type":"integer","description":"tempo (default 120)"}}), &["chords"]) },
         ToolSpec { name: "ableton_build_song", description: "Stub the whole song in Ableton Live's Arrangement view: a named, color-coded Sections clip track plus Bass/Chords/Pad/Chord melody/Filler/Arp MIDI parts generated deterministically from the song's chord progression (per-section density follows the energy arc). Talks straight to the AbletonMCP Remote Script socket — Live must be open with the control surface enabled. MIDI-only; re-running clears and rebuilds the same tracks. Returns a per-section build log.", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
         ToolSpec { name: "analyze_reference", description: "Analyze a local audio file (the perception layer for importing a reference): returns raw tempo, a key guess, bar-level chord candidates, and rough section boundaries as JSON. Interpret it with the Reference Analyst method — correct the key from the chord content, snap tempo, clean chords to the diatonic set, derive form from chord repetition — then create a song and save its Structure + Chords.", destructive: false, input_schema: obj(json!({"audio_path": s("absolute path to the local audio file")}), &["audio_path"]) },
@@ -280,6 +281,17 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "add_render" => v(db::create_render(conn, arg(args, "song_id")?, arg_opt(args, "label").unwrap_or("Render"), arg(args, "file_path")?, arg_opt(args, "source").unwrap_or(""), arg_opt(args, "notes").unwrap_or("")).await?),
         "set_render_pick" => { db::set_render_pick(conn, arg(args, "id")?, args.get("is_pick").and_then(|b| b.as_bool()).unwrap_or(true)).await?; Ok(json!({ "ok": true })) }
         "delete_render" => { db::delete_render(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "ableton_build_outline" => {
+            let sections: Vec<(String, i64)> = args.get("sections").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|s| {
+                    let label = s.get("label").and_then(|l| l.as_str())?.to_string();
+                    let bars = s.get("bars").and_then(|b| b.as_i64()).filter(|&b| b > 0).unwrap_or(8);
+                    Some((label, bars))
+                }).collect())
+                .unwrap_or_default();
+            let bpm = args.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
+            Ok(json!(tokio::task::spawn_blocking(move || ableton::build_outline(bpm, &sections)).await??))
+        }
         "ableton_build_progression" => {
             let chords: Vec<String> = args.get("chords").and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())

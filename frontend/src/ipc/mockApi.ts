@@ -720,6 +720,7 @@ const handlers: MockHandlers = {
   discard_stage_draft: (a) => { db.drafts = (db.drafts ?? []).filter((x: Any) => x.stage_id !== a.stageId); return null; },
   ableton_build_progression: (a) => `(mock) would stub ${a.chords.length} chords in Ableton`,
   ableton_build_composition: (a) => `(mock) would lay ${a.tracks.length} Composer tracks in Ableton`,
+  ableton_build_outline: (a) => `(mock) would lay a ${a.sections.length}-section outline in Ableton`,
   midi_list_inputs: () => [],
   midi_open_input: () => { throw new Error("MIDI input needs the desktop app"); },
   midi_close_input: () => null,
@@ -910,6 +911,6 @@ const MOCK_TOOLS = [
   "list_progressions","save_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
-  "ableton_build_song","ableton_build_progression","analyze_reference",
+  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" || name === "delete_section" }));
