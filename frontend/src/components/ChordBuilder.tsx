@@ -64,7 +64,10 @@ export function ChordBuilder() {
     const m = chordMidisByName(c);
     if (m.length) playChord(m);
   };
-  const clearProg = () => { setProg([]); setPicks([]); };
+  const clearProg = () => { setProg([]); setPicks([]); setLoadedId(null); setSaveMsg(""); };
+  // which saved row the workbench came from — enables Update-in-place
+  const [loadedId, setLoadedId] = useState<string | null>(null);
+  const [saveMsg, setSaveMsg] = useState("");
   const loadProg = (chords: string[], picksJson?: string) => {
     setProg(chords);
     // restore the saved per-chord shapes when the row carries them
@@ -94,7 +97,16 @@ export function ChordBuilder() {
   useEffect(() => { setVIdx(0); setInversion(0); }, [root, quality]);
 
   const saved = useQuery({ queryKey: ["progressions"], queryFn: api.listProgressions });
-  const save = useMutation({ mutationFn: () => api.saveProgression(name.trim() || "Untitled progression", prog, JSON.stringify(picks)), onSuccess: () => { qc.invalidateQueries({ queryKey: ["progressions"] }); setName(""); } });
+  const save = useMutation({
+    mutationFn: () => api.saveProgression(name.trim() || "Untitled progression", prog, JSON.stringify(picks)),
+    onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["progressions"] }); setLoadedId(p.id); setSaveMsg(`saved "${p.name}"`); },
+    onError: (e: any) => setSaveMsg(String(e?.message ?? e)),
+  });
+  const update = useMutation({
+    mutationFn: () => api.updateProgression(loadedId!, name.trim() || "Untitled progression", prog, JSON.stringify(picks)),
+    onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["progressions"] }); setSaveMsg(`updated "${p.name}"`); },
+    onError: (e: any) => setSaveMsg(String(e?.message ?? e)),
+  });
   const del = useMutation({ mutationFn: (id: string) => api.deleteProgression(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["progressions"] }) });
 
   return (
@@ -282,8 +294,10 @@ export function ChordBuilder() {
           {prog.length > 0 && (
             <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Progression name" style={{ width: 200 }} />
-              <button className="primary" onClick={() => save.mutate()} disabled={save.isPending}>Save to library</button>
+              {loadedId && <button className="primary" onClick={() => update.mutate()} disabled={update.isPending} title="update the loaded progression in place">{update.isPending ? "updating…" : "Update"}</button>}
+              <button className={loadedId ? "" : "primary"} onClick={() => save.mutate()} disabled={save.isPending} title={loadedId ? "save a NEW copy under this name" : "save to the library"}>{loadedId ? "Save as new" : "Save to library"}</button>
               <button className="ghost" onClick={clearProg}>clear</button>
+              {saveMsg && <span className="faint">{saveMsg}</span>}
             </div>
           )}
         </div>
@@ -298,7 +312,7 @@ export function ChordBuilder() {
                   <span className="faint">{p.chords.join(" · ")}</span>
                 </div>
                 <div className="row" style={{ gap: 6 }}>
-                  <button className="sm ghost" onClick={() => loadProg(p.chords, p.picks)}>load</button>
+                  <button className="sm ghost" onClick={() => { loadProg(p.chords, p.picks); setLoadedId(p.id); setName(p.name); setSaveMsg(""); }}>load</button>
                   <button className="sm" title="open in the Composer" onClick={() => openInComposer(p.chords)}>🎹</button>
                   <button className="sm" title="stub in Ableton" onClick={() => buildInAbleton(p.chords)}>⚡</button>
                   <button className="sm" onClick={async () => {

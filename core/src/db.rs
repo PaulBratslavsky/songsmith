@@ -1067,6 +1067,11 @@ pub async fn list_progressions(conn: &Connection) -> Result<Vec<Progression>> {
     Ok(out)
 }
 pub async fn create_progression(conn: &Connection, name: &str, chords: &[String], picks: &str) -> Result<Progression> {
+    // names are the library's identity for humans — refuse silent duplicates
+    let mut dup = conn.query("SELECT id FROM progression WHERE lower(name) = lower(?1)", params![name]).await?;
+    if dup.next().await?.is_some() {
+        return Err(anyhow!("a progression named \"{name}\" already exists — load it and use Update, or pick another name"));
+    }
     let id = new_id();
     let ts = now();
     let json = serde_json::to_string(chords).unwrap_or_else(|_| "[]".into());
@@ -1075,6 +1080,21 @@ pub async fn create_progression(conn: &Connection, name: &str, chords: &[String]
         params![id.clone(), name, json, picks, ts.clone()],
     ).await?;
     Ok(Progression { id, name: name.to_string(), chords: chords.to_vec(), picks: picks.to_string(), created_at: ts })
+}
+pub async fn update_progression(conn: &Connection, id: &str, name: &str, chords: &[String], picks: &str) -> Result<Progression> {
+    // renaming onto ANOTHER row's name is the same silent-duplicate trap
+    let mut dup = conn.query("SELECT id FROM progression WHERE lower(name) = lower(?1) AND id != ?2", params![name, id]).await?;
+    if dup.next().await?.is_some() {
+        return Err(anyhow!("a different progression named \"{name}\" already exists"));
+    }
+    let json = serde_json::to_string(chords).unwrap_or_else(|_| "[]".into());
+    conn.execute(
+        "UPDATE progression SET name=?2, chords=?3, picks=?4 WHERE id=?1",
+        params![id, name, json, picks],
+    ).await?;
+    let mut rows = conn.query("SELECT id, name, chords, picks, created_at FROM progression WHERE id = ?1", params![id]).await?;
+    let r = rows.next().await?.ok_or_else(|| anyhow!("progression not found"))?;
+    Ok(Progression { id: s(&r, 0), name: s(&r, 1), chords: serde_json::from_str(&s(&r, 2)).unwrap_or_default(), picks: s(&r, 3), created_at: s(&r, 4) })
 }
 pub async fn delete_progression(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM progression WHERE id = ?1", params![id]).await?;

@@ -371,6 +371,10 @@ async fn save_progression(state: State<'_, AppState>, name: String, chords: Vec<
     db::create_progression(&state.conn, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
 }
 #[tauri::command]
+async fn update_progression(state: State<'_, AppState>, id: String, name: String, chords: Vec<String>, picks: Option<String>) -> R<Progression> {
+    db::update_progression(&state.conn, &id, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
+}
+#[tauri::command]
 async fn delete_progression(state: State<'_, AppState>, id: String) -> R<()> {
     db::delete_progression(&state.conn, &id).await.map_err(e2s)
 }
@@ -1194,6 +1198,7 @@ pub fn run() {
             set_skill_enabled,
             list_progressions,
             save_progression,
+            update_progression,
             delete_progression,
             list_compositions,
             get_composition,

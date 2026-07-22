@@ -782,6 +782,7 @@ const handlers: MockHandlers = {
   set_skill_enabled: (a) => { const s = db.skills.find((x: Any) => x.id === a.id); s.enabled = a.enabled; return s; },
   list_progressions: () => db.progressions,
   save_progression: (a) => { const p = { id: uid(), name: a.name, chords: a.chords, picks: a.picks ?? "", created_at: now() }; (db.progressions ??= []).push(p); return p; },
+  update_progression: (a) => { const p = (db.progressions ?? []).find((x: Any) => x.id === a.id); if (!p) throw new Error("progression not found"); Object.assign(p, { name: a.name, chords: a.chords, picks: a.picks ?? "" }); return p; },
   delete_progression: (a) => { db.progressions = db.progressions.filter((x: Any) => x.id !== a.id); },
   // saved compositions (`db.compositions ??= []` back-fills mock DBs seeded before Phase 3)
   list_compositions: () => {
@@ -912,7 +913,7 @@ const MOCK_TOOLS = [
   "get_artifact","save_artifact","list_artifact_revisions","revert_artifact","set_artifact_label",
   "list_skills","get_skill","create_skill","update_skill","set_skill_enabled",
   "list_outlines","save_outline","delete_outline",
-  "list_progressions","save_progression","delete_progression",
+  "list_progressions","save_progression","update_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
   "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference",
