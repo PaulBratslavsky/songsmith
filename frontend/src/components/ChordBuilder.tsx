@@ -102,9 +102,13 @@ export function ChordBuilder() {
     onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["progressions"] }); setLoadedId(p.id); setSaveMsg(`saved "${p.name}"`); },
     onError: (e: any) => setSaveMsg(String(e?.message ?? e)),
   });
+  // Update targets the LOADED row — or, when the typed name matches a saved
+  // progression (the "typed 'Faded' by hand" case), that row directly.
+  const nameMatch = (saved.data ?? []).find((x) => x.name.trim().toLowerCase() === name.trim().toLowerCase());
+  const updateTargetId = loadedId ?? nameMatch?.id ?? null;
   const update = useMutation({
-    mutationFn: () => api.updateProgression(loadedId!, name.trim() || "Untitled progression", prog, JSON.stringify(picks)),
-    onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["progressions"] }); setSaveMsg(`updated "${p.name}"`); },
+    mutationFn: () => api.updateProgression(updateTargetId!, name.trim() || "Untitled progression", prog, JSON.stringify(picks)),
+    onSuccess: (p) => { qc.invalidateQueries({ queryKey: ["progressions"] }); setLoadedId(p.id); setSaveMsg(`updated "${p.name}"`); },
     onError: (e: any) => setSaveMsg(String(e?.message ?? e)),
   });
   const del = useMutation({ mutationFn: (id: string) => api.deleteProgression(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["progressions"] }) });
@@ -298,8 +302,8 @@ export function ChordBuilder() {
           {prog.length > 0 && (
             <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Progression name" style={{ width: 200 }} />
-              {loadedId && <button className="primary" onClick={() => update.mutate()} disabled={update.isPending} title="update the loaded progression in place">{update.isPending ? "updating…" : "Update"}</button>}
-              <button className={loadedId ? "" : "primary"} onClick={() => save.mutate()} disabled={save.isPending} title={loadedId ? "save a NEW copy under this name" : "save to the library"}>{loadedId ? "Save as new" : "Save to library"}</button>
+              {updateTargetId && <button className="primary" onClick={() => update.mutate()} disabled={update.isPending} title={`update "${name.trim()}" in place`}>{update.isPending ? "updating…" : "Update"}</button>}
+              <button className={updateTargetId ? "" : "primary"} onClick={() => save.mutate()} disabled={save.isPending} title={updateTargetId ? "save a NEW copy (needs a different name)" : "save to the library"}>{updateTargetId ? "Save as new" : "Save to library"}</button>
               <button className="ghost" onClick={clearProg}>clear</button>
               {saveMsg && <span className="faint">{saveMsg}</span>}
             </div>
