@@ -51,13 +51,16 @@ export function ChordBuilder() {
   useEffect(() => {
     try { localStorage.setItem(WORKBENCH_KEY, JSON.stringify({ prog, picks })); } catch {}
   }, [prog, picks]);
-  const addProg = (c: string) => { setProg((p) => [...p, c]); setPicks((p) => [...p, { g: 0, p: 0, a: 0 }]); };
+  const addProg = (c: string, pick?: { g: number; p: number; a: number }) => {
+    setProg((p) => [...p, c]);
+    setPicks((p) => [...p, pick ?? { g: 0, p: 0, a: 0 }]);
+  };
   const removeProg = (i: number) => { setProg((pr) => pr.filter((_, j) => j !== i)); setPicks((pr) => pr.filter((_, j) => j !== i)); };
   // swap a card for the chord currently built above (picks reset — new chord,
   // new shape); plays it so the change is heard in place
-  const replaceProg = (i: number, c: string) => {
+  const replaceProg = (i: number, c: string, pick?: { g: number; p: number; a: number }) => {
     setProg((pr) => pr.map((x, j) => (j === i ? c : x)));
-    setPicks((pr) => pr.map((e, j) => (j === i ? { g: 0, p: 0, a: 0 } : e)));
+    setPicks((pr) => pr.map((e, j) => (j === i ? pick ?? { g: 0, p: 0, a: 0 } : e)));
     const m = chordMidisByName(c);
     if (m.length) playChord(m);
   };
@@ -112,7 +115,7 @@ export function ChordBuilder() {
             <div className="row" style={{ gap: 8, alignItems: "center" }}>
               <b style={{ fontSize: 18 }}>{built}{inversion > 0 ? ` (inv ${inversion})` : ""}</b>
               <button className="sm" onClick={() => playChord(voicedMidis(root, quality, inversion))}>♪ play</button>
-              <button className="sm primary" onClick={() => addProg(built)}>+ add</button>
+              <button className="sm primary" title="add with the voicing/inversion picked above" onClick={() => addProg(built, { g: v, p: inversion, a: inversion })}>+ add</button>
             </div>
             <div className="row" style={{ gap: 4 }}>
               <button className={"sm" + (view === "guitar" ? " primary" : "")} onClick={() => setView("guitar")}>Guitar</button>
@@ -268,7 +271,7 @@ export function ChordBuilder() {
                       <button className="sm ghost" disabled={count < 2} onClick={() => cycle(1)}>›</button>
                     </div>
                     <div className="row" style={{ gap: 4 }}>
-                      <button className="sm ghost" title={`replace with ${built} (the chord built above)`} onClick={() => replaceProg(i, built)}>replace</button>
+                      <button className="sm ghost" title={`replace with ${built} (the chord built above, at its picked voicing/inversion)`} onClick={() => replaceProg(i, built, { g: v, p: inversion, a: inversion })}>replace</button>
                       <button className="sm ghost danger" onClick={() => removeProg(i)}>remove</button>
                     </div>
                   </div>
