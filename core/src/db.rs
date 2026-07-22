@@ -100,6 +100,17 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN arrangement TEXT NOT NULL DEFAULT ''", ()).await;
     // per-chord shape picks for saved progressions (voicings/inversions JSON)
     let _ = conn.execute("ALTER TABLE progression ADD COLUMN picks TEXT NOT NULL DEFAULT ''", ()).await;
+    // saved song outlines (Outline Builder): section skeletons + tempo
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS outline (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            bpm INTEGER NOT NULL DEFAULT 120,
+            sections TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL
+        )",
+        (),
+    ).await?;
     let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
     // regenerate-as-draft: at most ONE pending draft per stage, stored outside
     // the artifact history (discarded drafts never pollute revisions)
@@ -1009,6 +1020,35 @@ pub async fn update_skill(conn: &Connection, id: &str, input: SkillInput) -> Res
 pub async fn set_skill_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<Skill> {
     conn.execute("UPDATE skill SET enabled=?2, updated_at=?3 WHERE id=?1", params![id, if enabled { 1i64 } else { 0 }, now()]).await?;
     get_skill(conn, id).await?.ok_or_else(|| anyhow!("skill not found after update"))
+}
+
+// ---- Saved outlines ---------------------------------------------------------
+
+pub async fn list_outlines(conn: &Connection) -> Result<Vec<Outline>> {
+    let mut rows = conn.query("SELECT id, name, bpm, sections, created_at FROM outline ORDER BY created_at DESC", ()).await?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await? {
+        out.push(Outline {
+            id: s(&r, 0), name: s(&r, 1), bpm: i(&r, 2),
+            sections: serde_json::from_str(&s(&r, 3)).unwrap_or_default(),
+            created_at: s(&r, 4),
+        });
+    }
+    Ok(out)
+}
+pub async fn create_outline(conn: &Connection, name: &str, bpm: i64, sections: &[(String, i64)]) -> Result<Outline> {
+    let id = new_id();
+    let ts = now();
+    let json = serde_json::to_string(sections).unwrap_or_else(|_| "[]".into());
+    conn.execute(
+        "INSERT INTO outline (id, name, bpm, sections, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id.clone(), name, bpm, json, ts.clone()],
+    ).await?;
+    Ok(Outline { id, name: name.to_string(), bpm, sections: sections.to_vec(), created_at: ts })
+}
+pub async fn delete_outline(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM outline WHERE id = ?1", params![id]).await?;
+    Ok(())
 }
 
 // ---- Saved progressions ----------------------------------------------------

@@ -64,6 +64,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "create_skill", description: "Create a user skill (custom songwriting method).", destructive: false, input_schema: obj(json!({"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["key","name","stage_type","instructions"]) },
         ToolSpec { name: "update_skill", description: "Update a skill's content.", destructive: false, input_schema: obj(json!({"id": s(""),"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["id"]) },
         ToolSpec { name: "set_skill_enabled", description: "Enable or disable a skill.", destructive: false, input_schema: obj(json!({"id": s(""),"enabled": {"type":"boolean"}}), &["id","enabled"]) },
+        ToolSpec { name: "list_outlines", description: "List saved song outlines (section skeletons + tempo, no musical content).", destructive: false, input_schema: obj(json!({}), &[]) },
+        ToolSpec { name: "save_outline", description: "Save a reusable song outline: named ordered sections (label + bars) and a tempo. Export any outline to Ableton with ableton_build_outline.", destructive: false, input_schema: obj(json!({"name": s(""),"bpm": {"type":"integer"},"sections": {"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"bars":{"type":"integer"}},"required":["label"]}}}), &["name","sections"]) },
+        ToolSpec { name: "delete_outline", description: "Delete a saved song outline.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "list_progressions", description: "List saved chord progressions (reusable across songs).", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "save_progression", description: "Save a reusable chord progression by name (optionally with per-chord shape picks JSON).", destructive: false, input_schema: obj(json!({"name": s(""),"chords": {"type":"array","items":{"type":"string"}},"picks": s("optional per-chord picks JSON: [{\"g\":0,\"p\":2,\"a\":0}, …]")}), &["name","chords"]) },
         ToolSpec { name: "delete_progression", description: "Delete a saved chord progression.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
@@ -265,6 +268,19 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "create_skill" => v(db::create_skill(conn, skill_input(args)).await?),
         "update_skill" => v(db::update_skill(conn, arg(args, "id")?, skill_input(args)).await?),
         "set_skill_enabled" => v(db::set_skill_enabled(conn, arg(args, "id")?, args.get("enabled").and_then(|b| b.as_bool()).unwrap_or(true)).await?),
+        "list_outlines" => v(db::list_outlines(conn).await?),
+        "save_outline" => {
+            let sections: Vec<(String, i64)> = args.get("sections").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| {
+                    let label = x.get("label").and_then(|l| l.as_str())?.to_string();
+                    let bars = x.get("bars").and_then(|b| b.as_i64()).filter(|&b| b > 0).unwrap_or(8);
+                    Some((label, bars))
+                }).collect())
+                .unwrap_or_default();
+            let bpm = args.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
+            v(db::create_outline(conn, arg(args, "name")?, bpm, &sections).await?)
+        }
+        "delete_outline" => { db::delete_outline(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
         "list_progressions" => v(db::list_progressions(conn).await?),
         "save_progression" => {
             let chords: Vec<String> = args.get("chords").and_then(|c| c.as_array())

@@ -221,6 +221,20 @@ pub struct Progression {
     pub created_at: String,
 }
 
+/// A saved song OUTLINE: a named section skeleton (label + bars, in order)
+/// with a tempo — the Outline Builder's unit, exportable to Ableton as
+/// section clips + locators with no musical content.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../frontend/src/ipc/generated/")]
+pub struct Outline {
+    pub id: String,
+    pub name: String,
+    pub bpm: i64,
+    /// ordered (label, bars)
+    pub sections: Vec<(String, i64)>,
+    pub created_at: String,
+}
+
 /// A saved Composer composition: the whole `Composition` JSON blob (validated
 /// by the frontend's zod schema before it gets here) plus a nullable link to
 /// the song it was imported from (full-song exports remember their source).

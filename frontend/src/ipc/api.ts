@@ -6,6 +6,7 @@ import type {
   CompositionMeta,
   CompositionRow,
   Settings,
+  Outline,
   Progression,
   Render,
   Section,
@@ -78,6 +79,9 @@ export type CommandMap = {
   ableton_build_progression: { args: { chords: string[]; beats: number[] | null; inversions: number[] | null; bpm: number | null }; result: string };
   ableton_build_composition: { args: { bpm: number; lengthBeats: number; tracks: { name: string; notes: unknown[] }[] }; result: string };
   ableton_build_outline: { args: { bpm: number; sections: [string, number][] }; result: string };
+  list_outlines: { args: Record<string, never>; result: Outline[] };
+  save_outline: { args: { name: string; bpm: number; sections: [string, number][] }; result: Outline };
+  delete_outline: { args: { id: string }; result: null };
   midi_list_inputs: { args: Record<string, never>; result: string[] };
   midi_open_input: { args: { index: number }; result: string };
   midi_close_input: { args: Record<string, never>; result: null };
@@ -276,6 +280,9 @@ export const api = {
   abletonBuildProgression: (chords: string[], inversions?: number[], bpm?: number, beats?: number[]) => call("ableton_build_progression", { chords, beats: beats ?? null, inversions: inversions ?? null, bpm: bpm ?? null }),
   abletonBuildComposition: (bpm: number, lengthBeats: number, tracks: { name: string; notes: unknown[] }[]) => call("ableton_build_composition", { bpm, lengthBeats, tracks }),
   abletonBuildOutline: (bpm: number, sections: [string, number][]) => call("ableton_build_outline", { bpm, sections }),
+  listOutlines: () => call("list_outlines", {}),
+  saveOutline: (name: string, bpm: number, sections: [string, number][]) => call("save_outline", { name, bpm, sections }),
+  deleteOutline: (id: string) => call("delete_outline", { id }),
   midiListInputs: () => call("midi_list_inputs", {}),
   midiOpenInput: (index: number) => call("midi_open_input", { index }),
   midiCloseInput: () => call("midi_close_input", {}),

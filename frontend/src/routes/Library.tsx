@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS, type ParsedLyrics } from "../ipc/api";
 import type { Song } from "../ipc/generated";
+import { OUTLINE_TEMPLATES as OUTLINES } from "../lib/outlineTemplates";
 
 function StageTrack({ song }: { song: Song }) {
   const idx = STAGE_ORDER.indexOf(song.current_stage as any);
@@ -165,14 +166,6 @@ function NewFromLyricsButton() {
   );
 }
 
-// Genre song-outline templates (user-picked 2026-07-22): section skeletons
-// laid into Ableton as colored section clips + locators — no chords, no notes.
-const OUTLINES: { name: string; bpm: number; sections: [string, number][] }[] = [
-  { name: "Pop", bpm: 100, sections: [["Intro", 4], ["Verse 1", 16], ["Pre-Chorus", 8], ["Chorus", 16], ["Verse 2", 16], ["Pre-Chorus 2", 8], ["Chorus 2", 16], ["Bridge", 8], ["Final Chorus", 16], ["Outro", 8]] },
-  { name: "EDM / Dance", bpm: 126, sections: [["Intro", 16], ["Build 1", 16], ["Drop 1", 16], ["Breakdown", 16], ["Build 2", 16], ["Drop 2", 16], ["Outro", 16]] },
-  { name: "Hip-hop / Trap", bpm: 140, sections: [["Intro", 8], ["Hook", 8], ["Verse 1", 16], ["Hook 2", 8], ["Verse 2", 16], ["Hook 3", 8], ["Outro", 8]] },
-  { name: "Rock", bpm: 120, sections: [["Intro", 8], ["Verse 1", 16], ["Chorus", 8], ["Verse 2", 16], ["Chorus 2", 8], ["Solo", 8], ["Bridge", 8], ["Final Chorus", 16], ["Outro", 8]] },
-];
 
 /** "Song outline → Ableton": no song needed — pick a genre skeleton, tweak
  *  the tempo, fire. Sections track + locators only; you build the music. */

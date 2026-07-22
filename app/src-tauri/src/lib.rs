@@ -1051,6 +1051,19 @@ async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<Comp
         .map_err(e2s)
 }
 
+#[tauri::command]
+async fn list_outlines(state: State<'_, AppState>) -> R<Vec<Outline>> {
+    db::list_outlines(&state.conn).await.map_err(e2s)
+}
+#[tauri::command]
+async fn save_outline(state: State<'_, AppState>, name: String, bpm: i64, sections: Vec<(String, i64)>) -> R<Outline> {
+    db::create_outline(&state.conn, &name, bpm, &sections).await.map_err(e2s)
+}
+#[tauri::command]
+async fn delete_outline(state: State<'_, AppState>, id: String) -> R<()> {
+    db::delete_outline(&state.conn, &id).await.map_err(e2s)
+}
+
 /// Sections-only song outline in Ableton (Library page, no song needed).
 #[tauri::command]
 async fn ableton_build_outline(bpm: i64, sections: Vec<(String, i64)>) -> R<String> {
@@ -1214,6 +1227,9 @@ pub fn run() {
             ableton_build_progression,
             ableton_build_composition,
             ableton_build_outline,
+            list_outlines,
+            save_outline,
+            delete_outline,
             midi_list_inputs,
             midi_open_input,
             midi_close_input,
