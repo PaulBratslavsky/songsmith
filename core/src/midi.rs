@@ -15,7 +15,8 @@ pub fn chord_tones(name: &str) -> Option<(i64, Vec<i64>)> {
     if i < b.len() && b[i] == b'#' { pc = (pc + 1) % 12; i += 1; }
     else if i < b.len() && b[i] == b'b' { pc = (pc + 11) % 12; i += 1; }
     let rest = &name[i..];
-    let tones = if rest.starts_with("dim") { vec![0, 3, 6] }
+    let tones = if rest == "5" { vec![0, 7, 12] } // power chord: 1-5-8
+        else if rest.starts_with("dim") { vec![0, 3, 6] }
         else if rest.starts_with("aug") { vec![0, 4, 8] }
         else if rest.starts_with("sus2") { vec![0, 2, 7] }
         else if rest.starts_with("sus4") { vec![0, 5, 7] }
@@ -407,6 +408,8 @@ mod tests {
         assert_eq!(chord_tones("Bb"), Some((10, vec![0, 4, 7])));
         assert_eq!(chord_tones("Gmaj7"), Some((7, vec![0, 4, 7, 11])));
         assert_eq!(chord_tones("Dsus4"), Some((2, vec![0, 5, 7])));
+        assert_eq!(chord_tones("C5"), Some((0, vec![0, 7, 12])), "power chord = 1-5-8");
+        assert_eq!(chord_tones("F#5"), Some((6, vec![0, 7, 12])));
         assert_eq!(chord_tones(""), None);
         assert_eq!(chord_tones("H"), None);
     }

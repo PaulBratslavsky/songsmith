@@ -16,7 +16,7 @@ const noteMidi = (n: { pitchClass: string; octave: number }) => PITCH_CLASSES.in
 
 /** Quality buttons: display label → engine ChordQuality. */
 export const QUALITY_OPTIONS: [string, ChordQuality][] = [
-  ["maj", "maj"], ["m", "min"], ["dim", "dim"], ["aug", "aug"], ["sus2", "sus2"], ["sus4", "sus4"],
+  ["maj", "maj"], ["m", "min"], ["5", "5"], ["dim", "dim"], ["aug", "aug"], ["sus2", "sus2"], ["sus4", "sus4"],
   ["6", "6"], ["m6", "m6"], ["maj7", "maj7"], ["m7", "min7"], ["7", "dom7"], ["m7b5", "m7b5"],
   ["dim7", "dim7"], ["mMaj7", "mMaj7"], ["add9", "add9"], ["9", "9"], ["maj9", "maj9"], ["m9", "m9"],
 ];

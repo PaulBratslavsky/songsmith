@@ -11,7 +11,7 @@ import { chordMidisByName } from "../music/engineAdapter";
 import { playChord } from "../music/synth";
 
 // the full variation set the user picked: triads, 7ths, sus, 9s, 6ths, dim/aug
-const VARIATION_QUALITIES = ["", "m", "7", "maj7", "m7", "sus2", "sus4", "add9", "9", "m9", "6", "m6", "dim", "dim7", "aug"];
+const VARIATION_QUALITIES = ["", "m", "5", "7", "maj7", "m7", "sus2", "sus4", "add9", "9", "m9", "6", "m6", "dim", "dim7", "aug"];
 
 function rootOf(name: string): string | null {
   const m = name.trim().match(/^([A-G](?:#|b)?)/);
