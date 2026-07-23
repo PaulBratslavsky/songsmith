@@ -186,7 +186,7 @@ function OutlineToAbleton({ open, setOpen }: { open: boolean; setOpen: (v: boole
   return (
     <div className="card" style={{ marginBottom: 12 }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-        <label style={{ margin: 0 }}>Song outline → Ableton <span className="faint">sections + locators only — no chords, no notes; Live must be open with AbletonMCP on</span></label>
+        <label style={{ margin: 0 }}>Song outline → Ableton <span className="faint">a colored Sections track only — no chords, no notes, no markers; Live must be open with AbletonMCP on</span></label>
         <button className="sm ghost" onClick={() => setOpen(false)}>✕</button>
       </div>
       <div className="row" style={{ gap: 8, alignItems: "flex-end", marginTop: 8, flexWrap: "wrap" }}>

@@ -62,7 +62,7 @@ export function Outlines() {
       <div className="topbar">
         <div>
           <h1>Outlines</h1>
-          <span className="muted">Song skeletons — sections and bars only. Build them into Ableton as colored section clips + locators; add the music yourself.</span>
+          <span className="muted">Song skeletons — sections and bars only. Build them into Ableton as a colored Sections clip track; add the music yourself.</span>
         </div>
       </div>
 
@@ -112,7 +112,7 @@ export function Outlines() {
             <button disabled={save.isPending || rows.length === 0} onClick={() => save.mutate()}>{save.isPending ? "saving…" : "💾 Save to library"}</button>
           </div>
           {msg && <pre className="artifact-text" style={{ whiteSpace: "pre-wrap", maxHeight: 160, marginTop: 10 }}>{msg}</pre>}
-          <p className="faint" style={{ fontSize: 11, marginTop: 8 }}>Live must be open with the AbletonMCP control surface on. Re-building relays the Sections track and locators cleanly.</p>
+          <p className="faint" style={{ fontSize: 11, marginTop: 8 }}>Live must be open with the AbletonMCP control surface on. Re-building relays the Sections track cleanly (and clears stray old markers).</p>
         </div>
 
         <div className="card">
