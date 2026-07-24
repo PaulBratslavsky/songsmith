@@ -53,6 +53,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audio")
     ap.add_argument("--sections", type=int, default=8, help="approx number of sections to find")
+    ap.add_argument("--lyrics", action="store_true", help="also transcribe sung lyrics (faster-whisper, local)")
     args = ap.parse_args()
 
     y, sr = librosa.load(args.audio, mono=True)
@@ -101,6 +102,21 @@ def main():
             "chords": ch,
         })
 
+    # --- lyrics transcription (optional; local faster-whisper) ---
+    transcript = []
+    if args.lyrics:
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel("small", device="cpu", compute_type="int8")
+            segs, _info = model.transcribe(args.audio, vad_filter=True, beam_size=5)
+            for s in segs:
+                text = s.text.strip()
+                if text:
+                    transcript.append({"start": round(s.start, 2), "end": round(s.end, 2), "text": text})
+        except Exception as e:  # missing dep / decode failure — never sink the analysis
+            transcript = []
+            print(f"(lyrics transcription unavailable: {e})", file=sys.stderr)
+
     out = {
         "duration_sec": round(dur, 2),
         "tempo_bpm": round(tempo, 1),
@@ -108,6 +124,7 @@ def main():
         "section_count": len(sections),
         "sections": sections,
         "bar_chords": bar_chords,
+        "transcript": transcript,
         "note": "raw perception output — hand to the Reference Analyst skill for labeling + chord cleanup",
     }
     json.dump(out, sys.stdout, indent=2)

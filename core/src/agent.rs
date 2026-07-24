@@ -565,10 +565,22 @@ fn build_user_prompt(stage_type: &str, sections: &str, prior: &str, later: &str,
 /// Reference Analyst skill interpret it (cognition), then create a new song with
 /// its Structure + Chords populated. Returns the new song id. Audio stays local.
 pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path: &str) -> Result<String> {
-    // 1. perception — reuse the analyzer the MCP tool runs
-    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path })).await?;
+    import_reference_full(conn, settings, audio_path, &|_| {}).await
+}
+
+/// Import a reference/render and COMPLETE AS MANY STAGES AS POSSIBLE (user
+/// request 2026-07-24): perception (+ local whisper LYRICS transcription) →
+/// Structure + Chords + Lyrics deterministically, then real Claude runs fill
+/// Concept → Lyric Spec → Generation Prompt via the reverse-context flow, and
+/// every stage is approved in order — one audio file in, a finished song mock
+/// out. `progress` narrates the long steps.
+pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio_path: &str, progress: &(dyn Fn(String) + Sync)) -> Result<String> {
+    // 1. perception — analyzer + local whisper transcript
+    progress("Analyzing audio — tempo, key, chords, sections, lyrics… (local)".into());
+    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path, "lyrics": true })).await?;
 
     // 2. cognition — the Reference Analyst skill turns raw MIR into Structure + Chords
+    progress("Interpreting the analysis (Reference Analyst)…".into());
     let skill = db::get_active_skill_for_stage(conn, "reference").await?
         .ok_or_else(|| anyhow!("the Reference Analyst skill is missing"))?;
     let user = format!("Analyzer output (raw perception):\n\n{}", serde_json::to_string_pretty(&raw)?);
@@ -627,6 +639,57 @@ pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path
         db::save_artifact(conn, &song.id, Some(&cid), "chords", &content).await?;
         let _ = db::set_stage_status(conn, &cid, "done").await;
     }
+
+    // 5. LYRICS from the transcript: each transcript line lands in the section
+    // whose [start_sec, next start_sec) window contains it — verbatim words,
+    // deterministic assignment (the skill supplies start_sec per section).
+    let transcript = raw.get("transcript").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if !transcript.is_empty() {
+        let sec_defs = structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let starts: Vec<f64> = sec_defs.iter().map(|s| s.get("start_sec").and_then(|v| v.as_f64()).unwrap_or(-1.0)).collect();
+        let lyric_sections: Vec<Value> = rows.iter().enumerate().map(|(i, row)| {
+            let lo = starts.get(i).copied().unwrap_or(-1.0);
+            let hi = starts.get(i + 1).copied().filter(|&h| h >= 0.0).unwrap_or(f64::MAX);
+            let lines: Vec<String> = if lo < 0.0 { vec![] } else {
+                transcript.iter().filter_map(|t| {
+                    let ts = t.get("start").and_then(|v| v.as_f64())?;
+                    if ts >= lo && ts < hi { t.get("text").and_then(|v| v.as_str()).map(String::from) } else { None }
+                }).collect()
+            };
+            json!({ "section_id": row.id, "label": row.label, "lines": lines })
+        }).collect();
+        if lyric_sections.iter().any(|s| s.get("lines").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty())) {
+            if let Some(lid) = stage_id("lyrics") {
+                let l_data = json!({ "sections": lyric_sections });
+                let content = json!({ "kind": "lyrics", "text": lyrics_text(&l_data), "data": l_data, "spine_snapshot": snapshot }).to_string();
+                db::save_artifact(conn, &song.id, Some(&lid), "lyrics", &content).await?;
+                let _ = db::set_stage_status(conn, &lid, "done").await;
+                progress("Transcribed lyrics placed into sections.".into());
+            }
+        }
+    }
+
+    // 6. COMPLETE THE REST: Concept → Lyric Spec → Prompt from the imported
+    // content (the reverse-context flow — later stages are the source of
+    // truth). First runs save directly; a failure skips that stage but never
+    // sinks the import.
+    for t in ["concept", "lyric_spec", "prompt"] {
+        if let Some(sid) = stage_id(t) {
+            if db::current_artifact(conn, &sid).await?.is_none() {
+                progress(format!("Writing the {} from the imported song (Claude)…", stage_label(t)));
+                if let Err(e) = run_stage(conn, settings, &sid, None, |_| {}, None).await {
+                    progress(format!("⚠ {} skipped: {e}", stage_label(t)));
+                }
+            }
+        }
+    }
+    // approve everything that has content, in order — the song reads DONE
+    for st in db::list_stages(conn, &song.id).await? {
+        if db::current_artifact(conn, &st.id).await?.is_some() {
+            let _ = crate::tools::approve_stage(conn, &st.id).await;
+        }
+    }
+    progress("Import complete — every stage filled and approved.".into());
     Ok(song.id)
 }
 

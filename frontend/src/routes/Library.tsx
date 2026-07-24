@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS, type ParsedLyrics } from "../ipc/api";
+import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS, type ParsedLyrics, listen } from "../ipc/api";
 import type { Song } from "../ipc/generated";
 import { OUTLINE_TEMPLATES as OUTLINES } from "../lib/outlineTemplates";
 
@@ -218,11 +218,19 @@ export function Library() {
   const [importMsg, setImportMsg] = useState("");
   const [outlineOpen, setOutlineOpen] = useState(false);
 
+  useEffect(() => {
+    let un = () => {};
+    (async () => {
+      un = await listen<{ message: string }>("import_progress", (p) => setImportMsg(p.message));
+    })();
+    return () => un();
+  }, []);
+
   const importRef = useMutation({
     mutationFn: async () => {
       const path = await pickAudioFile();
       if (!path) return null;
-      setImportMsg(`Analyzing ${path.split("/").pop()} — tempo, key, chords, sections… (local, ~10–30s)`);
+      setImportMsg(`Importing ${path.split("/").pop()} — analysis + lyrics transcription, then Claude fills every stage (~2–4 min)…`);
       return api.importReference(path);
     },
     onSuccess: (id) => {

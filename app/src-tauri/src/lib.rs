@@ -112,9 +112,12 @@ async fn update_song_voicings(state: State<'_, AppState>, id: String, voicings: 
     db::update_song_voicings(&state.conn, &id, &voicings).await.map_err(e2s)
 }
 #[tauri::command]
-async fn import_reference(state: State<'_, AppState>, audio_path: String) -> R<String> {
+async fn import_reference(app: tauri::AppHandle, state: State<'_, AppState>, audio_path: String) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
-    song_core::agent::import_reference(&state.conn, &settings, &audio_path).await.map_err(e2s)
+    let progress = move |msg: String| {
+        let _ = app.emit("import_progress", serde_json::json!({ "message": msg }));
+    };
+    song_core::agent::import_reference_full(&state.conn, &settings, &audio_path, &progress).await.map_err(e2s)
 }
 #[tauri::command]
 async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<StageDraft> {

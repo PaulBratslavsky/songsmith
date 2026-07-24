@@ -82,7 +82,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "ableton_build_outline", description: "Stub a sections-only song OUTLINE in Ableton Live (no song needed): named color-coded section clips on a Sections track (no locators, no chords, no notes) — a skeleton to build into. Live must be open with AbletonMCP enabled.", destructive: false, input_schema: obj(json!({"sections": {"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"bars":{"type":"integer"}},"required":["label"]},"description":"ordered sections, e.g. [{\"label\":\"Intro\",\"bars\":8}, …]"},"bpm": {"type":"integer","description":"tempo (default 120)"}}), &["sections"]) },
         ToolSpec { name: "ableton_build_progression", description: "Stub a bare chord progression in Ableton Live's Arrangement (no song needed): one Progression section, one bar per chord, full Bass/Chords/Pad/Melody/Filler/Arp MIDI parts. Live must be open with AbletonMCP enabled.", destructive: false, input_schema: obj(json!({"chords": {"type":"array","items":{"type":"string"},"description":"chord names in order, e.g. [\"Bm\",\"A\",\"E\"]"},"inversions": {"type":"array","items":{"type":"integer"},"description":"optional closed-voicing inversion per chord (0 = root)"},"beats": {"type":"array","items":{"type":"integer"},"description":"optional beats per chord (default 4 = one bar each)"},"bpm": {"type":"integer","description":"tempo (default 120)"}}), &["chords"]) },
         ToolSpec { name: "ableton_build_song", description: "Stub the whole song in Ableton Live's Arrangement view: a named, color-coded Sections clip track plus Bass/Chords/Pad/Chord melody/Filler/Arp MIDI parts generated deterministically from the song's chord progression (per-section density follows the energy arc). Talks straight to the AbletonMCP Remote Script socket — Live must be open with the control surface enabled. MIDI-only; re-running clears and rebuilds the same tracks. Returns a per-section build log.", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
-        ToolSpec { name: "analyze_reference", description: "Analyze a local audio file (the perception layer for importing a reference): returns raw tempo, a key guess, bar-level chord candidates, and rough section boundaries as JSON. Interpret it with the Reference Analyst method — correct the key from the chord content, snap tempo, clean chords to the diatonic set, derive form from chord repetition — then create a song and save its Structure + Chords.", destructive: false, input_schema: obj(json!({"audio_path": s("absolute path to the local audio file")}), &["audio_path"]) },
+        ToolSpec { name: "analyze_reference", description: "Analyze a local audio file (the perception layer for importing a reference): returns raw tempo, a key guess, bar-level chord candidates, and rough section boundaries as JSON. Interpret it with the Reference Analyst method — correct the key from the chord content, snap tempo, clean chords to the diatonic set, derive form from chord repetition — then create a song and save its Structure + Chords.", destructive: false, input_schema: obj(json!({"audio_path": s("absolute path to the local audio file"),"lyrics": {"type":"boolean","description":"also transcribe sung lyrics (local whisper — slower)"}}), &["audio_path"]) },
         ToolSpec { name: "get_settings", description: "Get app settings.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "set_settings", description: "Update app settings.", destructive: false, input_schema: obj(json!({"settings": {"type":"object"}}), &["settings"]) },
     ]
@@ -101,7 +101,7 @@ fn arg_opt<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Run the configured local analyzer CLI on an audio file and return its JSON.
 /// The audio path is appended as the final argument. Audio never leaves the machine.
-async fn run_analyzer(settings: &Settings, audio_path: &str) -> Result<Value> {
+async fn run_analyzer(settings: &Settings, audio_path: &str, lyrics: bool) -> Result<Value> {
     let cmd = settings.analyzer_cmd.trim();
     if cmd.is_empty() {
         return Err(anyhow!("reference analyzer is not configured — set the analyzer command in Settings (e.g. \"/path/.venv/bin/python /path/analyze.py\")"));
@@ -111,6 +111,7 @@ async fn run_analyzer(settings: &Settings, audio_path: &str) -> Result<Value> {
     let mut command = tokio::process::Command::new(program);
     for a in parts { command.arg(a); }
     command.arg(audio_path);
+    if lyrics { command.arg("--lyrics"); }
     let out = command.output().await.map_err(|e| anyhow!("could not run analyzer ({program}): {e}"))?;
     if !out.status.success() {
         return Err(anyhow!("analyzer failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -331,7 +332,7 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             }).await??))
         }
         "ableton_build_song" => Ok(json!(ableton::build_song_for(conn, arg(args, "song_id")?, |_| {}).await?)),
-        "analyze_reference" => run_analyzer(settings, arg(args, "audio_path")?).await,
+        "analyze_reference" => run_analyzer(settings, arg(args, "audio_path")?, args.get("lyrics").and_then(|v| v.as_bool()).unwrap_or(false)).await,
         "get_settings" => v(db::get_settings(conn).await?),
         "set_settings" => {
             let st: Settings = serde_json::from_value(args.get("settings").cloned().unwrap_or(json!({})))?;
