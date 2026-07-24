@@ -333,7 +333,8 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             }).await??))
         }
         "ableton_build_song" => Ok(json!(ableton::build_song_for(conn, arg(args, "song_id")?, |_| {}).await?)),
-        "import_reference" => v(agent::import_reference(conn, settings, arg(args, "audio_path")?).await?),
+        // Box::pin breaks the async cycle (import_reference itself dispatches analyze_reference)
+        "import_reference" => v(Box::pin(agent::import_reference(conn, settings, arg(args, "audio_path")?)).await?),
         "analyze_reference" => run_analyzer(settings, arg(args, "audio_path")?, args.get("lyrics").and_then(|v| v.as_bool()).unwrap_or(false)).await,
         "get_settings" => v(db::get_settings(conn).await?),
         "set_settings" => {
