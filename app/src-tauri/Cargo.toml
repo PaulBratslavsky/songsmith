@@ -18,6 +18,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 midir = "0.10"
+base64 = "0.22"
 song_core = { path = "../../core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

@@ -1149,6 +1149,47 @@ pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, sty
     db::get_song(conn, &song.id).await?.ok_or_else(|| anyhow!("song not found after import"))
 }
 
+/// Phase 1 render round-trip ("Analyze → Composer"): analyze an audio file (a
+/// Suno render) into a Composer-ready summary — REAL tempo/key + section map
+/// with per-section chords — without creating or touching any song. Same
+/// perception (analyzer) + cognition (Reference Analyst) pipeline as
+/// import_reference; the frontend builds a Composition from this and opens it
+/// against the audio.
+pub async fn analyze_for_composer(conn: &Connection, settings: &Settings, audio_path: &str) -> Result<Value> {
+    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path })).await?;
+    let skill = db::get_active_skill_for_stage(conn, "reference").await?
+        .ok_or_else(|| anyhow!("the Reference Analyst skill is missing"))?;
+    let user = format!("Analyzer output (raw perception):
+
+{}", serde_json::to_string_pretty(&raw)?);
+    let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
+    let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
+    let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
+    let mut chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
+    crate::freeze::normalize_chord_entries(&mut chords);
+    let chord_secs = chords.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+    let sections: Vec<Value> = structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+        .iter()
+        .map(|s| {
+            let label = s.get("label").and_then(|v| v.as_str()).unwrap_or("Section").to_string();
+            let bars = s.get("bars").and_then(|v| v.as_i64()).filter(|&b| b > 0).unwrap_or(8);
+            let ch = chord_secs.iter()
+                .find(|c| norm_label(&section_label("chords", c)) == norm_label(&label))
+                .and_then(|c| c.get("chords").cloned())
+                .unwrap_or_else(|| json!([]));
+            json!({ "label": label, "bars": bars, "chords": ch })
+        })
+        .collect();
+
+    Ok(json!({
+        "bpm": structure.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120),
+        "key_root": structure.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("A"),
+        "key_mode": structure.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("minor"),
+        "sections": sections,
+    }))
+}
+
 // ---- Composer export (composition → song) ----------------------------------
 //
 // The Composer's export-back-to-song (COMPOSER-SPEC.md #2/#3). The FRONTEND

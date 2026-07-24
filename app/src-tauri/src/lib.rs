@@ -1068,6 +1068,23 @@ async fn delete_outline(state: State<'_, AppState>, id: String) -> R<()> {
     db::delete_outline(&state.conn, &id).await.map_err(e2s)
 }
 
+/// Phase 1 render round-trip: analyze a render's audio into a Composer-ready
+/// summary (real tempo/key + sections with chords). No song is touched.
+#[tauri::command]
+async fn analyze_for_composer(state: State<'_, AppState>, audio_path: String) -> R<serde_json::Value> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    song_core::agent::analyze_for_composer(&state.conn, &settings, &audio_path).await.map_err(e2s)
+}
+
+/// Read a local audio file as base64 (the webview loads render audio for the
+/// Composer's aligned-playback strip; ~MBs once per open, fine over IPC).
+#[tauri::command]
+fn read_audio_b64(path: String) -> R<String> {
+    use base64::Engine;
+    let bytes = std::fs::read(&path).map_err(|e| format!("can't read {path}: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// Sections-only song outline in Ableton (Library page, no song needed).
 #[tauri::command]
 async fn ableton_build_outline(bpm: i64, sections: Vec<(String, i64)>) -> R<String> {
@@ -1232,6 +1249,8 @@ pub fn run() {
             ableton_build_progression,
             ableton_build_composition,
             ableton_build_outline,
+            analyze_for_composer,
+            read_audio_b64,
             list_outlines,
             save_outline,
             delete_outline,

@@ -1,10 +1,34 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
+import { compositionFromAnalysis } from "../lib/music/compose/compositionFromSong";
+import { CompositionSchema } from "../lib/music/compose/schema";
 import { api, pickAudioFile, openFile, revealFile, inTauri } from "../ipc/api";
 
 const baseName = (p: string) => p.split("/").pop() ?? p;
 
 export function FinalRenders({ songId }: { songId: string }) {
   const qc = useQueryClient();
+  const nav = useNavigate();
+  // Phase 1 round-trip: analyze THIS render (real tempo/key/sections/chords),
+  // save it as a linked composition, open the Composer against the audio
+  const [analyzing, setAnalyzing] = useState<string | null>(null);
+  const [anMsg, setAnMsg] = useState("");
+  const analyzeToComposer = async (rd: { id: string; label: string; file_path: string }) => {
+    setAnalyzing(rd.id);
+    setAnMsg(`Analyzing "${rd.label}" — tempo, key, chords, sections… (local, ~10-30s, then Claude cleans it up)`);
+    try {
+      const a = await api.analyzeForComposer(rd.file_path);
+      const comp = compositionFromAnalysis(a, `${rd.label} (analyzed)`);
+      if (!comp) throw new Error("the analysis found no sections");
+      const saved = await api.saveComposition(null, `${rd.label} (analyzed)`, songId, JSON.stringify(CompositionSchema.parse(comp)));
+      setAnMsg("");
+      nav({ to: "/composer", search: { comp: saved.id, audio: rd.file_path } as never });
+    } catch (e: any) {
+      setAnMsg(`Analysis failed: ${String(e?.message ?? e)}`);
+    }
+    setAnalyzing(null);
+  };
   const renders = useQuery({ queryKey: ["renders", songId], queryFn: () => api.listRenders(songId) });
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const musicFolder = settings.data?.music_folder?.trim() || "";
@@ -41,6 +65,7 @@ export function FinalRenders({ songId }: { songId: string }) {
       </div>
       {!inTauri && <div className="banner warn" style={{ marginTop: 10 }}>File picking works in the desktop app.</div>}
 
+      {anMsg && <div className="banner" style={{ marginTop: 8 }}>{anMsg}</div>}
       {renders.data && renders.data.length === 0 && (
         <div className="empty">No renders yet — generate audio from the prompt, then add the file here.</div>
       )}
@@ -56,6 +81,9 @@ export function FinalRenders({ songId }: { songId: string }) {
             <span className="faint" style={{ maxWidth: 520, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rd.file_path}</span>
           </div>
           <div className="row" style={{ gap: 6 }}>
+            <button className="sm primary" disabled={analyzing != null} title="analyze this take (real tempo/key/sections/chords) and open it in the Composer with the audio — rebuild the AI song by hand" onClick={() => analyzeToComposer(rd)}>
+              {analyzing === rd.id ? "analyzing…" : "🎼 Analyze → Composer"}
+            </button>
             <button className="sm" onClick={() => openFile(rd.file_path)}>▶ play</button>
             <button className="sm" onClick={() => revealFile(rd.file_path)}>reveal</button>
             <button className="sm" onClick={() => pick.mutate({ id: rd.id, on: !rd.is_pick })}>{rd.is_pick ? "unpick" : "★ pick"}</button>

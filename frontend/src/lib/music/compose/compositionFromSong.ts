@@ -101,6 +101,42 @@ function readChords(sec: { chords: ArtifactChord[] }): ArtifactChord[] {
 }
 
 /**
+ * Build a Composition from a RENDER ANALYSIS (Phase 1 round-trip: the
+ * Reference Analyst's real tempo/key + section map with per-section chords).
+ * Reuses the full compositionFromSong layout (bar padding, spine-shaped
+ * sections) with fabricated section rows — no song is involved.
+ */
+export function compositionFromAnalysis(
+  a: { bpm: number; key_root: string; key_mode: string; sections: { label: string; bars: number; chords: { name: string; beats: number }[] }[] },
+  name: string,
+): Composition | null {
+  if (!a.sections.length) return null;
+  const rows = a.sections.map((s, i) => ({
+    id: `an-${i}`,
+    song_id: "",
+    position: i,
+    label: s.label,
+    type: "",
+    bars: Math.max(1, Number(s.bars) || 8),
+    role: "",
+    created_at: "",
+    updated_at: "",
+  })) as unknown as SpineSection[];
+  const chordsData = {
+    sections: a.sections.map((s, i) => ({
+      section_id: `an-${i}`,
+      label: s.label,
+      chords: (s.chords ?? []).map((c) => ({ name: c.name, beats: Math.max(1, Number(c.beats) || 4) })),
+    })),
+  } as unknown as ChordsData;
+  return compositionFromSong(a.key_root, a.key_mode, chordsData, null, {
+    id: `analysis-${name}`,
+    name,
+    bpm: Number(a.bpm) || undefined,
+  }, rows);
+}
+
+/**
  * ARRANGE IS THE SOURCE OF TRUTH (user decision 2026-07-15): a spine row's bar
  * count owns its Composer section length 1:1. When the laid chord spans come
  * up short (e.g. 4 placements over an 8-bar verse whose loop plays twice),

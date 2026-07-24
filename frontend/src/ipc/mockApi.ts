@@ -724,6 +724,8 @@ const handlers: MockHandlers = {
   list_outlines: () => db.outlines ?? [],
   save_outline: (a) => { const o = { id: uid(), name: a.name, bpm: a.bpm, sections: a.sections, created_at: now() }; (db.outlines ??= []).unshift(o); return o as unknown as CommandResult<"save_outline">; },
   delete_outline: (a) => { db.outlines = (db.outlines ?? []).filter((o: Any) => o.id !== a.id); return null; },
+  analyze_for_composer: () => { throw new Error("audio analysis needs the desktop app"); },
+  read_audio_b64: () => { throw new Error("audio loading needs the desktop app"); },
   midi_list_inputs: () => [],
   midi_open_input: () => { throw new Error("MIDI input needs the desktop app"); },
   midi_close_input: () => null,

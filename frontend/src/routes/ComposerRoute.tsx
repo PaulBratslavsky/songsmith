@@ -8,6 +8,7 @@ import type { Composition } from "../lib/music/compose/types";
 import type { PitchClass } from "../lib/music/types";
 import { normalizePitchClass } from "../lib/music/theory/notes";
 import { parseArtifact } from "../lib/artifacts";
+import { parseStoredComposition } from "../lib/music/compose/schema";
 
 /** Read the `?song=<id>` search param (no route schema needed). */
 function useSongParam(): string | null {
@@ -36,6 +37,19 @@ function useProgParam(): { chords: string[]; root?: string; mode?: string } | nu
     root: get("prog_root") ?? undefined,
     mode: get("prog_mode") ?? undefined,
   };
+}
+
+/** Read `?comp=<saved id>` (open a saved composition directly — the render
+ *  round-trip lands here) and `?audio=<path>` (align this audio file in the
+ *  Composer for reference playback). */
+function useCompAudioParams(): { compId: string | null; audio: string | null } {
+  const search = useRouterState({ select: (s) => s.location.search });
+  const get = (k: string): string | null => {
+    if (typeof search === "string") return new URLSearchParams(search).get(k);
+    const v = (search as Record<string, unknown> | undefined)?.[k];
+    return typeof v === "string" && v ? v : null;
+  };
+  return { compId: get("comp"), audio: get("audio") };
 }
 
 /** Fetch a song's chords+lyrics and build a full-song Composition. */
@@ -94,12 +108,18 @@ function useSongComposition(songId: string | null): {
 export function ComposerRoute() {
   const songId = useSongParam();
   const { comp: songComp, title, loading } = useSongComposition(songId);
+  const { compId, audio } = useCompAudioParams();
+  const savedComp = useQuery({ queryKey: ["composition", compId], queryFn: () => api.getComposition(compId!), enabled: !!compId });
+  const openedComp = useMemo(() => {
+    if (!savedComp.data) return null;
+    try { return parseStoredComposition(JSON.parse(savedComp.data.data)); } catch { return null; }
+  }, [savedComp.data]);
   const progParam = useProgParam();
   const progComp = useMemo(
     () => (!songId && progParam ? compositionFromProgression(progParam.chords, progParam.root, progParam.mode) : null),
     [songId, progParam?.chords.join(","), progParam?.root, progParam?.mode], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  const comp = songComp ?? progComp;
+  const comp = songComp ?? openedComp ?? progComp;
 
   // The song's key seeds a blank sketch too (so "New blank" starts in the
   // song's key when you came from a song).
@@ -125,7 +145,7 @@ export function ComposerRoute() {
           This song has no chords yet — run the <b>Chords</b> stage first, then open it in the Composer.
         </div>
       ) : (
-        <Sketchpad key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} />
+        <Sketchpad key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} audioPath={openedComp ? audio : null} savedRowIdHint={openedComp ? compId : null} />
       )}
     </div>
   );

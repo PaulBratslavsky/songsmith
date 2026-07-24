@@ -31,6 +31,7 @@ import { CompositionSchema, parseStoredComposition } from '../../lib/music/compo
 import { resolveCompositionSections } from '../../lib/music/compose/compositionToSong';
 import { TICKS_PER_BEAT } from '../../lib/music/compose/types';
 import { useCompositionState } from '../../lib/music/compose/useCompositionState';
+import { useRenderAudio } from '../../lib/music/compose/useRenderAudio';
 import {
   useCompositionPlayback,
   SYNTH_VOICES,
@@ -100,6 +101,8 @@ export function Sketchpad({
   initialRoot = 'C',
   initial,
   songId = null,
+  audioPath = null,
+  savedRowIdHint = null,
 }: {
   initialRoot?: PitchClass;
   /** A full-song (or any) Composition to seed/load — full-song import.
@@ -108,6 +111,11 @@ export function Sketchpad({
   /** Source song id when `initial` is a full-song import — saved rows
    *  remember it (`song_id`), so the library can badge them. */
   songId?: string | null;
+  /** Phase 1 render round-trip: a local audio file to play ALIGNED with the
+   *  grid (the Suno render this composition was analyzed from). */
+  audioPath?: string | null;
+  /** When `initial` came from a saved library row, bind saves to it. */
+  savedRowIdHint?: string | null;
 }) {
   // Composition + edit state (comp, cursor, selected) live in the reducer;
   // only ephemeral UI stays local here. Seeded with the supplied initial
@@ -129,7 +137,7 @@ export function Sketchpad({
   // dirty = current serialization differs. `baselinePending` re-snapshots
   // on the render AFTER a load/reset lands (the load action mints fresh
   // span ids, so the snapshot can only be taken from the reducer output).
-  const [savedRowId, setSavedRowId] = useState<string | null>(null);
+  const [savedRowId, setSavedRowId] = useState<string | null>(savedRowIdHint);
   const [linkedSongId, setLinkedSongId] = useState<string | null>(songId ?? null);
   const [baseline, setBaseline] = useState<string | null>(null);
   const baselinePending = useRef(true); // snapshot the very first comp too
@@ -204,6 +212,10 @@ export function Sketchpad({
 
   const { isPlaying, currentStep, activeChordId, activeLineTick, toggle, stop } =
     useCompositionPlayback(comp, { loop, voices });
+
+  // Phase 1 render round-trip: the analyzed render's audio follows the
+  // transport so you rebuild the AI song against the real thing
+  const renderAudio = useRenderAudio(audioPath, comp.bpm, isPlaying, currentStep);
 
   // Active BAR under the playhead for the notation view. Sketchpad already
   // re-renders per tick (currentStep); flooring to the bar keeps the memo'd
@@ -625,6 +637,40 @@ export function Sketchpad({
         </button>
       </div>
 
+      {/* Phase 1: the analyzed render's waveform, aligned to the grid —
+          play the audio and your lanes together, nudge to line up bar 1 */}
+      {audioPath && (
+        <div className="card" style={{ padding: 8, marginBottom: 8 }}>
+          <div className="row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span className="cmp-cap">Render audio</span>
+            <button type="button" className={'sm' + (renderAudio.enabled ? ' primary' : '')} onClick={() => renderAudio.setEnabled(!renderAudio.enabled)} title="hear the analyzed render along with the grid">
+              {renderAudio.enabled ? '🎧 on' : '🎧 muted'}
+            </button>
+            <label className="row" style={{ margin: 0, gap: 4, alignItems: 'center', textTransform: 'none' }}>
+              <span className="cmp-cap">nudge</span>
+              <input type="number" step={10} value={renderAudio.nudgeMs} onChange={(e) => renderAudio.setNudgeMs(Number(e.target.value) || 0)} title="shift the audio in ms so its first downbeat lands on bar 1 (takes effect on next play)" style={{ width: 70 }} /> ms
+            </label>
+            <label className="row" style={{ margin: 0, gap: 4, alignItems: 'center', textTransform: 'none' }}>
+              <span className="cmp-cap">vol</span>
+              <input type="range" min={0} max={1} step={0.05} value={renderAudio.gain} onChange={(e) => renderAudio.setGain(Number(e.target.value))} style={{ width: 90 }} />
+            </label>
+            <span className="faint" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 380 }}>{audioPath.split('/').pop()}</span>
+            {renderAudio.err && <span className="faint" style={{ color: 'var(--danger)' }}>{renderAudio.err}</span>}
+          </div>
+          {renderAudio.peaks && renderAudio.buffer && (
+            <WaveStrip
+              peaks={renderAudio.peaks}
+              duration={renderAudio.buffer.duration}
+              playheadSec={
+                currentStep == null
+                  ? null
+                  : (currentStep / TICKS_PER_BEAT) * (60 / comp.bpm) + renderAudio.nudgeMs / 1000
+              }
+            />
+          )}
+        </div>
+      )}
+
       {/* Name + persistence: Save (insert-or-update), library, New blank */}
       <div className="row" style={{ flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
         <input
@@ -897,4 +943,33 @@ export function Sketchpad({
       )}
     </div>
   );
+}
+
+
+/** The render's waveform with a playhead — a canvas strip mapping the audio's
+ *  full duration to the width; the playhead marks where the grid transport is
+ *  (after nudge), so misalignment is visible at a glance. */
+function WaveStrip({ peaks, duration, playheadSec }: { peaks: number[]; duration: number; playheadSec: number | null }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv) return;
+    const w = (cv.width = cv.clientWidth * (window.devicePixelRatio || 1));
+    const h = (cv.height = 40 * (window.devicePixelRatio || 1));
+    const g = cv.getContext('2d');
+    if (!g) return;
+    g.clearRect(0, 0, w, h);
+    g.fillStyle = 'rgba(190, 242, 100, 0.55)';
+    const colW = w / peaks.length;
+    for (let i = 0; i < peaks.length; i++) {
+      const ph = Math.max(1, peaks[i] * h);
+      g.fillRect(i * colW, (h - ph) / 2, Math.max(1, colW * 0.8), ph);
+    }
+    if (playheadSec != null && duration > 0) {
+      const x = Math.min(1, Math.max(0, playheadSec / duration)) * w;
+      g.fillStyle = '#fff';
+      g.fillRect(x, 0, Math.max(1.5, w / 800), h);
+    }
+  }, [peaks, duration, playheadSec]);
+  return <canvas ref={ref} style={{ width: '100%', height: 40, display: 'block', marginTop: 6 }} />;
 }
