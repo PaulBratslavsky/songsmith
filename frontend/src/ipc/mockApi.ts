@@ -918,6 +918,6 @@ const MOCK_TOOLS = [
   "list_progressions","save_progression","update_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
-  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference",
+  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference","import_reference",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" || name === "delete_section" }));
