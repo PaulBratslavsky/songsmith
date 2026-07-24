@@ -108,7 +108,9 @@ def main():
         try:
             from faster_whisper import WhisperModel
             model = WhisperModel("small", device="cpu", compute_type="int8")
-            segs, _info = model.transcribe(args.audio, vad_filter=True, beam_size=5)
+            # NO speech-VAD: it classifies SINGING as non-speech and strips
+            # every segment (verified on a real render — 0 vs 20 segments)
+            segs, _info = model.transcribe(args.audio, vad_filter=False, beam_size=5)
             for s in segs:
                 text = s.text.strip()
                 if text:
