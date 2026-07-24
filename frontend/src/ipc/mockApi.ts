@@ -810,7 +810,7 @@ const handlers: MockHandlers = {
   },
   delete_composition: (a) => { db.compositions = (db.compositions ?? []).filter((x: Any) => x.id !== a.id); },
   list_renders: (a) => db.renders.filter((x: Any) => x.song_id === a.songId),
-  add_render: (a) => { const x = { id: uid(), song_id: a.songId, label: a.label || "Render", file_path: a.filePath, source: a.source || "", notes: a.notes || "", is_pick: false, created_at: now() }; db.renders.unshift(x); return x; },
+  add_render: (a) => { const x = { id: uid(), song_id: a.songId, label: a.label || "Render", file_path: a.filePath, source: a.source || "", notes: a.notes || "", is_pick: false, analysis: "", created_at: now() }; db.renders.unshift(x); return x; },
   set_render_pick: (a) => { const x = db.renders.find((y: Any) => y.id === a.id); if (a.isPick) db.renders.filter((y: Any) => y.song_id === x.song_id).forEach((y: Any) => (y.is_pick = false)); if (x) x.is_pick = a.isPick; },
   delete_render: (a) => { db.renders = db.renders.filter((x: Any) => x.id !== a.id); },
   import_reference: () => db.songs[0]?.id ?? null, // mock: just open the demo song

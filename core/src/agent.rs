@@ -625,6 +625,7 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
         db::save_artifact(conn, &song.id, Some(&sid), "structure", &content).await?;
         let _ = db::set_stage_status(conn, &sid, "done").await;
     }
+    let chords_for_render = chords.clone();
     if let Some(cid) = stage_id("chords") {
         let mut chords = chords;
         if let Some(arr) = chords.get_mut("sections").and_then(|v| v.as_array_mut()) {
@@ -689,6 +690,28 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
             let _ = crate::tools::approve_stage(conn, &st.id).await;
         }
     }
+    // the imported audio IS the song's first render — attach it (with the
+    // Composer-ready analysis stashed, so 🎼 Analyze → Composer is INSTANT)
+    let file_name = std::path::Path::new(audio_path).file_name()
+        .map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "import".into());
+    if let Ok(rd) = db::create_render(conn, &song.id, &file_name, audio_path, "import", "the audio this song was imported from").await {
+        let summary = analysis_summary(&structure, chords_for_render);
+        let _ = db::set_render_analysis(conn, &rd.id, &summary.to_string()).await;
+    }
+
+    // the 🎯 intent from the written concept — every later run steers by it
+    if let Some(cid) = stage_id("concept") {
+        if let Ok(Some(a)) = db::current_artifact(conn, &cid).await {
+            let v: Value = serde_json::from_str(&a.content).unwrap_or(Value::Null);
+            let intent = v.pointer("/data/theme").and_then(|x| x.as_str())
+                .or_else(|| v.pointer("/data/hook").and_then(|x| x.as_str()))
+                .unwrap_or("");
+            if !intent.trim().is_empty() {
+                let _ = db::update_song_intent(conn, &song.id, intent.trim()).await;
+            }
+        }
+    }
+
     progress("Import complete — every stage filled and approved.".into());
     Ok(song.id)
 }
@@ -1228,10 +1251,16 @@ pub async fn analyze_for_composer(conn: &Connection, settings: &Settings, audio_
     let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
     let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
-    let mut chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
+    let chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
+    Ok(analysis_summary(&structure, chords))
+}
+
+/// The Composer-ready analysis summary: real tempo/key + section map with
+/// per-section chords. Shared by analyze_for_composer AND the importer (which
+/// stashes it on the render so Analyze → Composer is instant afterward).
+fn analysis_summary(structure: &Value, mut chords: Value) -> Value {
     crate::freeze::normalize_chord_entries(&mut chords);
     let chord_secs = chords.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-
     let sections: Vec<Value> = structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default()
         .iter()
         .map(|s| {
@@ -1244,13 +1273,12 @@ pub async fn analyze_for_composer(conn: &Connection, settings: &Settings, audio_
             json!({ "label": label, "bars": bars, "chords": ch })
         })
         .collect();
-
-    Ok(json!({
+    json!({
         "bpm": structure.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120),
         "key_root": structure.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("A"),
         "key_mode": structure.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("minor"),
         "sections": sections,
-    }))
+    })
 }
 
 // ---- Composer export (composition → song) ----------------------------------

@@ -100,6 +100,8 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE style_preset ADD COLUMN arrangement TEXT NOT NULL DEFAULT ''", ()).await;
     // per-chord shape picks for saved progressions (voicings/inversions JSON)
     let _ = conn.execute("ALTER TABLE progression ADD COLUMN picks TEXT NOT NULL DEFAULT ''", ()).await;
+    // Composer-ready analysis stored per render at import time
+    let _ = conn.execute("ALTER TABLE render ADD COLUMN analysis TEXT NOT NULL DEFAULT ''", ()).await;
     // saved song outlines (Outline Builder): section skeletons + tempo
     conn.execute(
         "CREATE TABLE IF NOT EXISTS outline (
@@ -810,14 +812,14 @@ pub async fn reorder_sections(conn: &Connection, song_id: &str, ids: &[String]) 
 
 pub async fn list_renders(conn: &Connection, song_id: &str) -> Result<Vec<Render>> {
     let mut rows = conn.query(
-        "SELECT id, song_id, label, file_path, source, notes, is_pick, created_at FROM render WHERE song_id = ?1 ORDER BY created_at DESC",
+        "SELECT id, song_id, label, file_path, source, notes, is_pick, analysis, created_at FROM render WHERE song_id = ?1 ORDER BY created_at DESC",
         params![song_id],
     ).await?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await? {
         out.push(Render {
             id: s(&r, 0), song_id: s(&r, 1), label: s(&r, 2), file_path: s(&r, 3),
-            source: s(&r, 4), notes: s(&r, 5), is_pick: i(&r, 6) != 0, created_at: s(&r, 7),
+            source: s(&r, 4), notes: s(&r, 5), is_pick: i(&r, 6) != 0, analysis: s(&r, 7), created_at: s(&r, 8),
         });
     }
     Ok(out)
@@ -829,7 +831,11 @@ pub async fn create_render(conn: &Connection, song_id: &str, label: &str, file_p
         "INSERT INTO render (id, song_id, label, file_path, source, notes, is_pick, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
         params![id.clone(), song_id, label, file_path, source, notes, ts.clone()],
     ).await?;
-    Ok(Render { id, song_id: song_id.into(), label: label.into(), file_path: file_path.into(), source: source.into(), notes: notes.into(), is_pick: false, created_at: ts })
+    Ok(Render { id, song_id: song_id.into(), label: label.into(), file_path: file_path.into(), source: source.into(), notes: notes.into(), is_pick: false, analysis: String::new(), created_at: ts })
+}
+pub async fn set_render_analysis(conn: &Connection, id: &str, analysis: &str) -> Result<()> {
+    conn.execute("UPDATE render SET analysis = ?2 WHERE id = ?1", params![id, analysis]).await?;
+    Ok(())
 }
 pub async fn set_render_pick(conn: &Connection, id: &str, pick: bool) -> Result<()> {
     if pick {

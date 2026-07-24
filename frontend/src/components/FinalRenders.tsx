@@ -14,11 +14,13 @@ export function FinalRenders({ songId }: { songId: string }) {
   // save it as a linked composition, open the Composer against the audio
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [anMsg, setAnMsg] = useState("");
-  const analyzeToComposer = async (rd: { id: string; label: string; file_path: string }) => {
+  const analyzeToComposer = async (rd: { id: string; label: string; file_path: string; analysis: string }) => {
     setAnalyzing(rd.id);
     setAnMsg(`Analyzing "${rd.label}" — tempo, key, chords, sections… (local, ~10-30s, then Claude cleans it up)`);
     try {
-      const a = await api.analyzeForComposer(rd.file_path);
+      // imports stash their analysis on the render — instant open, no re-run
+      const stored = (() => { try { const v = JSON.parse(rd.analysis || ""); return v?.sections ? v : null; } catch { return null; } })();
+      const a = stored ?? (await api.analyzeForComposer(rd.file_path));
       const comp = compositionFromAnalysis(a, `${rd.label} (analyzed)`);
       if (!comp) throw new Error("the analysis found no sections");
       const saved = await api.saveComposition(null, `${rd.label} (analyzed)`, songId, JSON.stringify(CompositionSchema.parse(comp)));

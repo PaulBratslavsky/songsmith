@@ -4,4 +4,10 @@
  * A final generated audio version of a song, referenced by file path on disk
  * (never stored in the DB). A song can have many — Suno/Udio/Ableton takes.
  */
-export type Render = { id: string, song_id: string, label: string, file_path: string, source: string, notes: string, is_pick: boolean, created_at: string, };
+export type Render = { id: string, song_id: string, label: string, file_path: string, source: string, notes: string, is_pick: boolean, 
+/**
+ * Composer-ready analysis JSON ({bpm, key, sections+chords}) stored at
+ * import time — makes "Analyze → Composer" instant for imported audio.
+ * "" = never analyzed (the button runs the analyzer live).
+ */
+analysis: string, created_at: string, };

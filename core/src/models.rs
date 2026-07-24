@@ -201,6 +201,11 @@ pub struct Render {
     pub source: String,
     pub notes: String,
     pub is_pick: bool,
+    /// Composer-ready analysis JSON ({bpm, key, sections+chords}) stored at
+    /// import time — makes "Analyze → Composer" instant for imported audio.
+    /// "" = never analyzed (the button runs the analyzer live).
+    #[serde(default)]
+    pub analysis: String,
     pub created_at: String,
 }
 
