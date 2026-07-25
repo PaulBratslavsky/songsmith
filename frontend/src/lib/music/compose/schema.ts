@@ -38,6 +38,8 @@ const NoteSpanSchema = z.object({
 const SectionSchema = z.object({
   id: z.string().min(1).max(64),
   name: z.string().min(1).max(120),
+  /** Phase 3 build-out done mark — additive, optional */
+  done: z.boolean().optional(),
   startTick: z.number().int().min(0).max(MAX_TOTAL_TICKS),
   lengthTicks: z.number().int().min(1).max(MAX_TOTAL_TICKS),
   /** spine link (docs/SECTION-SPINE-SPEC.md) — additive, optional */

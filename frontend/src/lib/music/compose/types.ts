@@ -73,6 +73,8 @@ export type Section = {
   id: string;
   /** Section label (e.g. "Verse 1", "Chorus"). */
   name: string;
+  /** Phase 3 build-out: the user marked this section rebuilt/done. */
+  done?: boolean;
   startTick: number;
   lengthTicks: number;
   /** The song's section-SPINE row this section came from (docs/SECTION-SPINE-

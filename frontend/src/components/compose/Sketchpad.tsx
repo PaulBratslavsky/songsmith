@@ -195,6 +195,19 @@ export function Sketchpad({
     setMidiDevices(null);
   };
   const [loop, setLoop] = useState(true);
+  // Phase 3 section build-out: click a section band block to FOCUS it —
+  // the loop confines to its ticks, the render audio slice follows, and
+  // (with audio) A/B picks what you hear: the AI original, your lanes, or
+  // both. ✓ marks a section rebuilt/done (persisted with the composition).
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [ab, setAb] = useState<'both' | 'original' | 'mine'>('both');
+  const focusedSec = focusId ? comp.sections.find((s) => s.id === focusId) ?? null : null;
+  const focusRange = focusedSec
+    ? { start: focusedSec.startTick, end: focusedSec.startTick + focusedSec.lengthTicks }
+    : null;
+  useEffect(() => {
+    if (!focusId) setAb('both'); // unfocus never leaves a hidden mute behind
+  }, [focusId]);
   // Sticky placement mode: newly-dropped chords are sevenths while on.
   const [seventhMode, setSeventhMode] = useState(false);
   // N1: composition view — the editable lane grid or read-only notation.
@@ -211,11 +224,20 @@ export function Sketchpad({
   };
 
   const { isPlaying, currentStep, activeChordId, activeLineTick, toggle, stop } =
-    useCompositionPlayback(comp, { loop, voices });
+    useCompositionPlayback(comp, {
+      loop,
+      voices,
+      range: focusRange,
+      mute: focusRange != null && ab === 'original' && !!audioPath,
+    });
 
   // Phase 1 render round-trip: the analyzed render's audio follows the
   // transport so you rebuild the AI song against the real thing
   const renderAudio = useRenderAudio(audioPath, comp.bpm, isPlaying, currentStep);
+  useEffect(() => {
+    renderAudio.setEnabled(ab !== 'mine'); // A/B drives the render side too
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setEnabled is stable
+  }, [ab]);
 
   // Active BAR under the playhead for the notation view. Sketchpad already
   // re-renders per tick (currentStep); flooring to the bar keeps the memo'd
@@ -637,6 +659,43 @@ export function Sketchpad({
         </button>
       </div>
 
+      {/* Phase 3: focused-section strip — loop bounds, A/B, done mark */}
+      {focusedSec && (
+        <div className="row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          <span className="cmp-cap">Focused</span>
+          <b style={{ fontSize: 12 }}>{focusedSec.name}</b>
+          <span className="faint" style={{ fontSize: 11 }}>
+            bars {Math.floor(focusedSec.startTick / TICKS_PER_BAR) + 1}–{Math.ceil((focusedSec.startTick + focusedSec.lengthTicks) / TICKS_PER_BAR)} · loop confined to this section
+          </span>
+          {audioPath && (
+            <div className="row" style={{ gap: 2 }}>
+              {(['original', 'both', 'mine'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={'sm' + (ab === m ? ' primary' : '')}
+                  onClick={() => setAb(m)}
+                  title={m === 'original' ? 'hear only the AI render (your lanes muted)' : m === 'mine' ? 'hear only your lanes (render muted)' : 'hear both together'}
+                >
+                  {m === 'original' ? '🎵 original' : m === 'mine' ? '🎹 mine' : 'both'}
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            className={'sm' + (focusedSec.done ? ' primary' : '')}
+            onClick={() => actions.toggleSectionDone(focusedSec.id)}
+            title="mark this section rebuilt (saved with the composition)"
+          >
+            ✓ {focusedSec.done ? 'done' : 'mark done'}
+          </button>
+          <button type="button" className="sm ghost" onClick={() => setFocusId(null)} title="unfocus — loop the whole piece">
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Phase 1: the analyzed render's waveform, aligned to the grid —
           play the audio and your lanes together, nudge to line up bar 1 */}
       {audioPath && (
@@ -878,7 +937,12 @@ export function Sketchpad({
               }}
             />
           )}
-          <SectionBand sections={comp.sections} totalTicks={comp.totalTicks} />
+          <SectionBand
+            sections={comp.sections}
+            totalTicks={comp.totalTicks}
+            focusId={focusId}
+            onFocus={(id) => setFocusId((f) => (f === id ? null : id))}
+          />
           <BeatRuler bars={comp.bars} totalTicks={comp.totalTicks} />
           <div style={{ marginTop: 4 }}>
             <NoteLane

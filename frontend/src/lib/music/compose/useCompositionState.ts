@@ -63,6 +63,7 @@ type Action =
   | { type: 'resizeNote'; lane: Lane; id: string; length: number }
   | { type: 'removeNote'; lane: Lane; id: string }
   | { type: 'clearAll' }
+  | { type: 'toggleSectionDone'; id: string }
   | { type: 'load'; comp: Composition }
   | { type: 'replace'; comp: Composition };
 
@@ -137,6 +138,11 @@ function reducer(s: EditorState, a: Action): EditorState {
 
     case 'clearAll':
       return { comp: { ...comp, chords: [], melody: [], bass: [] }, cursor: 0, selected: null };
+    case 'toggleSectionDone':
+      return {
+        ...s,
+        comp: { ...comp, sections: comp.sections.map((x) => (x.id === a.id ? { ...x, done: !x.done } : x)) },
+      };
     case 'load':
       return { comp: reidentify(a.comp), cursor: 0, selected: null };
     case 'replace':
@@ -164,6 +170,8 @@ export type CompositionActions = {
   resizeNote: (lane: Lane, id: string, length: number) => void;
   removeNote: (lane: Lane, id: string) => void;
   clearAll: () => void;
+  /** Phase 3 build-out: flip a section's rebuilt/done mark. */
+  toggleSectionDone: (id: string) => void;
   /** Load a stored composition (mints fresh span ids) — the library's open path. */
   load: (comp: Composition) => void;
   /** Start a fresh empty composition in the given key. */
@@ -203,6 +211,7 @@ export function useCompositionState(
       resizeNote: (lane, id, length) => dispatch({ type: 'resizeNote', lane, id, length }),
       removeNote: (lane, id) => dispatch({ type: 'removeNote', lane, id }),
       clearAll: () => dispatch({ type: 'clearAll' }),
+      toggleSectionDone: (id) => dispatch({ type: 'toggleSectionDone', id }),
       load: (comp) => dispatch({ type: 'load', comp }),
       reset: (root, mode) => dispatch({ type: 'replace', comp: emptyComposition(nextId('comp'), 'Untitled', root, mode) }),
     }),

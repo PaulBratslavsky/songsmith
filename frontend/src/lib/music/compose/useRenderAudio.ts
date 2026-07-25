@@ -68,12 +68,16 @@ export function useRenderAudio(
     void ctx.resume?.();
   };
 
-  // transport follow: start on play, stop on stop, re-seek on backward jump (loop wrap)
+  // transport follow: start on play, stop on stop, re-seek on any jump —
+  // backward (loop wrap) OR a forward leap (focus moved to a later section;
+  // normal advance is +1 per tick, timer batching can skip a few)
   useEffect(() => {
     if (!buffer) return;
     if (isPlaying && currentStep != null) {
-      const wrapped = prevStep.current != null && currentStep < prevStep.current;
-      if (srcRef.current == null || wrapped) startAt(currentStep);
+      const jumped =
+        prevStep.current != null &&
+        (currentStep < prevStep.current || currentStep - prevStep.current > 8);
+      if (srcRef.current == null || jumped) startAt(currentStep);
     } else if (!isPlaying) {
       stopSrc();
     }

@@ -70,9 +70,27 @@ export type CompositionPlayback = {
 
 export function useCompositionPlayback(
   comp: Composition,
-  opts: { loop?: boolean; voices?: LaneVoices } = {},
+  opts: {
+    loop?: boolean;
+    voices?: LaneVoices;
+    /** Phase 3 focus mode: confine the transport to [start, end) ticks.
+     *  Play starts at `start`; the loop wraps (or playback ends) at `end`.
+     *  Changing the range re-arms the clock at the new start. */
+    range?: { start: number; end: number } | null;
+    /** Mute ONLY the transport's own notes (edit previews stay audible) —
+     *  the A/B "hear the original render alone" side. Clock still runs. */
+    mute?: boolean;
+  } = {},
 ): CompositionPlayback {
   const loop = opts.loop ?? true;
+  // The focus range + transport mute are read LIVE via refs (same discipline
+  // as tempo/edits: no re-arm, no cursor reset) — except a range MOVE, which
+  // re-arms via rangeKey so play restarts at the new section's start.
+  const rangeKey = opts.range ? `${opts.range.start}:${opts.range.end}` : '';
+  const rangeRef = useRef(opts.range ?? null);
+  rangeRef.current = opts.range ?? null;
+  const muteRef = useRef(!!opts.mute);
+  muteRef.current = !!opts.mute;
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentStep, setCurrentStep] = useState<number | null>(null);
   const [activeChordId, setActiveChordId] = useState<string | null>(null);
@@ -152,10 +170,24 @@ export function useCompositionPlayback(
       }
     };
 
+    // Live clamped focus bounds (whole piece when unfocused). Read per tick
+    // so a length edit while playing still wraps at the right place.
+    const boundStart = () => {
+      const r = rangeRef.current;
+      return r ? Math.max(0, Math.min(r.start, totalTicksRef.current - 1)) : 0;
+    };
+    const boundEnd = () => {
+      const r = rangeRef.current;
+      return r
+        ? Math.max(boundStart() + 1, Math.min(r.end, totalTicksRef.current))
+        : totalTicksRef.current;
+    };
+
     // Schedule one tick's notes at exact audio time `when`, remembering a
     // cancel so stop() can drop lookahead notes that haven't started yet.
     const pending: { time: number; cancel: () => void }[] = [];
     const fire = (step: number, when: number) => {
+      if (muteRef.current) return; // A/B: original only — clock runs, synth silent
       const e = eventsRef.current.get(step);
       if (!e) return;
       const tickMs = tickMsRef.current;
@@ -169,7 +201,7 @@ export function useCompositionPlayback(
     };
 
     // ---- lookahead state (local to this run; edits flow in via refs) ----
-    let nextStep = 0; // next tick to SCHEDULE (audio side)
+    let nextStep = boundStart(); // next tick to SCHEDULE (audio side)
     let nextTime = synth.now() + 0.05; // its audio-clock start time
     let endAt: number | null = null; // non-loop: when the last tick finishes
     // UI boundary queue: each scheduled tick with its start time; the UI
@@ -185,8 +217,8 @@ export function useCompositionPlayback(
         // next scheduled tick onward — the cursor never resets.
         nextTime += tickMsRef.current / 1000;
         const n = nextStep + 1;
-        if (n >= totalTicksRef.current) {
-          if (loop) nextStep = 0;
+        if (n >= boundEnd()) {
+          if (loop) nextStep = boundStart();
           else endAt = nextTime; // let the last tick play out, then stop
         } else {
           nextStep = n;
@@ -213,11 +245,11 @@ export function useCompositionPlayback(
       }
     };
 
-    // Cursor answers immediately on play (tick 0's audio starts ~50ms
-    // later on the audio clock; its queued boundary re-set is a no-op).
-    stepRef.current = 0;
-    setCurrentStep(0);
-    noteActiveChord(0);
+    // Cursor answers immediately on play (the first tick's audio starts
+    // ~50ms later on the audio clock; its queued boundary re-set is a no-op).
+    stepRef.current = nextStep;
+    setCurrentStep(nextStep);
+    noteActiveChord(nextStep);
     scheduleAhead();
 
     const timer = setInterval(() => {
@@ -232,7 +264,8 @@ export function useCompositionPlayback(
       const now = synth.now();
       for (const p of pending) if (p.time > now) p.cancel();
     };
-  }, [isPlaying, loop]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- everything else rides refs
+  }, [isPlaying, loop, rangeKey]);
 
   return {
     isPlaying,
