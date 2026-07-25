@@ -4,7 +4,8 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, listen, STAGE_LABELS } from "../ipc/api";
 import type { Stage } from "../ipc/generated";
-import { StageChecklist, staleStageIds, staleCauseLabels, staleStagesInOrder } from "../components/StageChecklist";
+import { StageChecklist, staleStageIds, staleCauseLabels } from "../components/StageChecklist";
+import { ImportResumeBanner, StaleRefreshBanner } from "../components/SongBanners";
 import { DraftBar } from "../components/DraftBar";
 import { ArtifactPanel } from "../components/ArtifactPanel";
 import { HistoryButton } from "../components/RevisionHistory";
@@ -32,73 +33,6 @@ export function SongWorkspace() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [tab, setTab] = useState<"workspace" | "builder" | "sheet" | "notation" | "renders">("workspace");
   const [abMsg, setAbMsg] = useState("");
-  // batch "Refresh out-of-date stages": walks the stale stages in run order;
-  // every re-run lands as a DRAFT, so firing the whole batch is safe to review
-  const [refreshBusy, setRefreshBusy] = useState(false);
-  const [refreshMsg, setRefreshMsg] = useState("");
-  const refreshStale = async () => {
-    const stale = staleStagesInOrder(song.data?.stages ?? []);
-    if (!stale.length || refreshBusy) return;
-    setRefreshBusy(true);
-    let done = 0;
-    try {
-      for (const s of stale) {
-        setRefreshMsg(`Refreshing ${STAGE_LABELS[s.type] ?? s.type} (${done + 1}/${stale.length})…`);
-        await api.runStage(s.id);
-        done += 1;
-        invalidate();
-      }
-      setRefreshMsg(`✓ ${done} stage${done === 1 ? "" : "s"} refreshed — review the draft on each stage.`);
-    } catch (e: any) {
-      setRefreshMsg(`stopped after ${done}: ${String(e?.message ?? e)}`);
-    }
-    setRefreshBusy(false);
-  };
-  // ⟳ Resume import: an imported song (has a source:"import" render) with a
-  // stage still pending didn't finish its pipeline — offer a one-click retry
-  // (rebuilds lyrics from the stashed/re-run transcript, runs missing stages,
-  // approves everything). Progress arrives on the same import_progress events.
-  const [resumeMsg, setResumeMsg] = useState("");
-  const [resumeBusy, setResumeBusy] = useState(false);
-  const rendersQ = useQuery({ queryKey: ["renders", id], queryFn: () => api.listRenders(id) });
-  const hasImportRender = !!rendersQ.data?.some((r) => r.source === "import");
-  const resumeImport = async () => {
-    if (resumeBusy) return;
-    setResumeBusy(true);
-    setResumeMsg("Resuming the import…");
-    try {
-      setResumeMsg(await api.resumeImport(id));
-    } catch (e: any) {
-      setResumeMsg(`Resume failed: ${String(e?.message ?? e)} — you can try again.`);
-    }
-    setResumeBusy(false);
-    invalidate();
-  };
-  useEffect(() => {
-    let un = () => {};
-    (async () => {
-      un = await listen<{ message: string }>("import_progress", (p) => setResumeMsg(p.message));
-    })();
-    return () => un();
-  }, [id]);
-  // 📋 paste-from-Suno: when transcription can't hear the lyrics, the words
-  // usually exist verbatim in Suno — paste them and import_lyrics maps them
-  // onto the sections (same verbatim parser as the lyrics-first flow)
-  const [pasteOpen, setPasteOpen] = useState(false);
-  const [pasteText, setPasteText] = useState("");
-  const pasteLyrics = async () => {
-    if (!pasteText.trim()) return;
-    setResumeMsg("Placing the pasted lyrics into sections…");
-    try {
-      await api.importLyrics(id, pasteText);
-      setResumeMsg("Lyrics placed — review the Lyrics stage.");
-      setPasteOpen(false);
-      setPasteText("");
-    } catch (e: any) {
-      setResumeMsg(`Paste failed: ${String(e?.message ?? e)}`);
-    }
-    invalidate();
-  };
   const [showStyle, setShowStyle] = useState(false);
   const fd = useFieldDrawer();
   // the right inspector flyout is open when a field is focused or Style is toggled
@@ -290,66 +224,8 @@ export function SongWorkspace() {
         </div>
       )}
 
-      {(() => {
-        // an imported song with a stage still pending = the import pipeline
-        // didn't finish (empty transcript, a failed Claude call, app quit…)
-        const pending = song.data.stages.filter((s) => s.status === "pending");
-        if (!hasImportRender || (!pending.length && !resumeMsg)) return null;
-        return (
-          <div className="banner warn row" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            {pending.length > 0 && (
-              <span>
-                ⟳ <b>This import didn't finish</b> — {pending.map((s) => STAGE_LABELS[s.type] ?? s.type).join(", ")} still empty.
-              </span>
-            )}
-            {pending.length > 0 && (
-              <button className="sm primary" disabled={resumeBusy} onClick={() => void resumeImport()} title="retry the missing pieces: re-transcribe lyrics if needed, run the missing Claude stages, approve everything">
-                {resumeBusy ? "Resuming…" : "⟳ Resume import"}
-              </button>
-            )}
-            {pending.some((s) => s.type === "lyrics") && (
-              <button className="sm" onClick={() => setPasteOpen((o) => !o)}
-                title="the surest fix: copy the lyrics from Suno and paste them — they map onto your sections verbatim">
-                📋 Paste lyrics
-              </button>
-            )}
-            {resumeMsg && <span className="faint">{resumeMsg}</span>}
-            {!resumeBusy && resumeMsg && <button className="sm ghost" title="clear" onClick={() => setResumeMsg("")}>✕</button>}
-            {pasteOpen && (
-              <div style={{ width: "100%" }}>
-                <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} spellCheck={false}
-                  placeholder={"Paste the song's lyrics (Suno's [Verse]/[Chorus] headers welcome — words are kept verbatim)…"}
-                  style={{ width: "100%", minHeight: 120, fontFamily: "var(--mono)", fontSize: 12 }} />
-                <div className="row" style={{ gap: 6, marginTop: 6 }}>
-                  <button className="sm primary" disabled={!pasteText.trim()} onClick={() => void pasteLyrics()}>Place into sections</button>
-                  <button className="sm ghost" onClick={() => setPasteOpen(false)}>cancel</button>
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      {(() => {
-        const stale = staleStagesInOrder(song.data.stages);
-        if ((!stale.length && !refreshMsg) || tab !== "workspace") return null;
-        return (
-          <div className="banner warn row" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            {stale.length > 0 && (
-              <span>
-                ⚠ <b>{stale.length} stage{stale.length === 1 ? " is" : "s are"} out of date</b> — {stale.map((s) => STAGE_LABELS[s.type] ?? s.type).join(", ")}.
-              </span>
-            )}
-            {stale.length > 0 && (
-              <button className="sm primary" disabled={refreshBusy} onClick={refreshStale} title="re-run every out-of-date stage in order — each result lands as a draft you accept or discard">
-                {refreshBusy ? "Refreshing…" : "🔄 Refresh out-of-date stages"}
-              </button>
-            )}
-            {refreshMsg && <span className="faint">{refreshMsg}</span>}
-            {!refreshBusy && refreshMsg && <button className="sm ghost" title="clear" onClick={() => setRefreshMsg("")}>✕</button>}
-          </div>
-        );
-      })()}
+      <ImportResumeBanner songId={id} stages={song.data.stages} onChanged={invalidate} />
+      {tab === "workspace" && <StaleRefreshBanner stages={song.data.stages} onChanged={invalidate} />}
 
       <div className="row" style={{ gap: 6, marginBottom: 12 }}>
         <button className={"sm" + (tab === "workspace" ? " primary" : "")} onClick={() => setTab("workspace")}>Workspace</button>
