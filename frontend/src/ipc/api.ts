@@ -78,7 +78,7 @@ export type CommandMap = {
   run_stage: { args: { stageId: string; userInput: string | null }; result: RunResult };
   accept_stage_draft: { args: { stageId: string }; result: Artifact };
   ableton_build_progression: { args: { chords: string[]; beats: number[] | null; inversions: number[] | null; bpm: number | null }; result: string };
-  ableton_build_composition: { args: { bpm: number; lengthBeats: number; tracks: { name: string; notes: unknown[] }[] }; result: string };
+  ableton_build_composition: { args: { bpm: number; lengthBeats: number; tracks: { name: string; notes: unknown[] }[]; audioPath?: string | null }; result: string };
   ableton_build_outline: { args: { bpm: number; sections: [string, number][] }; result: string };
   list_outlines: { args: Record<string, never>; result: Outline[] };
   save_outline: { args: { name: string; bpm: number; sections: [string, number][] }; result: Outline };
@@ -283,7 +283,7 @@ export const api = {
   approveStage: (stageId: string) => call("approve_stage", { stageId }),
   acceptStageDraft: (stageId: string) => call("accept_stage_draft", { stageId }),
   abletonBuildProgression: (chords: string[], inversions?: number[], bpm?: number, beats?: number[]) => call("ableton_build_progression", { chords, beats: beats ?? null, inversions: inversions ?? null, bpm: bpm ?? null }),
-  abletonBuildComposition: (bpm: number, lengthBeats: number, tracks: { name: string; notes: unknown[] }[]) => call("ableton_build_composition", { bpm, lengthBeats, tracks }),
+  abletonBuildComposition: (bpm: number, lengthBeats: number, tracks: { name: string; notes: unknown[] }[], audioPath?: string | null) => call("ableton_build_composition", { bpm, lengthBeats, tracks, audioPath }),
   abletonBuildOutline: (bpm: number, sections: [string, number][]) => call("ableton_build_outline", { bpm, sections }),
   listOutlines: () => call("list_outlines", {}),
   saveOutline: (name: string, bpm: number, sections: [string, number][]) => call("save_outline", { name, bpm, sections }),

@@ -393,7 +393,7 @@ pub fn build_progression(bpm: i64, chords: &[String], beats: &[i64], inversions:
 /// melody + bass lanes, notes already resolved to absolute MIDI by the
 /// frontend's own playback resolvers, so this stays theory-free). Clears and
 /// rebuilds ONLY the given track names; one clip per track at bar 1.
-pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Value>)], progress: &dyn Fn(String)) -> Result<String> {
+pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Value>)], audio_path: Option<&str>, progress: &dyn Fn(String)) -> Result<String> {
     let live: Vec<&(String, Vec<Value>)> = tracks.iter().filter(|(_, n)| !n.is_empty()).collect();
     if live.is_empty() {
         return Ok("Nothing to build — the composition has no notes.".into());
@@ -408,7 +408,10 @@ pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Val
     let _ = ableton_cmd(&mut s, json!({"type":"set_tempo","params":{"tempo": bpm as f64}}));
     let _ = ableton_cmd(&mut s, json!({"type":"switch_to_arrangement_view","params":{}}));
 
-    let names: Vec<&str> = live.iter().map(|(n, _)| n.as_str()).collect();
+    // "Reference" is always in the clear list so an export WITHOUT audio
+    // still sweeps a previous export's reference track
+    let mut names: Vec<&str> = live.iter().map(|(n, _)| n.as_str()).collect();
+    names.push("Reference");
     let _ = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": names}}));
     nap();
 
@@ -428,6 +431,32 @@ pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Val
         let _ = ableton_cmd(&mut s, json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": 0, "destination_time": 0.0}}));
         log.push(format!("✓ {name} · {} notes", notes.len()));
         nap();
+    }
+
+    // The AI render rides along as a "Reference" AUDIO clip at bar 1 — the
+    // Composer's A/B carried into Live. Failures never sink the MIDI build.
+    if let Some(path) = audio_path {
+        progress("Attaching the reference audio (Live imports the file — can take a moment)…".into());
+        let ti = ableton_cmd(&mut s, json!({"type":"create_audio_track","params":{"index":-1}}))
+            .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()));
+        match ti {
+            Some(ti) => {
+                let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": "Reference"}}));
+                // audio import decodes the file — the script allows itself 60s here
+                s.set_read_timeout(Some(Duration::from_secs(65))).ok();
+                let created = ableton_cmd(&mut s, json!({"type":"create_audio_clip","params":{"track_index": ti, "clip_index": 0, "path": path}}));
+                s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+                match created {
+                    Ok(_) => {
+                        let _ = ableton_cmd(&mut s, json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": 0, "name": "Reference (AI render)"}}));
+                        let _ = ableton_cmd(&mut s, json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": 0, "destination_time": 0.0}}));
+                        log.push("✓ Reference audio at bar 1 — mute/solo it to A/B against your build".into());
+                    }
+                    Err(e) => log.push(format!("⚠ reference audio skipped: {e}")),
+                }
+            }
+            None => log.push("⚠ reference audio skipped: Live can't create audio tracks yet — restart Live to load the updated AbletonMCP Remote Script".into()),
+        }
     }
     Ok(log.join("\n"))
 }

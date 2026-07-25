@@ -1058,9 +1058,9 @@ struct CompTrackIn { name: String, notes: Vec<serde_json::Value> }
 /// The Composer's full export: chords + melody + bass lanes as named MIDI
 /// tracks (notes pre-resolved to absolute MIDI by the frontend).
 #[tauri::command]
-async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<CompTrackIn>) -> R<String> {
+async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<CompTrackIn>, audio_path: Option<String>) -> R<String> {
     let t: Vec<(String, Vec<serde_json::Value>)> = tracks.into_iter().map(|x| (x.name, x.notes)).collect();
-    tokio::task::spawn_blocking(move || song_core::ableton::build_midi_tracks(bpm, length_beats, &t, &|_| {}))
+    tokio::task::spawn_blocking(move || song_core::ableton::build_midi_tracks(bpm, length_beats, &t, audio_path.as_deref(), &|_| {}))
         .await
         .map_err(|e| e.to_string())?
         .map_err(e2s)

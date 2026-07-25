@@ -789,7 +789,7 @@ export function Sketchpad({
             if (!tracks.length) { setSaveMsg('nothing to export — the grid is empty'); return; }
             setSaveMsg('Laying Composer tracks in Ableton…');
             try {
-              setSaveMsg(await api.abletonBuildComposition(comp.bpm, comp.totalTicks / TICKS_PER_BEAT, tracks));
+              setSaveMsg(await api.abletonBuildComposition(comp.bpm, comp.totalTicks / TICKS_PER_BEAT, tracks, audioPath));
             } catch (e) {
               setSaveMsg(String((e as Error)?.message ?? e));
             }
