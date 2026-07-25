@@ -814,6 +814,7 @@ const handlers: MockHandlers = {
   set_render_pick: (a) => { const x = db.renders.find((y: Any) => y.id === a.id); if (a.isPick) db.renders.filter((y: Any) => y.song_id === x.song_id).forEach((y: Any) => (y.is_pick = false)); if (x) x.is_pick = a.isPick; },
   delete_render: (a) => { db.renders = db.renders.filter((x: Any) => x.id !== a.id); },
   import_reference: () => db.songs[0]?.id ?? null, // mock: just open the demo song
+  resume_import: () => "Nothing was missing — the import is already complete.",
   // paste-lyrics import (words verbatim; mock = deterministic header split only)
   parse_pasted_lyrics: (a) => parsePastedLyrics(a.text ?? ""),
   import_lyrics: (a) => { importLyricsIntoSong(a.songId, a.text ?? ""); },
@@ -918,6 +919,6 @@ const MOCK_TOOLS = [
   "list_progressions","save_progression","update_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
-  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference","import_reference",
+  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference","import_reference","resume_import",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" || name === "delete_section" }));

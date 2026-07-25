@@ -54,6 +54,33 @@ export function SongWorkspace() {
     }
     setRefreshBusy(false);
   };
+  // ⟳ Resume import: an imported song (has a source:"import" render) with a
+  // stage still pending didn't finish its pipeline — offer a one-click retry
+  // (rebuilds lyrics from the stashed/re-run transcript, runs missing stages,
+  // approves everything). Progress arrives on the same import_progress events.
+  const [resumeMsg, setResumeMsg] = useState("");
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const rendersQ = useQuery({ queryKey: ["renders", id], queryFn: () => api.listRenders(id) });
+  const hasImportRender = !!rendersQ.data?.some((r) => r.source === "import");
+  const resumeImport = async () => {
+    if (resumeBusy) return;
+    setResumeBusy(true);
+    setResumeMsg("Resuming the import…");
+    try {
+      setResumeMsg(await api.resumeImport(id));
+    } catch (e: any) {
+      setResumeMsg(`Resume failed: ${String(e?.message ?? e)} — you can try again.`);
+    }
+    setResumeBusy(false);
+    invalidate();
+  };
+  useEffect(() => {
+    let un = () => {};
+    (async () => {
+      un = await listen<{ message: string }>("import_progress", (p) => setResumeMsg(p.message));
+    })();
+    return () => un();
+  }, [id]);
   const [showStyle, setShowStyle] = useState(false);
   const fd = useFieldDrawer();
   // the right inspector flyout is open when a field is focused or Style is toggled
@@ -244,6 +271,29 @@ export function SongWorkspace() {
           <pre className="artifact-text" style={{ whiteSpace: "pre-wrap", maxHeight: 200, margin: 0, paddingRight: 32 }}>{abMsg}</pre>
         </div>
       )}
+
+      {(() => {
+        // an imported song with a stage still pending = the import pipeline
+        // didn't finish (empty transcript, a failed Claude call, app quit…)
+        const pending = song.data.stages.filter((s) => s.status === "pending");
+        if (!hasImportRender || (!pending.length && !resumeMsg)) return null;
+        return (
+          <div className="banner warn row" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {pending.length > 0 && (
+              <span>
+                ⟳ <b>This import didn't finish</b> — {pending.map((s) => STAGE_LABELS[s.type] ?? s.type).join(", ")} still empty.
+              </span>
+            )}
+            {pending.length > 0 && (
+              <button className="sm primary" disabled={resumeBusy} onClick={() => void resumeImport()} title="retry the missing pieces: re-transcribe lyrics if needed, run the missing Claude stages, approve everything">
+                {resumeBusy ? "Resuming…" : "⟳ Resume import"}
+              </button>
+            )}
+            {resumeMsg && <span className="faint">{resumeMsg}</span>}
+            {!resumeBusy && resumeMsg && <button className="sm ghost" title="clear" onClick={() => setResumeMsg("")}>✕</button>}
+          </div>
+        );
+      })()}
 
       {(() => {
         const stale = staleStagesInOrder(song.data.stages);

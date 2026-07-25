@@ -645,20 +645,12 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     // whose [start_sec, next start_sec) window contains it — verbatim words,
     // deterministic assignment (the skill supplies start_sec per section).
     let transcript = raw.get("transcript").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    if !transcript.is_empty() {
+    if transcript.is_empty() {
+        progress("⚠ No sung lyrics could be transcribed — the Lyrics stage stays empty (⟳ Resume import retries it).".into());
+    } else {
         let sec_defs = structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         let starts: Vec<f64> = sec_defs.iter().map(|s| s.get("start_sec").and_then(|v| v.as_f64()).unwrap_or(-1.0)).collect();
-        let lyric_sections: Vec<Value> = rows.iter().enumerate().map(|(i, row)| {
-            let lo = starts.get(i).copied().unwrap_or(-1.0);
-            let hi = starts.get(i + 1).copied().filter(|&h| h >= 0.0).unwrap_or(f64::MAX);
-            let lines: Vec<String> = if lo < 0.0 { vec![] } else {
-                transcript.iter().filter_map(|t| {
-                    let ts = t.get("start").and_then(|v| v.as_f64())?;
-                    if ts >= lo && ts < hi { t.get("text").and_then(|v| v.as_str()).map(String::from) } else { None }
-                }).collect()
-            };
-            json!({ "section_id": row.id, "label": row.label, "lines": lines })
-        }).collect();
+        let lyric_sections = lyric_sections_from_transcript(&rows, &starts, &transcript);
         if lyric_sections.iter().any(|s| s.get("lines").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty())) {
             if let Some(lid) = stage_id("lyrics") {
                 let l_data = json!({ "sections": lyric_sections });
@@ -667,6 +659,8 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
                 let _ = db::set_stage_status(conn, &lid, "done").await;
                 progress("Transcribed lyrics placed into sections.".into());
             }
+        } else {
+            progress(format!("⚠ {} lyric lines transcribed but none matched the section timing — Lyrics left empty.", transcript.len()));
         }
     }
 
@@ -674,12 +668,14 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     // content (the reverse-context flow — later stages are the source of
     // truth). First runs save directly; a failure skips that stage but never
     // sinks the import.
+    let mut issues: Vec<String> = vec![];
     for t in ["concept", "lyric_spec", "prompt"] {
         if let Some(sid) = stage_id(t) {
             if db::current_artifact(conn, &sid).await?.is_none() {
                 progress(format!("Writing the {} from the imported song (Claude)…", stage_label(t)));
                 if let Err(e) = run_stage(conn, settings, &sid, None, |_| {}, None).await {
                     progress(format!("⚠ {} skipped: {e}", stage_label(t)));
+                    issues.push(stage_label(t).to_string());
                 }
             }
         }
@@ -687,7 +683,10 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     // approve everything that has content, in order — the song reads DONE
     for st in db::list_stages(conn, &song.id).await? {
         if db::current_artifact(conn, &st.id).await?.is_some() {
-            let _ = crate::tools::approve_stage(conn, &st.id).await;
+            if let Err(e) = crate::tools::approve_stage(conn, &st.id).await {
+                progress(format!("⚠ could not approve {}: {e}", stage_label(&st.r#type)));
+                issues.push(format!("approve {}", stage_label(&st.r#type)));
+            }
         }
     }
     // the imported audio IS the song's first render — attach it (with the
@@ -712,8 +711,146 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
         }
     }
 
-    progress("Import complete — every stage filled and approved.".into());
+    if issues.is_empty() {
+        progress("Import complete — every stage filled and approved.".into());
+    } else {
+        progress(format!(
+            "Import finished with issues ({}) — open the song and hit ⟳ Resume import to retry.",
+            issues.join(", ")
+        ));
+    }
     Ok(song.id)
+}
+
+/// Complete a partially-imported song (the ⟳ Resume import button): rebuild
+/// a missing Lyrics stage from the render's stashed transcript (or a fresh
+/// lyrics-only analyzer pass when the stash predates transcript stashing),
+/// run any missing Claude stages via the reverse-context flow, approve
+/// everything with content, and fill the intent. Idempotent — a complete
+/// song comes back "nothing was missing".
+pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str, progress: &(dyn Fn(String) + Sync)) -> Result<String> {
+    let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let stages = db::list_stages(conn, song_id).await?;
+    let stage_id = |t: &str| stages.iter().find(|s| s.r#type == t).map(|s| s.id.clone());
+    let import_render = db::list_renders(conn, song_id).await?.into_iter().find(|r| r.source == "import");
+    let analysis: Option<Value> = import_render.as_ref().and_then(|r| serde_json::from_str(&r.analysis).ok());
+
+    let mut fixed: Vec<String> = vec![];
+    let mut failed: Vec<String> = vec![];
+
+    // 1. Lyrics from the stashed transcript / a fresh transcription pass.
+    if let Some(lid) = stage_id("lyrics") {
+        if db::current_artifact(conn, &lid).await?.is_none() {
+            let mut transcript = analysis.as_ref()
+                .and_then(|a| a.get("transcript")).and_then(|v| v.as_array()).cloned()
+                .unwrap_or_default();
+            if transcript.is_empty() {
+                if let Some(r) = &import_render {
+                    progress("Re-transcribing lyrics from the render (local whisper — a minute or two)…".into());
+                    match crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": r.file_path, "lyrics": true, "stems": true })).await {
+                        Ok(fresh) => transcript = fresh.get("transcript").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+                        Err(e) => progress(format!("⚠ transcription failed: {e}")),
+                    }
+                }
+            }
+            // the transcription can take minutes — bail cleanly if the song
+            // was deleted from the app in the meantime (cascade takes the
+            // stages with it, which would otherwise read as bizarre errors)
+            if db::get_song(conn, song_id).await?.is_none() {
+                return Err(anyhow!("the song was deleted while the import was resuming"));
+            }
+            if transcript.is_empty() {
+                progress("⚠ Still no transcribable lyrics — is the song instrumental? Paste them by hand if you have them.".into());
+                failed.push("lyrics (nothing transcribable)".into());
+            } else {
+                let rows = db::list_sections(conn, song_id).await?;
+                // Section start times: the stash's start_sec when every row
+                // has one, else cumulative bars at the song's BPM (the import
+                // assumes audio starts at bar 1 anyway).
+                let stash_secs = analysis.as_ref().and_then(|a| a.get("sections")).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let stash_starts: Vec<Option<f64>> = (0..rows.len())
+                    .map(|i| stash_secs.get(i).and_then(|x| x.get("start_sec")).and_then(|v| v.as_f64()))
+                    .collect();
+                let starts: Vec<f64> = if !rows.is_empty() && stash_starts.iter().all(|s| s.is_some()) {
+                    stash_starts.into_iter().flatten().collect()
+                } else {
+                    let spb = 60.0 / (song.bpm.max(1) as f64) * 4.0;
+                    let mut cum = 0.0;
+                    rows.iter().map(|r| { let s = cum; cum += r.bars.max(1) as f64 * spb; s }).collect()
+                };
+                let lyric_sections = lyric_sections_from_transcript(&rows, &starts, &transcript);
+                if lyric_sections.iter().any(|s| s.get("lines").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty())) {
+                    let snapshot = crate::spine::snapshot_of(&rows);
+                    let l_data = json!({ "sections": lyric_sections });
+                    let content = json!({ "kind": "lyrics", "text": lyrics_text(&l_data), "data": l_data, "spine_snapshot": snapshot }).to_string();
+                    db::save_artifact(conn, song_id, Some(&lid), "lyrics", &content).await?;
+                    let _ = db::set_stage_status(conn, &lid, "done").await;
+                    progress("Transcribed lyrics placed into sections.".into());
+                    fixed.push("lyrics".into());
+                } else {
+                    progress(format!("⚠ {} lyric lines transcribed but none matched the section timing.", transcript.len()));
+                    failed.push("lyrics (timing mismatch)".into());
+                }
+            }
+        }
+    }
+
+    // 2. Any missing Claude stages — the reverse-context flow fills them
+    // from whatever the song already has. First runs save directly.
+    for t in ["concept", "structure", "chords", "lyric_spec", "prompt"] {
+        if let Some(sid) = stage_id(t) {
+            if db::current_artifact(conn, &sid).await?.is_none() {
+                progress(format!("Writing the {} (Claude)…", stage_label(t)));
+                match run_stage(conn, settings, &sid, None, |_| {}, None).await {
+                    Ok(_) => fixed.push(stage_label(t).to_string()),
+                    Err(e) => {
+                        progress(format!("⚠ {} failed: {e}", stage_label(t)));
+                        failed.push(format!("{} ({e})", stage_label(t)));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Approve everything with content — surfacing errors this time.
+    for st in db::list_stages(conn, song_id).await? {
+        if db::current_artifact(conn, &st.id).await?.is_some() && st.status != "approved" && st.status != "done" {
+            if let Err(e) = crate::tools::approve_stage(conn, &st.id).await {
+                progress(format!("⚠ could not approve {}: {e}", stage_label(&st.r#type)));
+                failed.push(format!("approve {} ({e})", stage_label(&st.r#type)));
+            } else {
+                fixed.push(format!("approved {}", stage_label(&st.r#type)));
+            }
+        }
+    }
+
+    // 4. Intent from the concept, when still empty.
+    if song.intent.trim().is_empty() {
+        if let Some(cid) = stage_id("concept") {
+            if let Ok(Some(a)) = db::current_artifact(conn, &cid).await {
+                let v: Value = serde_json::from_str(&a.content).unwrap_or(Value::Null);
+                let intent = v.pointer("/data/theme").and_then(|x| x.as_str())
+                    .or_else(|| v.pointer("/data/hook").and_then(|x| x.as_str()))
+                    .unwrap_or("");
+                if !intent.trim().is_empty() {
+                    let _ = db::update_song_intent(conn, song_id, intent.trim()).await;
+                    fixed.push("intent".into());
+                }
+            }
+        }
+    }
+
+    let msg = match (fixed.is_empty(), failed.is_empty()) {
+        (true, true) => "Nothing was missing — the import is already complete.".to_string(),
+        (false, true) => format!("Import completed — fixed: {}.", fixed.join(", ")),
+        (_, false) => format!(
+            "Partially completed.{} Still failing: {}.",
+            if fixed.is_empty() { String::new() } else { format!(" Fixed: {}.", fixed.join(", ")) },
+            failed.join(", ")
+        ),
+    };
+    progress(msg.clone());
+    Ok(msg)
 }
 
 /// The style/song context block injected into field refinement so 💬 edits stay
@@ -1284,7 +1421,8 @@ fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value 
                 .find(|c| norm_label(&section_label("chords", c)) == norm_label(&label))
                 .and_then(|c| c.get("chords").cloned())
                 .unwrap_or_else(|| json!([]));
-            json!({ "label": label, "bars": bars, "chords": ch })
+            json!({ "label": label, "bars": bars, "chords": ch,
+                    "start_sec": s.get("start_sec").cloned().unwrap_or(Value::Null) })
         })
         .collect();
     json!({
@@ -1294,7 +1432,27 @@ fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value 
         "sections": sections,
         "melody": raw.get("melody_notes").cloned().unwrap_or_else(|| json!([])),
         "bass": raw.get("bass_notes").cloned().unwrap_or_else(|| json!([])),
+        // the transcript rides along so a resumed import can rebuild Lyrics
+        // without re-running whisper
+        "transcript": raw.get("transcript").cloned().unwrap_or_else(|| json!([])),
     })
+}
+
+/// Transcript lines → per-spine-row lyric sections: each line lands in the
+/// section whose [start_sec, next start_sec) window contains it — verbatim
+/// words, deterministic assignment. Shared by the importer and resume_import.
+fn lyric_sections_from_transcript(rows: &[crate::models::Section], starts: &[f64], transcript: &[Value]) -> Vec<Value> {
+    rows.iter().enumerate().map(|(i, row)| {
+        let lo = starts.get(i).copied().unwrap_or(-1.0);
+        let hi = starts.get(i + 1).copied().filter(|&h| h >= 0.0).unwrap_or(f64::MAX);
+        let lines: Vec<String> = if lo < 0.0 { vec![] } else {
+            transcript.iter().filter_map(|t| {
+                let ts = t.get("start").and_then(|v| v.as_f64())?;
+                if ts >= lo && ts < hi { t.get("text").and_then(|v| v.as_str()).map(String::from) } else { None }
+            }).collect()
+        };
+        json!({ "section_id": row.id, "label": row.label, "lines": lines })
+    }).collect()
 }
 
 // ---- Composer export (composition → song) ----------------------------------

@@ -120,6 +120,14 @@ async fn import_reference(app: tauri::AppHandle, state: State<'_, AppState>, aud
     song_core::agent::import_reference_full(&state.conn, &settings, &audio_path, &progress).await.map_err(e2s)
 }
 #[tauri::command]
+async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    let progress = move |msg: String| {
+        let _ = app.emit("import_progress", serde_json::json!({ "message": msg }));
+    };
+    song_core::agent::resume_import(&state.conn, &settings, &song_id, &progress).await.map_err(e2s)
+}
+#[tauri::command]
 async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<StageDraft> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     song_core::agent::self_check_stage(&state.conn, &settings, &stage_id).await.map_err(e2s)
@@ -1191,6 +1199,7 @@ pub fn run() {
             reorder_sections,
             union_spine_sections,
             import_reference,
+            resume_import,
             parse_pasted_lyrics,
             import_lyrics,
             create_song_from_lyrics,

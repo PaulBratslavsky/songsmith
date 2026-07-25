@@ -195,15 +195,42 @@ def main():
         try:
             from faster_whisper import WhisperModel
             model = WhisperModel("small", device="cpu", compute_type="int8")
-            # NO speech-VAD: it classifies SINGING as non-speech and strips
-            # every segment (verified on a real render — 0 vs 20 segments).
-            # The isolated vocals stem (when available) transcribes cleaner
-            # than the full mix.
-            segs, _info = model.transcribe(stems.get("vocals", args.audio), vad_filter=False, beam_size=5)
-            for s in segs:
-                text = s.text.strip()
-                if text:
-                    transcript.append({"start": round(s.start, 2), "end": round(s.end, 2), "text": text})
+
+            def transcribe(path):
+                # NO speech-VAD: it classifies SINGING as non-speech and strips
+                # every segment (verified on a real render — 0 vs 20 segments)
+                segs, _info = model.transcribe(path, vad_filter=False, beam_size=5)
+                out = []
+                for s in segs:
+                    text = s.text.strip()
+                    # whisper's stock instrumental hallucinations — not lyrics
+                    if text and text.lower().strip(" .!♪") not in ("music", "thanks for watching", "thank you for watching"):
+                        out.append({"start": round(s.start, 2), "end": round(s.end, 2), "text": text})
+                # hallucination signature: one or two short phrases looping
+                # ("Music"×50, "Thank you very much."×12) — worse than nothing,
+                # they'd land in the Lyrics stage as real words
+                uniq = {e["text"].lower() for e in out}
+                if len(out) >= 5 and len(uniq) * 3 < len(out):
+                    print(f"(dropping hallucinated transcript: {len(out)} segments, {len(uniq)} unique)", file=sys.stderr)
+                    return []
+                if len(out) < 2:
+                    return []  # a single stray segment is noise, not lyrics
+                return out
+
+            # Fallback ladder: the isolated vocals stem usually transcribes
+            # cleanest — but demucs can misfile heavily-processed synth
+            # vocals into "other", leaving a near-silent vocals stem
+            # (verified on a real synthwave render: stem 0 segments, mix 6).
+            # When the stem yields almost nothing, retry on the full mix and
+            # keep whichever heard more.
+            candidates = ([("vocals stem", stems["vocals"])] if "vocals" in stems else []) + [("full mix", args.audio)]
+            for tag, path in candidates:
+                got = transcribe(path)
+                print(f"lyrics via {tag}: {len(got)} segments", file=sys.stderr)
+                if len(got) > len(transcript):
+                    transcript = got
+                if len(transcript) >= 3:
+                    break  # good enough — skip the extra pass
         except Exception as e:  # missing dep / decode failure — never sink the analysis
             transcript = []
             print(f"(lyrics transcription unavailable: {e})", file=sys.stderr)

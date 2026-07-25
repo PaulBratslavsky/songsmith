@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, pickAudioFile, STAGE_ORDER, STAGE_LABELS, type ParsedLyrics, listen } from "../ipc/api";
@@ -226,16 +226,19 @@ export function Library() {
     return () => un();
   }, []);
 
+  // remember the picked file so a failed import can be retried without re-picking
+  const lastImportPath = useRef<string | null>(null);
   const importRef = useMutation({
-    mutationFn: async () => {
-      const path = await pickAudioFile();
+    mutationFn: async (retryPath?: string) => {
+      const path = retryPath ?? (await pickAudioFile());
       if (!path) return null;
-      setImportMsg(`Importing ${path.split("/").pop()} — analysis + lyrics transcription, then Claude fills every stage (~2–4 min)…`);
+      lastImportPath.current = path;
+      setImportMsg(`Importing ${path.split("/").pop()} — stems, analysis + lyrics transcription, then Claude fills every stage (a few minutes)…`);
       return api.importReference(path);
     },
     onSuccess: (id) => {
       setImportMsg("");
-      if (id) { qc.invalidateQueries({ queryKey: ["songs"] }); nav({ to: "/song/$id", params: { id } }); }
+      if (id) { lastImportPath.current = null; qc.invalidateQueries({ queryKey: ["songs"] }); nav({ to: "/song/$id", params: { id } }); }
     },
     onError: (e: any) => setImportMsg("Import failed: " + String(e?.message ?? e)),
   });
@@ -248,7 +251,7 @@ export function Library() {
           <span className="muted">Every song mock and the stage it's on.</span>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <button onClick={() => importRef.mutate()} disabled={importRef.isPending}
+          <button onClick={() => importRef.mutate(undefined)} disabled={importRef.isPending}
             title="Import an audio file → analyze locally → new song with Structure + Chords filled in">
             {importRef.isPending ? "Analyzing…" : "⤵ Import reference"}
           </button>
@@ -260,7 +263,19 @@ export function Library() {
           <NewSongButton />
         </div>
       </div>
-      {importMsg && <div className="banner" style={{ marginBottom: 12 }}>{importMsg}</div>}
+      {importMsg && (
+        <div className="banner row" style={{ marginBottom: 12, alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span>{importMsg}</span>
+          {importRef.isError && lastImportPath.current && (
+            <button className="sm primary" disabled={importRef.isPending}
+              onClick={() => importRef.mutate(lastImportPath.current!)}
+              title={`retry importing ${lastImportPath.current.split("/").pop()}`}>
+              ⟳ Retry import
+            </button>
+          )}
+          {!importRef.isPending && <button className="sm ghost" title="clear" onClick={() => setImportMsg("")}>✕</button>}
+        </div>
+      )}
       <OutlineToAbleton open={outlineOpen} setOpen={setOutlineOpen} />
 
       {presets.data && presets.data.length === 0 && (
