@@ -31,7 +31,12 @@ artifact              a stage's content, APPEND-ONLY revisions:
                       regeneration, edits, and restores all append a new version.
 composition           Composer sketches (melody/chords/bass), linked to a song when
                       imported from one.
-render                final audio takes (label + file path on disk).
+render                final audio takes: label + file path on disk + source
+                      ("import" = the audio the song was imported from) + a stashed
+                      `analysis` JSON on imports (the Composer-ready summary: bpm/key/
+                      sections with start_sec, transcribed melody/bass note events,
+                      and the lyric transcript) so 🎼 Analyze → Composer is instant
+                      and ⟳ Resume import can rebuild Lyrics without re-analysis.
 skill                 the per-stage instructions Claude runs with (builtin + user).
 ```
 
@@ -73,6 +78,35 @@ sections back in, and keys everything by `section_id` against the spine.
    keyed by `section_id`; the Structure stage is back-filled (section map from the
    spine, chords from the tags land in the Chords stage). Concept stays blank — the
    flow then runs "in reverse" (see below).
+
+## Path 3 — import from an AI render (audio file)
+
+`import_reference` (Library → **⤵ Import reference**) turns a finished AI song (e.g.
+a Suno render) into a COMPLETE song mock. Everything runs locally except the three
+Claude stage writes (see `RENDER-ROUNDTRIP.md` for the full pipeline and its failure
+ladder):
+
+1. **Perception (local)** — `analysis/analyze.py`: demucs stem separation, tempo/key/
+   bar-chords/section boundaries (librosa), whisper lyric transcription (vocals stem →
+   full-mix fallback, hallucination guards), basic-pitch melody/bass note events.
+2. **Cognition (Claude)** — the Reference Analyst skill cleans the raw analysis into a
+   real Structure (labeled sections WITH `start_sec`) + Chords.
+3. The analysis' sections become the new song's **spine**; Structure + Chords artifacts
+   save against it; each transcript line lands in the section whose `[start_sec, next)`
+   window contains it → the Lyrics artifact (verbatim words).
+4. **Reverse context**: Concept → Lyric Spec → Generation Prompt run from the imported
+   content; every stage with content is approved; the song's 🎯 intent fills from the
+   concept's theme.
+5. The audio attaches as the song's first `render` (source "import") with the analysis
+   stashed, and the import ends with an HONEST summary — any skipped piece is named.
+
+**When it doesn't finish** (untranscribable vocals, a failed Claude call, app quit):
+the song workspace shows the **⟳ Resume import** banner — resume rebuilds a missing
+Lyrics stage from the stashed transcript (or a fresh local pass, or the opt-in
+Music.AI cloud add-on when configured in Settings), runs missing stages, approves
+everything, and reports fixed-vs-still-failing. **📋 Paste lyrics** in the same banner
+is the surest fix for your own Suno songs: the words already exist in Suno and map
+onto the sections verbatim.
 
 ## "Shouldn't the pasted lyrics be global context?" — they are
 
