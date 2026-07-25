@@ -21,4 +21,15 @@ music_folder: string,
  * path is appended as the last arg. e.g. "/path/.venv/bin/python /path/analyze.py".
  * Empty = reference import disabled.
  */
-analyzer_cmd: string, };
+analyzer_cmd: string, 
+/**
+ * OPTIONAL ADD-ON — Music.AI (music.ai) API key. When set, a resumed
+ * import whose LOCAL lyric transcription came up empty offers a cloud
+ * pass (the audio is uploaded to Music.AI). Empty = fully local (default).
+ */
+musicai_api_key: string, 
+/**
+ * The Music.AI workflow slug to run (created in their console; must take
+ * an audio input and produce a lyric transcription output).
+ */
+musicai_workflow: string, };

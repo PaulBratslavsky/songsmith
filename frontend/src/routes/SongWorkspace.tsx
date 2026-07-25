@@ -81,6 +81,24 @@ export function SongWorkspace() {
     })();
     return () => un();
   }, [id]);
+  // 📋 paste-from-Suno: when transcription can't hear the lyrics, the words
+  // usually exist verbatim in Suno — paste them and import_lyrics maps them
+  // onto the sections (same verbatim parser as the lyrics-first flow)
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const pasteLyrics = async () => {
+    if (!pasteText.trim()) return;
+    setResumeMsg("Placing the pasted lyrics into sections…");
+    try {
+      await api.importLyrics(id, pasteText);
+      setResumeMsg("Lyrics placed — review the Lyrics stage.");
+      setPasteOpen(false);
+      setPasteText("");
+    } catch (e: any) {
+      setResumeMsg(`Paste failed: ${String(e?.message ?? e)}`);
+    }
+    invalidate();
+  };
   const [showStyle, setShowStyle] = useState(false);
   const fd = useFieldDrawer();
   // the right inspector flyout is open when a field is focused or Style is toggled
@@ -289,8 +307,25 @@ export function SongWorkspace() {
                 {resumeBusy ? "Resuming…" : "⟳ Resume import"}
               </button>
             )}
+            {pending.some((s) => s.type === "lyrics") && (
+              <button className="sm" onClick={() => setPasteOpen((o) => !o)}
+                title="the surest fix: copy the lyrics from Suno and paste them — they map onto your sections verbatim">
+                📋 Paste lyrics
+              </button>
+            )}
             {resumeMsg && <span className="faint">{resumeMsg}</span>}
             {!resumeBusy && resumeMsg && <button className="sm ghost" title="clear" onClick={() => setResumeMsg("")}>✕</button>}
+            {pasteOpen && (
+              <div style={{ width: "100%" }}>
+                <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} spellCheck={false}
+                  placeholder={"Paste the song's lyrics (Suno's [Verse]/[Chorus] headers welcome — words are kept verbatim)…"}
+                  style={{ width: "100%", minHeight: 120, fontFamily: "var(--mono)", fontSize: 12 }} />
+                <div className="row" style={{ gap: 6, marginTop: 6 }}>
+                  <button className="sm primary" disabled={!pasteText.trim()} onClick={() => void pasteLyrics()}>Place into sections</button>
+                  <button className="sm ghost" onClick={() => setPasteOpen(false)}>cancel</button>
+                </div>
+              </div>
+            )}
           </div>
         );
       })()}

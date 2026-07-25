@@ -13,6 +13,7 @@ pub mod engine;
 pub mod freeze;
 pub mod midi;
 pub mod models;
+pub mod musicai;
 pub mod render;
 pub mod spine;
 pub mod tools;

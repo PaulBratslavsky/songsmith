@@ -753,6 +753,22 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
                     }
                 }
             }
+            // OPTIONAL ADD-ON: when the local ladder heard nothing and the
+            // user configured Music.AI in Settings, offer the audio to their
+            // cloud transcription — the ONLY path where audio leaves the
+            // machine, and only on this explicit user-initiated retry.
+            if transcript.is_empty()
+                && !settings.musicai_api_key.trim().is_empty()
+                && !settings.musicai_workflow.trim().is_empty()
+            {
+                if let Some(r) = &import_render {
+                    progress("Local transcription heard nothing — trying the Music.AI add-on (uploads this song)…".into());
+                    match crate::musicai::transcribe_lyrics(settings.musicai_api_key.trim(), settings.musicai_workflow.trim(), &r.file_path, progress).await {
+                        Ok(t) => transcript = t,
+                        Err(e) => progress(format!("⚠ Music.AI: {e}")),
+                    }
+                }
+            }
             // the transcription can take minutes — bail cleanly if the song
             // was deleted from the app in the meantime (cascade takes the
             // stages with it, which would otherwise read as bizarre errors)
@@ -760,7 +776,7 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
                 return Err(anyhow!("the song was deleted while the import was resuming"));
             }
             if transcript.is_empty() {
-                progress("⚠ Still no transcribable lyrics — is the song instrumental? Paste them by hand if you have them.".into());
+                progress("⚠ Still no transcribable lyrics — paste them from Suno (📋 in the banner), or add a Music.AI key in Settings for a cloud pass.".into());
                 failed.push("lyrics (nothing transcribable)".into());
             } else {
                 let rows = db::list_sections(conn, song_id).await?;

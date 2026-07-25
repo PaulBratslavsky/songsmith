@@ -164,11 +164,20 @@ pub struct Settings {
     /// path is appended as the last arg. e.g. "/path/.venv/bin/python /path/analyze.py".
     /// Empty = reference import disabled.
     pub analyzer_cmd: String,
+    /// OPTIONAL ADD-ON — Music.AI (music.ai) API key. When set, a resumed
+    /// import whose LOCAL lyric transcription came up empty offers a cloud
+    /// pass (the audio is uploaded to Music.AI). Empty = fully local (default).
+    #[serde(default)]
+    pub musicai_api_key: String,
+    /// The Music.AI workflow slug to run (created in their console; must take
+    /// an audio input and produce a lyric transcription output).
+    #[serde(default)]
+    pub musicai_workflow: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { claude_model: String::new(), claude_bin: String::new(), ableton_mcp: String::new(), music_folder: String::new(), analyzer_cmd: String::new() }
+        Settings { claude_model: String::new(), claude_bin: String::new(), ableton_mcp: String::new(), music_folder: String::new(), analyzer_cmd: String::new(), musicai_api_key: String::new(), musicai_workflow: String::new() }
     }
 }
 

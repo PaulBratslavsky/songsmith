@@ -323,6 +323,26 @@ export function SettingsPage() {
           </div>
 
           <div className="card">
+            <h2>Music.AI lyrics <span className="badge pending">add-on</span></h2>
+            <p className="muted">
+              Optional cloud fallback for lyric transcription. Some AI renders (heavily-processed synth vocals) defeat the local
+              whisper pipeline — with a <a href="https://music.ai" target="_blank" rel="noreferrer">music.ai</a> API key set, the
+              ⟳ Resume import retry offers their transcription instead. <b>This uploads that song's audio to Music.AI</b> — the only
+              path where audio leaves your machine, and only when you trigger it. Leave empty to stay fully local.
+            </p>
+            <label>API key</label>
+            <input type="password" value={form.musicai_api_key} onChange={set("musicai_api_key")} spellCheck={false}
+              placeholder="paste your Music.AI API key" style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12 }} />
+            <label style={{ marginTop: 8 }}>Workflow slug</label>
+            <input value={form.musicai_workflow} onChange={set("musicai_workflow")} spellCheck={false}
+              placeholder="e.g. lyric-transcription (create it in the Music.AI console — audio in, lyric transcription JSON out)"
+              style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12 }} />
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="primary" onClick={() => save.mutate()}>Save</button>
+            </div>
+          </div>
+
+          <div className="card">
             <h2>Tool registry</h2>
             <p className="muted">{tools.data?.length ?? 0} tools — one registry for the UI, the agent, and Claude over MCP.</p>
             <div style={{ maxHeight: 220, overflow: "auto" }}>
