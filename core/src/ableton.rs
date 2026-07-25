@@ -252,17 +252,30 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
     let _ = ableton_cmd(&mut s, json!({"type":"switch_to_arrangement_view","params":{}}));
 
     // clear our previously-built tracks so re-running rebuilds cleanly instead
-    // of stacking duplicate track sets (needs the patched Remote Script)
-    let track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp", "Drums"];
+    // of stacking duplicate track sets (needs the patched Remote Script).
+    // ALL known names are cleared — a profile switch must remove tracks the
+    // new profile no longer builds.
+    let all_track_names = ["Sections", "Bass", "Chords", "Pad", "Chord melody", "Filler", "Arp", "Drums"];
     progress("Clearing previously built tracks…".into());
-    let cleared = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": track_names}}))
+    let cleared = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": all_track_names}}))
         .ok().and_then(|v| v.get("result").and_then(|r| r.get("deleted")).and_then(|n| n.as_i64())).unwrap_or(0);
     nap();
+
+    // Parts the PROFILE disables generate zero notes in every section —
+    // creating their tracks lays a column of EMPTY clips that reads as a
+    // failed build (user report 2026-07-24: phonk's trap-808 profile has
+    // pad off, so "Black" exported with a blank Pad track). Skip them.
+    let track_names: Vec<&str> = all_track_names.iter().copied().filter(|p| match *p {
+        "Pad" => profile.pad,
+        "Arp" => profile.arp != crate::midi::ArpRate::Off,
+        "Drums" => profile.drums != crate::midi::DrumPattern::Off,
+        _ => true,
+    }).collect();
 
     // create the tracks fresh, capture their indices
     progress(format!("Creating {} MIDI tracks…", track_names.len()));
     let mut tracks: Vec<i64> = Vec::new();
-    for name in track_names {
+    for &name in &track_names {
         let ti = ableton_cmd(&mut s, json!({"type":"create_midi_track","params":{"index":-1}}))
             .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()))
             .unwrap_or(tracks.last().map(|t| t + 1).unwrap_or(0));
