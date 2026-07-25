@@ -14,6 +14,88 @@ import argparse, json, sys
 import numpy as np
 import librosa
 
+
+def separate_stems(audio_path):
+    """Demucs (htdemucs, CPU) → temp vocals.wav + bass.wav. Returns
+    ({name: path}, tmpdir) or ({}, None) if anything is missing/fails."""
+    try:
+        import pathlib, tempfile
+        from demucs.api import Separator, save_audio
+        print("separating stems (demucs, CPU — a minute or two)…", file=sys.stderr)
+        from contextlib import redirect_stdout
+        with redirect_stdout(sys.stderr):  # keep stdout JSON-clean
+            sep = Separator(model="htdemucs", device="cpu")
+            _origin, separated = sep.separate_audio_file(audio_path)
+        tmp = tempfile.mkdtemp(prefix="songsmith-stems-")
+        out = {}
+        for name in ("vocals", "bass"):
+            p = str(pathlib.Path(tmp) / f"{name}.wav")
+            save_audio(separated[name], p, samplerate=sep.samplerate)
+            out[name] = p
+        return out, tmp
+    except Exception as e:  # torch missing / OOM / decode — degrade, never sink
+        print(f"(stem separation unavailable: {e})", file=sys.stderr)
+        return {}, None
+
+
+def mono_clean(events, min_dur=0.08, min_amp=0.12):
+    """Reduce basic-pitch note events to a clean monophonic line: drop the
+    quiet/blip notes, then resolve overlaps by truncating the earlier note
+    (dropping it if the truncation leaves a blip)."""
+    evs = sorted((e for e in events if e["end"] - e["start"] >= min_dur and e["amp"] >= min_amp),
+                 key=lambda e: (e["start"], -e["amp"]))
+    out = []
+    for e in evs:
+        keep = True
+        while out and e["start"] < out[-1]["end"]:
+            prev = out[-1]
+            if e["amp"] < 0.6 * prev["amp"] and e["end"] <= prev["end"] + 0.02:
+                keep = False  # a quiet blip riding a strong held note
+                break
+            prev["end"] = round(e["start"], 3)  # a real new onset truncates it
+            if prev["end"] - prev["start"] < min_dur:
+                out.pop()  # truncation left a blip — evict, recheck the one before
+            else:
+                break
+        if keep:
+            out.append(dict(e))
+    return out
+
+
+def transcribe_notes(stems):
+    """basic-pitch (ONNX) on the vocals + bass stems → melody/bass note events
+    [{start, end, midi, amp}] in seconds. Empty lists on any failure."""
+    try:
+        # scipy ≥1.13 moved gaussian to signal.windows; basic-pitch still uses
+        # the old name — shim it rather than downgrading scipy under librosa
+        import scipy.signal
+        if not hasattr(scipy.signal, "gaussian"):
+            scipy.signal.gaussian = scipy.signal.windows.gaussian
+        from basic_pitch import build_icassp_2022_model_path, FilenameSuffix
+        from basic_pitch.inference import Model, predict
+        model = Model(build_icassp_2022_model_path(FilenameSuffix.onnx))
+
+        def notes_from(path, fmin, fmax):
+            # basic-pitch prints "Predicting MIDI for …" to STDOUT — which is
+            # our JSON channel; shunt it to stderr or the output won't parse
+            from contextlib import redirect_stdout
+            with redirect_stdout(sys.stderr):
+                _out, _midi, events = predict(
+                    path, model, minimum_frequency=fmin, maximum_frequency=fmax,
+                    minimum_note_length=80.0)
+            evs = [{"start": round(float(s), 3), "end": round(float(e), 3),
+                    "midi": int(p), "amp": round(float(a), 3)}
+                   for (s, e, p, a, _bends) in events]
+            return mono_clean(evs)[:1500]
+
+        print("transcribing melody + bass (basic-pitch)…", file=sys.stderr)
+        melody = notes_from(stems["vocals"], 80.0, 1100.0) if "vocals" in stems else []
+        bass = notes_from(stems["bass"], 28.0, 300.0) if "bass" in stems else []
+        return melody, bass
+    except Exception as e:
+        print(f"(note transcription unavailable: {e})", file=sys.stderr)
+        return [], []
+
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 # Krumhansl-Schmuckler key profiles (major, minor)
@@ -54,7 +136,12 @@ def main():
     ap.add_argument("audio")
     ap.add_argument("--sections", type=int, default=8, help="approx number of sections to find")
     ap.add_argument("--lyrics", action="store_true", help="also transcribe sung lyrics (faster-whisper, local)")
+    ap.add_argument("--stems", action="store_true", help="demucs stem separation + basic-pitch melody/bass MIDI (slower)")
     args = ap.parse_args()
+
+    # --- stems first (Phase 2): vocals/bass stems feed BOTH the note
+    # transcription and (when --lyrics) a cleaner whisper pass ---
+    stems, stems_tmp = separate_stems(args.audio) if args.stems else ({}, None)
 
     y, sr = librosa.load(args.audio, mono=True)
     dur = librosa.get_duration(y=y, sr=sr)
@@ -109,8 +196,10 @@ def main():
             from faster_whisper import WhisperModel
             model = WhisperModel("small", device="cpu", compute_type="int8")
             # NO speech-VAD: it classifies SINGING as non-speech and strips
-            # every segment (verified on a real render — 0 vs 20 segments)
-            segs, _info = model.transcribe(args.audio, vad_filter=False, beam_size=5)
+            # every segment (verified on a real render — 0 vs 20 segments).
+            # The isolated vocals stem (when available) transcribes cleaner
+            # than the full mix.
+            segs, _info = model.transcribe(stems.get("vocals", args.audio), vad_filter=False, beam_size=5)
             for s in segs:
                 text = s.text.strip()
                 if text:
@@ -118,6 +207,12 @@ def main():
         except Exception as e:  # missing dep / decode failure — never sink the analysis
             transcript = []
             print(f"(lyrics transcription unavailable: {e})", file=sys.stderr)
+
+    # --- melody + bass note events from the stems (basic-pitch, seconds) ---
+    melody_notes, bass_notes = transcribe_notes(stems) if stems else ([], [])
+    if stems_tmp:
+        import shutil
+        shutil.rmtree(stems_tmp, ignore_errors=True)
 
     out = {
         "duration_sec": round(dur, 2),
@@ -127,6 +222,8 @@ def main():
         "sections": sections,
         "bar_chords": bar_chords,
         "transcript": transcript,
+        "melody_notes": melody_notes,
+        "bass_notes": bass_notes,
         "note": "raw perception output — hand to the Reference Analyst skill for labeling + chord cleanup",
     }
     json.dump(out, sys.stdout, indent=2)

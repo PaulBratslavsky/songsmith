@@ -82,7 +82,7 @@ export type CommandMap = {
   list_outlines: { args: Record<string, never>; result: Outline[] };
   save_outline: { args: { name: string; bpm: number; sections: [string, number][] }; result: Outline };
   delete_outline: { args: { id: string }; result: null };
-  analyze_for_composer: { args: { audioPath: string }; result: { bpm: number; key_root: string; key_mode: string; sections: { label: string; bars: number; chords: { name: string; beats: number }[] }[] } };
+  analyze_for_composer: { args: { audioPath: string }; result: { bpm: number; key_root: string; key_mode: string; sections: { label: string; bars: number; chords: { name: string; beats: number }[] }[]; melody?: { start: number; end: number; midi: number; amp?: number }[]; bass?: { start: number; end: number; midi: number; amp?: number }[] } };
   read_audio_b64: { args: { path: string }; result: string };
   midi_list_inputs: { args: Record<string, never>; result: string[] };
   midi_open_input: { args: { index: number }; result: string };

@@ -52,6 +52,7 @@ import { parseLine } from '../chordpro';
 import type { ArtifactChord, ChordsData, ChordsSection, LyricsData } from '../../artifacts';
 import type { Section as SpineSection } from '../../../ipc/generated';
 import { matchBySpineRow } from '../../sections';
+import { noteSpansFromTranscription, type TranscribedNote } from './transcription';
 
 const uid = (() => {
   let n = 0;
@@ -107,7 +108,12 @@ function readChords(sec: { chords: ArtifactChord[] }): ArtifactChord[] {
  * sections) with fabricated section rows — no song is involved.
  */
 export function compositionFromAnalysis(
-  a: { bpm: number; key_root: string; key_mode: string; sections: { label: string; bars: number; chords: { name: string; beats: number }[] }[] },
+  a: {
+    bpm: number; key_root: string; key_mode: string;
+    sections: { label: string; bars: number; chords: { name: string; beats: number }[] }[];
+    /** Phase 2: transcribed note events (seconds) from the vocals/bass stems. */
+    melody?: TranscribedNote[]; bass?: TranscribedNote[];
+  },
   name: string,
 ): Composition | null {
   if (!a.sections.length) return null;
@@ -129,11 +135,22 @@ export function compositionFromAnalysis(
       chords: (s.chords ?? []).map((c) => ({ name: c.name, beats: Math.max(1, Number(c.beats) || 4) })),
     })),
   } as unknown as ChordsData;
-  return compositionFromSong(a.key_root, a.key_mode, chordsData, null, {
+  const comp = compositionFromSong(a.key_root, a.key_mode, chordsData, null, {
     id: `analysis-${name}`,
     name,
     bpm: Number(a.bpm) || undefined,
   }, rows);
+  // Phase 2: the transcribed melody/bass fold into the diatonic lanes — an
+  // editable sketch of what the AI sang/played, in the Composer's vocabulary.
+  if (a.melody?.length || a.bass?.length) {
+    const withNotes: Composition = {
+      ...comp,
+      melody: noteSpansFromTranscription(comp, a.melody ?? [], 'melody', comp.bpm),
+      bass: noteSpansFromTranscription(comp, a.bass ?? [], 'bass', comp.bpm),
+    };
+    return parseStoredComposition(withNotes) ?? withNotes;
+  }
+  return comp;
 }
 
 /**

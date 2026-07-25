@@ -16,7 +16,7 @@ export function FinalRenders({ songId }: { songId: string }) {
   const [anMsg, setAnMsg] = useState("");
   const analyzeToComposer = async (rd: { id: string; label: string; file_path: string; analysis: string }) => {
     setAnalyzing(rd.id);
-    setAnMsg(`Analyzing "${rd.label}" — tempo, key, chords, sections… (local, ~10-30s, then Claude cleans it up)`);
+    setAnMsg(`Analyzing "${rd.label}" — stems, tempo, key, chords, melody… (local, a few minutes, then Claude cleans it up)`);
     try {
       // imports stash their analysis on the render — instant open, no re-run
       const stored = (() => { try { const v = JSON.parse(rd.analysis || ""); return v?.sections ? v : null; } catch { return null; } })();

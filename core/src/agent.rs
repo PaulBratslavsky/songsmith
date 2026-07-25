@@ -576,14 +576,14 @@ pub async fn import_reference(conn: &Connection, settings: &Settings, audio_path
 /// out. `progress` narrates the long steps.
 pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio_path: &str, progress: &(dyn Fn(String) + Sync)) -> Result<String> {
     // 1. perception — analyzer + local whisper transcript
-    progress("Analyzing audio — tempo, key, chords, sections, lyrics… (local)".into());
-    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path, "lyrics": true })).await?;
+    progress("Analyzing audio — stems, tempo, key, chords, melody, lyrics… (local)".into());
+    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path, "lyrics": true, "stems": true })).await?;
 
     // 2. cognition — the Reference Analyst skill turns raw MIR into Structure + Chords
     progress("Interpreting the analysis (Reference Analyst)…".into());
     let skill = db::get_active_skill_for_stage(conn, "reference").await?
         .ok_or_else(|| anyhow!("the Reference Analyst skill is missing"))?;
-    let user = format!("Analyzer output (raw perception):\n\n{}", serde_json::to_string_pretty(&raw)?);
+    let user = format!("Analyzer output (raw perception):\n\n{}", serde_json::to_string_pretty(&strip_note_events(&raw))?);
     let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
     let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
@@ -695,7 +695,7 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     let file_name = std::path::Path::new(audio_path).file_name()
         .map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "import".into());
     if let Ok(rd) = db::create_render(conn, &song.id, &file_name, audio_path, "import", "the audio this song was imported from").await {
-        let summary = analysis_summary(&structure, chords_for_render);
+        let summary = analysis_summary(&structure, chords_for_render, &raw);
         let _ = db::set_render_analysis(conn, &rd.id, &summary.to_string()).await;
     }
 
@@ -1242,23 +1242,37 @@ pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, sty
 /// import_reference; the frontend builds a Composition from this and opens it
 /// against the audio.
 pub async fn analyze_for_composer(conn: &Connection, settings: &Settings, audio_path: &str) -> Result<Value> {
-    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path })).await?;
+    let raw = crate::tools::dispatch(conn, settings, "analyze_reference", &json!({ "audio_path": audio_path, "stems": true })).await?;
     let skill = db::get_active_skill_for_stage(conn, "reference").await?
         .ok_or_else(|| anyhow!("the Reference Analyst skill is missing"))?;
     let user = format!("Analyzer output (raw perception):
 
-{}", serde_json::to_string_pretty(&raw)?);
+{}", serde_json::to_string_pretty(&strip_note_events(&raw))?);
     let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
     let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
     let chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
-    Ok(analysis_summary(&structure, chords))
+    Ok(analysis_summary(&structure, chords, &raw))
+}
+
+/// The raw analyzer output minus the (huge) per-note event arrays — what the
+/// Reference Analyst prompt gets. The notes are for the Composer's lanes, not
+/// for Claude; 1500 events would drown the musical reasoning (and the context).
+fn strip_note_events(raw: &Value) -> Value {
+    let mut v = raw.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("melody_notes");
+        o.remove("bass_notes");
+    }
+    v
 }
 
 /// The Composer-ready analysis summary: real tempo/key + section map with
-/// per-section chords. Shared by analyze_for_composer AND the importer (which
-/// stashes it on the render so Analyze → Composer is instant afterward).
-fn analysis_summary(structure: &Value, mut chords: Value) -> Value {
+/// per-section chords, plus the transcribed melody/bass note events (seconds —
+/// the Composer converts to ticks with the summary's bpm). Shared by
+/// analyze_for_composer AND the importer (which stashes it on the render so
+/// Analyze → Composer is instant afterward).
+fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value {
     crate::freeze::normalize_chord_entries(&mut chords);
     let chord_secs = chords.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let sections: Vec<Value> = structure.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default()
@@ -1278,6 +1292,8 @@ fn analysis_summary(structure: &Value, mut chords: Value) -> Value {
         "key_root": structure.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("A"),
         "key_mode": structure.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("minor"),
         "sections": sections,
+        "melody": raw.get("melody_notes").cloned().unwrap_or_else(|| json!([])),
+        "bass": raw.get("bass_notes").cloned().unwrap_or_else(|| json!([])),
     })
 }
 
