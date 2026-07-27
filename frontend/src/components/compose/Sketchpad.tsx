@@ -102,6 +102,7 @@ export function Sketchpad({
   initial,
   songId = null,
   audioPath = null,
+  audioNudgeMs = 0,
   savedRowIdHint = null,
 }: {
   initialRoot?: PitchClass;
@@ -114,6 +115,9 @@ export function Sketchpad({
   /** Phase 1 render round-trip: a local audio file to play ALIGNED with the
    *  grid (the Suno render this composition was analyzed from). */
   audioPath?: string | null;
+  /** Auto-alignment: the analysis' first-downbeat offset (ms) — seeds the
+   *  nudge so the render arrives already lined up with bar 1. */
+  audioNudgeMs?: number;
   /** When `initial` came from a saved library row, bind saves to it. */
   savedRowIdHint?: string | null;
 }) {
@@ -233,7 +237,7 @@ export function Sketchpad({
 
   // Phase 1 render round-trip: the analyzed render's audio follows the
   // transport so you rebuild the AI song against the real thing
-  const renderAudio = useRenderAudio(audioPath, comp.bpm, isPlaying, currentStep);
+  const renderAudio = useRenderAudio(audioPath, comp.bpm, isPlaying, currentStep, audioNudgeMs);
   useEffect(() => {
     renderAudio.setEnabled(ab !== 'mine'); // A/B drives the render side too
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setEnabled is stable

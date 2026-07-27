@@ -42,14 +42,16 @@ function useProgParam(): { chords: string[]; root?: string; mode?: string } | nu
 /** Read `?comp=<saved id>` (open a saved composition directly — the render
  *  round-trip lands here) and `?audio=<path>` (align this audio file in the
  *  Composer for reference playback). */
-function useCompAudioParams(): { compId: string | null; audio: string | null } {
+function useCompAudioParams(): { compId: string | null; audio: string | null; nudgeMs: number } {
   const search = useRouterState({ select: (s) => s.location.search });
   const get = (k: string): string | null => {
     if (typeof search === "string") return new URLSearchParams(search).get(k);
     const v = (search as Record<string, unknown> | undefined)?.[k];
-    return typeof v === "string" && v ? v : null;
+    return typeof v === "string" && v ? v : typeof v === "number" ? String(v) : null;
   };
-  return { compId: get("comp"), audio: get("audio") };
+  // `?nudge=<ms>` — the analysis knows the first downbeat, so the render
+  // arrives pre-aligned to bar 1 instead of the user dialing ms by ear
+  return { compId: get("comp"), audio: get("audio"), nudgeMs: Number(get("nudge")) || 0 };
 }
 
 /** Fetch a song's chords+lyrics and build a full-song Composition. */
@@ -108,7 +110,7 @@ function useSongComposition(songId: string | null): {
 export function ComposerRoute() {
   const songId = useSongParam();
   const { comp: songComp, title, loading } = useSongComposition(songId);
-  const { compId, audio } = useCompAudioParams();
+  const { compId, audio, nudgeMs } = useCompAudioParams();
   const savedComp = useQuery({ queryKey: ["composition", compId], queryFn: () => api.getComposition(compId!), enabled: !!compId });
   const openedComp = useMemo(() => {
     if (!savedComp.data) return null;
@@ -145,7 +147,7 @@ export function ComposerRoute() {
           This song has no chords yet — run the <b>Chords</b> stage first, then open it in the Composer.
         </div>
       ) : (
-        <Sketchpad key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} audioPath={openedComp ? audio : null} savedRowIdHint={openedComp ? compId : null} />
+        <Sketchpad key={comp?.id ?? "blank"} initialRoot={initialRoot} initial={comp} songId={comp ? songId : null} audioPath={openedComp ? audio : null} audioNudgeMs={openedComp ? nudgeMs : 0} savedRowIdHint={openedComp ? compId : null} />
       )}
     </div>
   );

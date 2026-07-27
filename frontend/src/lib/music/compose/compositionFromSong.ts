@@ -115,19 +115,32 @@ export function compositionFromAnalysis(
     melody?: TranscribedNote[]; bass?: TranscribedNote[];
   },
   name: string,
+  /** The owning song's SPINE (iteration loop): when an analysis section's
+   *  label matches a spine row, the Composition section carries that row's
+   *  REAL id — so "export back to song" maps the rebuild onto the song
+   *  instead of orphaned `an-N` ids. Imported songs match 1:1 (spine and
+   *  analysis come from the same Reference Analyst run); unmatched sections
+   *  keep fabricated ids and export-back falls back to label matching. */
+  spine: readonly SpineSection[] = [],
 ): Composition | null {
   if (!a.sections.length) return null;
-  const rows = a.sections.map((s, i) => ({
-    id: `an-${i}`,
-    song_id: "",
-    position: i,
-    label: s.label,
-    type: "",
-    bars: Math.max(1, Number(s.bars) || 8),
-    role: "",
-    created_at: "",
-    updated_at: "",
-  })) as unknown as SpineSection[];
+  const norm = (s: string) => s.trim().toLowerCase();
+  const used = new Set<string>();
+  const rows = a.sections.map((s, i) => {
+    const match = spine.find((r) => !used.has(r.id) && norm(r.label) === norm(s.label));
+    if (match) used.add(match.id);
+    return {
+      id: match?.id ?? `an-${i}`,
+      song_id: "",
+      position: i,
+      label: s.label,
+      type: "",
+      bars: Math.max(1, Number(s.bars) || 8),
+      role: "",
+      created_at: "",
+      updated_at: "",
+    };
+  }) as unknown as SpineSection[];
   const chordsData = {
     sections: a.sections.map((s, i) => ({
       section_id: `an-${i}`,

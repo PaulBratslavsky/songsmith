@@ -4,6 +4,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { compositionFromAnalysis } from "../lib/music/compose/compositionFromSong";
 import { CompositionSchema } from "../lib/music/compose/schema";
 import { api, pickAudioFile, openFile, revealFile, inTauri } from "../ipc/api";
+import { useSpineSections } from "../lib/sections";
+import { RenderAB } from "./RenderAB";
 
 const baseName = (p: string) => p.split("/").pop() ?? p;
 
@@ -14,6 +16,9 @@ export function FinalRenders({ songId }: { songId: string }) {
   // save it as a linked composition, open the Composer against the audio
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [anMsg, setAnMsg] = useState("");
+  // the song's spine links analyzed sections to REAL section ids, so a
+  // Composer rebuild of this render can export back onto the song
+  const { sections: spineSections } = useSpineSections(songId);
   const analyzeToComposer = async (rd: { id: string; label: string; file_path: string; analysis: string }) => {
     setAnalyzing(rd.id);
     setAnMsg(`Analyzing "${rd.label}" — stems, tempo, key, chords, melody… (local, a few minutes, then Claude cleans it up)`);
@@ -21,11 +26,14 @@ export function FinalRenders({ songId }: { songId: string }) {
       // imports stash their analysis on the render — instant open, no re-run
       const stored = (() => { try { const v = JSON.parse(rd.analysis || ""); return v?.sections ? v : null; } catch { return null; } })();
       const a = stored ?? (await api.analyzeForComposer(rd.file_path));
-      const comp = compositionFromAnalysis(a, `${rd.label} (analyzed)`);
+      const comp = compositionFromAnalysis(a, `${rd.label} (analyzed)`, spineSections);
       if (!comp) throw new Error("the analysis found no sections");
       const saved = await api.saveComposition(null, `${rd.label} (analyzed)`, songId, JSON.stringify(CompositionSchema.parse(comp)));
       setAnMsg("");
-      nav({ to: "/composer", search: { comp: saved.id, audio: rd.file_path } as never });
+      // the analysis' first section start = the first downbeat — the audio
+      // arrives pre-aligned to bar 1 (the nudge stays hand-tunable)
+      const nudge = Math.round(((a.sections?.[0] as { start_sec?: number } | undefined)?.start_sec ?? 0) * 1000);
+      nav({ to: "/composer", search: { comp: saved.id, audio: rd.file_path, ...(nudge ? { nudge } : {}) } as never });
     } catch (e: any) {
       setAnMsg(`Analysis failed: ${String(e?.message ?? e)}`);
     }
@@ -71,6 +79,9 @@ export function FinalRenders({ songId }: { songId: string }) {
       {renders.data && renders.data.length === 0 && (
         <div className="empty">No renders yet — generate audio from the prompt, then add the file here.</div>
       )}
+
+      {/* iteration loop: v1 vs v2 in sync — flip at the same position */}
+      {inTauri && renders.data && renders.data.length >= 2 && <RenderAB renders={renders.data} />}
 
       {renders.data?.map((rd) => (
         <div key={rd.id} className="list-item" style={{ marginTop: 8, borderColor: rd.is_pick ? "var(--accent-dim)" : undefined }}>

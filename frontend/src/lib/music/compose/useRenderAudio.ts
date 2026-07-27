@@ -12,10 +12,11 @@ export function useRenderAudio(
   bpm: number,
   isPlaying: boolean,
   currentStep: number | null,
+  initialNudgeMs = 0,
 ) {
   const [buffer, setBuffer] = useState<AudioBuffer | null>(null);
   const [enabled, setEnabled] = useState(true);
-  const [nudgeMs, setNudgeMs] = useState(0);
+  const [nudgeMs, setNudgeMs] = useState(initialNudgeMs);
   const [gain, setGain] = useState(0.9);
   const [err, setErr] = useState('');
   const ctxRef = useRef<AudioContext | null>(null);
