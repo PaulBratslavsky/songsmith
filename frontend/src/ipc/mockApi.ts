@@ -815,6 +815,8 @@ const handlers: MockHandlers = {
   delete_render: (a) => { db.renders = db.renders.filter((x: Any) => x.id !== a.id); },
   import_reference: () => db.songs[0]?.id ?? null, // mock: just open the demo song
   resume_import: () => "Nothing was missing — the import is already complete.",
+  run_doctor: () => [{ name: "Mock mode", status: "warn" as const, detail: "environment checks need the desktop app" }],
+  install_ableton_script: () => { throw new Error("installing the Ableton script needs the desktop app"); },
   // paste-lyrics import (words verbatim; mock = deterministic header split only)
   parse_pasted_lyrics: (a) => parsePastedLyrics(a.text ?? ""),
   import_lyrics: (a) => { importLyricsIntoSong(a.songId, a.text ?? ""); },

@@ -119,6 +119,112 @@ async fn import_reference(app: tauri::AppHandle, state: State<'_, AppState>, aud
     };
     song_core::agent::import_reference_full(&state.conn, &settings, &audio_path, &progress).await.map_err(e2s)
 }
+// ---- Setup doctor (Task B, 2026-07-27): first-run environment checks + the
+// bundled AbletonMCP Remote Script installer, so the app works beyond the dev
+// machine without hand-patching. The script ships INSIDE the binary.
+const ABLETON_SCRIPT: &str = include_str!("../resources/AbletonMCP_init.py");
+
+#[derive(serde::Serialize)]
+struct DoctorCheck { name: String, status: String, detail: String }
+
+fn ableton_live_dirs() -> Vec<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let base = std::path::Path::new(&home).join("Library/Preferences/Ableton");
+    std::fs::read_dir(&base).map(|rd| {
+        rd.flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("Live ") && e.path().is_dir())
+            .map(|e| e.path())
+            .collect()
+    }).unwrap_or_default()
+}
+
+#[tauri::command]
+async fn run_doctor(state: State<'_, AppState>) -> R<Vec<DoctorCheck>> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    let mut out: Vec<DoctorCheck> = vec![];
+    let check = |name: &str, status: &str, detail: String| DoctorCheck { name: name.into(), status: status.into(), detail };
+
+    // 1. Claude CLI (subscription login — the whole harness rides on it)
+    let bin = if settings.claude_bin.trim().is_empty() { "claude".to_string() } else { settings.claude_bin.clone() };
+    let claude = tokio::time::timeout(std::time::Duration::from_secs(10), {
+        let mut c = tokio::process::Command::new(&bin);
+        c.arg("--version").env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
+        c.output()
+    }).await;
+    out.push(match claude {
+        Ok(Ok(o)) if o.status.success() => check("Claude CLI", "ok", String::from_utf8_lossy(&o.stdout).trim().to_string()),
+        Ok(Ok(o)) => check("Claude CLI", "fail", format!("`{bin} --version` failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Ok(Err(e)) => check("Claude CLI", "fail", format!("could not run {bin}: {e} — install Claude Code and sign in")),
+        Err(_) => check("Claude CLI", "warn", "`--version` timed out (10s)".into()),
+    });
+
+    // 2. Analyzer command + its Python deps (imports are slow — torch)
+    if settings.analyzer_cmd.trim().is_empty() {
+        out.push(check("Reference analyzer", "warn", "not configured — audio import/analysis is off (Settings → Reference analyzer)".into()));
+    } else {
+        let program = settings.analyzer_cmd.split_whitespace().next().unwrap_or("").to_string();
+        if !std::path::Path::new(&program).exists() {
+            out.push(check("Reference analyzer", "fail", format!("{program} does not exist")));
+        } else {
+            let deps = tokio::time::timeout(std::time::Duration::from_secs(120), {
+                let mut c = tokio::process::Command::new(&program);
+                c.arg("-c").arg("import librosa, faster_whisper, demucs, basic_pitch; print('ok')");
+                c.output()
+            }).await;
+            out.push(match deps {
+                Ok(Ok(o)) if o.status.success() => check("Reference analyzer", "ok", "librosa + whisper + demucs + basic-pitch importable".into()),
+                Ok(Ok(o)) => check("Reference analyzer", "fail", format!("missing Python deps: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").trim())),
+                Ok(Err(e)) => check("Reference analyzer", "fail", format!("could not run {program}: {e}")),
+                Err(_) => check("Reference analyzer", "warn", "dependency import timed out (120s)".into()),
+            });
+        }
+    }
+
+    // 3. AbletonMCP Remote Script — per Live install: missing / outdated / ok
+    let dirs = ableton_live_dirs();
+    if dirs.is_empty() {
+        out.push(check("Ableton Remote Script", "warn", "no Ableton Live preferences found — install Live first (Ableton builds are off until then)".into()));
+    } else {
+        for d in &dirs {
+            let live = d.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let p = d.join("User Remote Scripts/AbletonMCP/__init__.py");
+            let status = match std::fs::read_to_string(&p) {
+                Err(_) => ("fail", "AbletonMCP script missing — click Install below".to_string()),
+                Ok(src) if !src.contains("create_audio_track") => ("warn", "script outdated (no audio-track support) — click Install below".to_string()),
+                Ok(_) => ("ok", "patched script installed (enable it as a Control Surface in Live)".to_string()),
+            };
+            out.push(check(&format!("Ableton Remote Script ({live})"), status.0, status.1));
+        }
+    }
+
+    // 4. Music folder (renders home)
+    if settings.music_folder.trim().is_empty() {
+        out.push(check("Music folder", "warn", "not set — + Add version won't have a home folder (Settings → Music folder)".into()));
+    } else {
+        out.push(check("Music folder", "ok", settings.music_folder.clone()));
+    }
+    Ok(out)
+}
+
+/// Write the bundled (patched) AbletonMCP Remote Script into every Live
+/// install's User Remote Scripts. Live must be restarted (or the control
+/// surface toggled) afterward.
+#[tauri::command]
+async fn install_ableton_script() -> R<String> {
+    let dirs = ableton_live_dirs();
+    if dirs.is_empty() {
+        return Err("no Ableton Live preferences found under ~/Library/Preferences/Ableton".into());
+    }
+    let mut done = vec![];
+    for d in &dirs {
+        let target = d.join("User Remote Scripts/AbletonMCP");
+        std::fs::create_dir_all(&target).map_err(e2s)?;
+        std::fs::write(target.join("__init__.py"), ABLETON_SCRIPT).map_err(e2s)?;
+        done.push(d.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+    }
+    Ok(format!("Installed the patched AbletonMCP script for {} — restart Live (or toggle the AbletonMCP control surface) to load it.", done.join(", ")))
+}
+
 #[tauri::command]
 async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
@@ -1200,6 +1306,8 @@ pub fn run() {
             union_spine_sections,
             import_reference,
             resume_import,
+            run_doctor,
+            install_ableton_script,
             parse_pasted_lyrics,
             import_lyrics,
             create_song_from_lyrics,

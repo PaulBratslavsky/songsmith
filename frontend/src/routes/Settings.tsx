@@ -322,6 +322,8 @@ export function SettingsPage() {
             </div>
           </div>
 
+          <DoctorCard />
+
           <div className="card">
             <h2>Music.AI lyrics <span className="badge pending">add-on</span></h2>
             <p className="muted">
@@ -356,6 +358,65 @@ export function SettingsPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** 🩺 Setup doctor: one-click environment checks (Claude CLI, analyzer
+ *  deps, Ableton Remote Script per Live install, music folder) + the
+ *  bundled-script installer, so a fresh machine sets itself up from
+ *  inside the app instead of hand-patching. */
+function DoctorCard() {
+  const [checks, setChecks] = useState<{ name: string; status: "ok" | "warn" | "fail"; detail: string }[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const run = async () => {
+    setBusy(true);
+    setMsg("Checking (the analyzer import test can take a minute)…");
+    try {
+      setChecks(await api.runDoctor());
+      setMsg("");
+    } catch (e: any) {
+      setMsg(String(e?.message ?? e));
+    }
+    setBusy(false);
+  };
+  const install = async () => {
+    setBusy(true);
+    try {
+      setMsg(await api.installAbletonScript());
+      setChecks(await api.runDoctor());
+    } catch (e: any) {
+      setMsg(String(e?.message ?? e));
+    }
+    setBusy(false);
+  };
+  const icon = (s: string) => (s === "ok" ? "✅" : s === "warn" ? "⚠️" : "❌");
+  const needsScript = checks?.some((c) => c.name.startsWith("Ableton Remote Script") && c.status !== "ok");
+  return (
+    <div className="card">
+      <h2>🩺 Setup doctor</h2>
+      <p className="muted">Checks everything Songsmith needs on this machine: the Claude CLI login, the local analyzer's Python deps, the Ableton Remote Script (per Live install), and the music folder.</p>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="primary" disabled={busy} onClick={() => void run()}>{busy ? "checking…" : checks ? "Re-run checks" : "Run checks"}</button>
+        {needsScript && (
+          <button disabled={busy} onClick={() => void install()} title="write the bundled (patched) AbletonMCP script into every Live install — restart Live afterward">
+            🎛 Install Ableton script
+          </button>
+        )}
+      </div>
+      {msg && <p className="faint" style={{ marginTop: 8 }}>{msg}</p>}
+      {checks && (
+        <div className="col" style={{ gap: 4, marginTop: 10 }}>
+          {checks.map((c) => (
+            <div key={c.name} className="row" style={{ gap: 8, alignItems: "baseline" }}>
+              <span>{icon(c.status)}</span>
+              <b style={{ fontSize: 12, whiteSpace: "nowrap" }}>{c.name}</b>
+              <span className="faint" style={{ fontSize: 11 }}>{c.detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
