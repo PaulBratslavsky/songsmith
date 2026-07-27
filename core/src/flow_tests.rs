@@ -695,3 +695,173 @@ async fn flow_approve_gates_advancement_only() {
     let concept_cur = db::current_artifact(&conn, &concept.id).await.unwrap().unwrap();
     assert!(concept_cur.approved, "the approved concept revision stays approved");
 }
+
+// ---- Scenario 9 — RESUME IMPORT (the import error-handling contract) -------
+//
+// import_reference_full's failure modes leave a song with pending stages and
+// an import render carrying the stashed analysis; `resume_import` must finish
+// the job deterministically. These tests exercise the resume paths with NO
+// analyzer and a fake Claude: stash-rebuild, honest-empty, idempotence, and
+// the bar-cumsum timing fallback for pre-start_sec stashes.
+
+/// Prefill a stage with a minimal current artifact (resume only checks
+/// presence; content shape is irrelevant to these scenarios except concept's
+/// theme, which feeds the intent fill).
+async fn prefill(conn: &Connection, song_id: &str, stage_id: &str, kind: &str, data: Value) {
+    let content = json!({ "kind": kind, "text": "x", "data": data }).to_string();
+    db::save_artifact(conn, song_id, Some(stage_id), kind, &content).await.unwrap();
+}
+
+/// Song + 3-section spine + every stage EXCEPT lyrics prefilled + an import
+/// render with the given stashed analysis. Returns (song, spine rows).
+async fn resume_fixture(conn: &Connection, title: &str, analysis: &Value) -> (Song, Vec<Section>) {
+    let song = make_song(conn, title).await;
+    let song = db::update_song_key(conn, &song.id, "A", "minor", 120).await.unwrap();
+    for (label, bars) in [("Verse 1", 8i64), ("Chorus", 8), ("Outro", 4)] {
+        db::create_section(conn, &song.id, label, "", bars, "", None).await.unwrap();
+    }
+    let rows = db::list_sections(conn, &song.id).await.unwrap();
+    for t in ["concept", "structure", "chords", "lyric_spec", "prompt"] {
+        let data = if t == "concept" { json!({ "theme": "neon heartbreak honesty" }) } else { json!({}) };
+        prefill(conn, &song.id, &stage_of(conn, &song.id, t).await.id, t, data).await;
+    }
+    let rd = db::create_render(conn, &song.id, "take.wav", "/nonexistent/take.wav", "import", "").await.unwrap();
+    db::set_render_analysis(conn, &rd.id, &analysis.to_string()).await.unwrap();
+    (song, rows)
+}
+
+fn lyric_lines(a: &Artifact, label: &str) -> Vec<String> {
+    content(a)["data"]["sections"].as_array().unwrap().iter()
+        .find(|s| s["label"] == label)
+        .and_then(|s| s["lines"].as_array())
+        .map(|l| l.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Stash rebuild: a missing Lyrics stage fills from the render's stashed
+/// transcript by start_sec window — no Claude, no analyzer — then everything
+/// approves and the intent fills from the concept.
+#[tokio::test]
+async fn flow_resume_rebuilds_lyrics_from_stashed_transcript() {
+    let (_db, conn) = mem_conn().await;
+    let fake = FakeClaude::new();
+    let analysis = json!({
+        "bpm": 120, "key_root": "A", "key_mode": "minor",
+        "sections": [
+            { "label": "Verse 1", "bars": 8, "start_sec": 0.0 },
+            { "label": "Chorus", "bars": 8, "start_sec": 10.0 },
+            { "label": "Outro", "bars": 4, "start_sec": 20.0 },
+        ],
+        "transcript": [
+            { "start": 1.0, "end": 2.0, "text": "first verse line" },
+            { "start": 11.0, "end": 12.0, "text": "chorus line one" },
+            { "start": 12.5, "end": 13.5, "text": "chorus line two" },
+        ],
+    });
+    let (song, rows) = resume_fixture(&conn, "Resume Stash", &analysis).await;
+
+    let msg = agent::resume_import(&conn, &fake.settings, &song.id, &|_| {}).await.unwrap();
+    assert!(msg.contains("fixed") && msg.contains("lyrics"), "summary names the lyric rebuild: {msg}");
+
+    let lyr = stage_of(&conn, &song.id, "lyrics").await;
+    let a = db::current_artifact(&conn, &lyr.id).await.unwrap().expect("lyrics artifact rebuilt");
+    assert_eq!(lyric_lines(&a, "Verse 1"), vec!["first verse line"]);
+    assert_eq!(lyric_lines(&a, "Chorus"), vec!["chorus line one", "chorus line two"]);
+    assert!(lyric_lines(&a, "Outro").is_empty(), "no transcript lines landed in Outro");
+    // sections keyed to the REAL spine ids
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    for s in content(&a)["data"]["sections"].as_array().unwrap() {
+        assert!(ids.contains(&s["section_id"].as_str().unwrap()), "lyric section keyed to a spine id");
+    }
+    // everything with content approved; intent filled from the concept theme
+    for t in ["concept", "structure", "chords", "lyric_spec", "lyrics", "prompt"] {
+        assert_eq!(stage_status(&conn, &stage_of(&conn, &song.id, t).await.id).await, "done", "{t} approved");
+    }
+    assert_eq!(db::get_song(&conn, &song.id).await.unwrap().unwrap().intent, "neon heartbreak honesty");
+}
+
+/// Honest empty: no stashed transcript and no analyzer configured — resume
+/// leaves Lyrics pending, says so in the summary, and still approves the
+/// stages that have content (partial completion is real completion).
+#[tokio::test]
+async fn flow_resume_honest_when_nothing_transcribable() {
+    let (_db, conn) = mem_conn().await;
+    let fake = FakeClaude::new(); // analyzer_cmd is empty in Settings::default
+    let analysis = json!({
+        "bpm": 120, "key_root": "A", "key_mode": "minor",
+        "sections": [ { "label": "Verse 1", "bars": 8, "start_sec": 0.0 } ],
+        "transcript": [],
+    });
+    let (song, _rows) = resume_fixture(&conn, "Resume Empty", &analysis).await;
+
+    let msg = agent::resume_import(&conn, &fake.settings, &song.id, &|_| {}).await.unwrap();
+    assert!(msg.contains("Still failing") && msg.contains("lyrics"), "summary is honest: {msg}");
+
+    let lyr = stage_of(&conn, &song.id, "lyrics").await;
+    assert!(db::current_artifact(&conn, &lyr.id).await.unwrap().is_none(), "no fake lyrics invented");
+    assert_eq!(stage_status(&conn, &lyr.id).await, "pending", "lyrics stays pending (the ⟳ banner trigger)");
+    assert_eq!(stage_status(&conn, &stage_of(&conn, &song.id, "prompt").await.id).await, "done", "content stages still approved");
+}
+
+/// Idempotence: resuming a COMPLETE import changes nothing — no new
+/// revisions, no status churn, and the summary says so.
+#[tokio::test]
+async fn flow_resume_is_idempotent_on_complete_song() {
+    let (_db, conn) = mem_conn().await;
+    let fake = FakeClaude::new();
+    let analysis = json!({ "sections": [], "transcript": [] });
+    let (song, rows) = resume_fixture(&conn, "Resume Done", &analysis).await;
+    // a truly complete import also has its intent (resume would fill it)
+    db::update_song_intent(&conn, &song.id, "already intentional").await.unwrap();
+    // fill lyrics too, approve everything → a fully complete import
+    prefill(&conn, &song.id, &stage_of(&conn, &song.id, "lyrics").await.id, "lyrics",
+        json!({ "sections": [{ "section_id": rows[0].id, "label": "Verse 1", "lines": ["already here"] }] })).await;
+    for st in db::list_stages(&conn, &song.id).await.unwrap() {
+        tools::approve_stage(&conn, &st.id).await.unwrap();
+    }
+    let versions_before: Vec<i64> = {
+        let mut v = vec![];
+        for st in db::list_stages(&conn, &song.id).await.unwrap() {
+            v.push(db::current_artifact(&conn, &st.id).await.unwrap().map(|a| a.version).unwrap_or(0));
+        }
+        v
+    };
+
+    let msg = agent::resume_import(&conn, &fake.settings, &song.id, &|_| {}).await.unwrap();
+    assert!(msg.contains("Nothing was missing"), "idempotent summary: {msg}");
+    let versions_after: Vec<i64> = {
+        let mut v = vec![];
+        for st in db::list_stages(&conn, &song.id).await.unwrap() {
+            v.push(db::current_artifact(&conn, &st.id).await.unwrap().map(|a| a.version).unwrap_or(0));
+        }
+        v
+    };
+    assert_eq!(versions_before, versions_after, "no artifact churn");
+}
+
+/// Bar-cumsum fallback: a pre-start_sec stash (old imports) still places
+/// lyrics — section times derive from cumulative bars at the song's BPM
+/// (120 BPM ⇒ 2s/bar: Verse 1 = 0–16s, Chorus = 16–32s, Outro = 32s+).
+#[tokio::test]
+async fn flow_resume_bar_cumsum_timing_fallback() {
+    let (_db, conn) = mem_conn().await;
+    let fake = FakeClaude::new();
+    let analysis = json!({
+        "bpm": 120, "key_root": "A", "key_mode": "minor",
+        "sections": [
+            { "label": "Verse 1", "bars": 8 }, { "label": "Chorus", "bars": 8 }, { "label": "Outro", "bars": 4 },
+        ],
+        "transcript": [
+            { "start": 3.0, "end": 4.0, "text": "verse words" },
+            { "start": 17.0, "end": 18.0, "text": "chorus words" },
+            { "start": 33.0, "end": 34.0, "text": "outro words" },
+        ],
+    });
+    let (song, _rows) = resume_fixture(&conn, "Resume Cumsum", &analysis).await;
+
+    agent::resume_import(&conn, &fake.settings, &song.id, &|_| {}).await.unwrap();
+    let a = db::current_artifact(&conn, &stage_of(&conn, &song.id, "lyrics").await.id).await.unwrap().unwrap();
+    assert_eq!(lyric_lines(&a, "Verse 1"), vec!["verse words"]);
+    assert_eq!(lyric_lines(&a, "Chorus"), vec!["chorus words"]);
+    assert_eq!(lyric_lines(&a, "Outro"), vec!["outro words"]);
+}
