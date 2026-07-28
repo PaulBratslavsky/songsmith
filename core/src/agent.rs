@@ -1510,6 +1510,8 @@ fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value 
         "sections": sections,
         "melody": raw.get("melody_notes").cloned().unwrap_or_else(|| json!([])),
         "bass": raw.get("bass_notes").cloned().unwrap_or_else(|| json!([])),
+        // measured first-downbeat (analyzer v2) — the Composer's auto-nudge
+        "first_downbeat_sec": raw.get("first_downbeat_sec").cloned().unwrap_or(Value::Null),
         // the transcript rides along so a resumed import can rebuild Lyrics
         // without re-running whisper
         "transcript": raw.get("transcript").cloned().unwrap_or_else(|| json!([])),

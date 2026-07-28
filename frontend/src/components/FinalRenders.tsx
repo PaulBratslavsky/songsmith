@@ -30,9 +30,13 @@ export function FinalRenders({ songId }: { songId: string }) {
       if (!comp) throw new Error("the analysis found no sections");
       const saved = await api.saveComposition(null, `${rd.label} (analyzed)`, songId, JSON.stringify(CompositionSchema.parse(comp)));
       setAnMsg("");
-      // the analysis' first section start = the first downbeat — the audio
-      // arrives pre-aligned to bar 1 (the nudge stays hand-tunable)
-      const nudge = Math.round(((a.sections?.[0] as { start_sec?: number } | undefined)?.start_sec ?? 0) * 1000);
+      // the measured first downbeat (analyzer v2; older analyses fall back
+      // to section 1's start) — the audio arrives pre-aligned to bar 1
+      const nudge = Math.round(
+        ((a as { first_downbeat_sec?: number }).first_downbeat_sec
+          ?? (a.sections?.[0] as { start_sec?: number } | undefined)?.start_sec
+          ?? 0) * 1000,
+      );
       nav({ to: "/composer", search: { comp: saved.id, audio: rd.file_path, ...(nudge ? { nudge } : {}) } as never });
     } catch (e: any) {
       setAnMsg(`Analysis failed: ${String(e?.message ?? e)}`);

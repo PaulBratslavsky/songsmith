@@ -32,6 +32,11 @@ def separate_stems(audio_path):
             p = str(pathlib.Path(tmp) / f"{name}.wav")
             save_audio(separated[name], p, samplerate=sep.samplerate)
             out[name] = p
+        # drum-free mix (vocals+bass+other): drums smear chroma — chord/key
+        # detection runs on THIS when available (analyzer v2, 2026-07-28)
+        p = str(pathlib.Path(tmp) / "nodrums.wav")
+        save_audio(separated["vocals"] + separated["bass"] + separated["other"], p, samplerate=sep.samplerate)
+        out["nodrums"] = p
         return out, tmp
     except Exception as e:  # torch missing / OOM / decode — degrade, never sink
         print(f"(stem separation unavailable: {e})", file=sys.stderr)
@@ -62,6 +67,28 @@ def mono_clean(events, min_dur=0.08, min_amp=0.12):
     return out
 
 
+def energy_gate(events, stem_path):
+    """Drop note events whose window is essentially SILENT in the stem.
+    basic-pitch reports model confidence, not loudness — a near-silent stem
+    (demucs misfiling, reverb tails) still yields hundreds of ghost notes
+    (verified: 823 'melody notes' from a near-silent vocals stem)."""
+    if not events:
+        return events
+    y, sr = librosa.load(stem_path, mono=True)
+    rms = librosa.feature.rms(y=y)[0]
+    hop = 512
+    thr = max(0.004, 0.06 * float(np.percentile(rms, 95)))
+    out = []
+    for e in events:
+        a = int(e["start"] * sr / hop)
+        b = min(len(rms), max(a + 1, int(e["end"] * sr / hop)))
+        if a < len(rms) and float(np.mean(rms[a:b])) >= thr:
+            out.append(e)
+    if len(out) < len(events):
+        print(f"(energy gate dropped {len(events) - len(out)}/{len(events)} silent-window notes)", file=sys.stderr)
+    return out
+
+
 def transcribe_notes(stems):
     """basic-pitch (ONNX) on the vocals + bass stems → melody/bass note events
     [{start, end, midi, amp}] in seconds. Empty lists on any failure."""
@@ -86,7 +113,7 @@ def transcribe_notes(stems):
             evs = [{"start": round(float(s), 3), "end": round(float(e), 3),
                     "midi": int(p), "amp": round(float(a), 3)}
                    for (s, e, p, a, _bends) in events]
-            return mono_clean(evs)[:1500]
+            return mono_clean(energy_gate(evs, path))[:1500]
 
         print("transcribing melody + bass (basic-pitch)…", file=sys.stderr)
         melody = notes_from(stems["vocals"], 80.0, 1100.0) if "vocals" in stems else []
@@ -151,22 +178,75 @@ def main():
     tempo = float(np.atleast_1d(tempo)[0])
     beat_times = librosa.frames_to_time(beats, sr=sr)
 
-    # --- chroma (beat-synced) ---
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    # --- chroma (beat-synced) — from the DRUM-FREE mix when stems exist:
+    # kicks/hats smear the harmonic profile (analyzer v2) ---
+    y_harm = y
+    if "nodrums" in stems:
+        y_harm, _ = librosa.load(stems["nodrums"], sr=sr, mono=True)
+        y_harm = y_harm[:len(y)] if len(y_harm) > len(y) else y_harm
+    chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr)
     key = estimate_key(chroma.mean(axis=1))
     beat_chroma = librosa.util.sync(chroma, beats, aggregate=np.median)
 
-    # --- bar-level chords (assume 4/4: 4 beats per bar) ---
+    # --- beat-level chord scores: triad templates + a BASS-ROOT bonus (the
+    # bass stem knows the root better than mid-register chroma — Cm/Eb/Ab
+    # confusions are root confusions), then a stay-put smoothing pass so one
+    # noisy beat can't flip a chord (flicker) while real changes still win ---
     tmpl, labels = triad_templates()
     nbeats = beat_chroma.shape[1]
+    normed = beat_chroma / (np.linalg.norm(beat_chroma, axis=0, keepdims=True) + 1e-9)
+    scores = tmpl @ normed  # 24 × nbeats
+    if "bass" in stems and nbeats > 0:
+        yb, _ = librosa.load(stems["bass"], sr=sr, mono=True)
+        bsync = librosa.util.sync(librosa.feature.chroma_cqt(y=yb, sr=sr), beats, aggregate=np.median)
+        for b in range(min(nbeats, bsync.shape[1])):
+            col = bsync[:, b]
+            if float(col.max()) > 1e-4:  # silent bass beat → no opinion
+                pc = int(np.argmax(col))
+                scores[2 * pc, b] += 0.12      # major triad rooted on the bass pc
+                scores[2 * pc + 1, b] += 0.12  # minor triad rooted on the bass pc
+    STAY = 0.10
+    if nbeats > 0:
+        dp = scores[:, 0].copy()
+        back = np.zeros((24, nbeats), dtype=int)
+        for b in range(1, nbeats):
+            prev_best = int(np.argmax(dp))
+            dp_new = np.empty(24)
+            for c in range(24):
+                stay_score = dp[c] + STAY
+                if stay_score >= dp[prev_best]:
+                    dp_new[c] = stay_score + scores[c, b]
+                    back[c, b] = c
+                else:
+                    dp_new[c] = dp[prev_best] + scores[c, b]
+                    back[c, b] = prev_best
+            dp = dp_new
+        path = np.zeros(nbeats, dtype=int)
+        path[-1] = int(np.argmax(dp))
+        for b in range(nbeats - 1, 0, -1):
+            path[b - 1] = back[path[b], b]
+        beat_labels = [labels[int(i)] for i in path]
+    else:
+        beat_labels = []
+
+    # --- bar-level chords (assume 4/4): majority vote of the smoothed beats ---
+    from collections import Counter
     bar_chords = []
     for b0 in range(0, nbeats, 4):
-        seg = beat_chroma[:, b0:b0 + 4]
-        if seg.shape[1] == 0:
+        seg = beat_labels[b0:b0 + 4]
+        if not seg:
             break
         t = float(beat_times[b0]) if b0 < len(beat_times) else None
         bar_chords.append({"bar": len(bar_chords) + 1, "time": round(t, 2) if t else None,
-                           "chord": chord_for(seg.mean(axis=1), tmpl, labels)})
+                           "chord": Counter(seg).most_common(1)[0][0]})
+
+    # --- first DOWNBEAT: the 4-beat phase whose beats carry the most onset
+    # energy — makes the Composer's auto-nudge tight instead of approximate ---
+    first_downbeat = 0.0
+    if len(beats) >= 8:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        phases = [float(np.mean(onset_env[np.asarray(beats[p::4])])) for p in range(4)]
+        first_downbeat = float(beat_times[int(np.argmax(phases))])
 
     # --- structural segmentation (agglomerative on beat-synced features) ---
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
@@ -244,6 +324,7 @@ def main():
     out = {
         "duration_sec": round(dur, 2),
         "tempo_bpm": round(tempo, 1),
+        "first_downbeat_sec": round(first_downbeat, 3),
         "key": key,
         "section_count": len(sections),
         "sections": sections,
