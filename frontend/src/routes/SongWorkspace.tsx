@@ -55,11 +55,21 @@ export function SongWorkspace() {
     setAbMsg("🎶 Writing the lead melody (Melodist, Claude — ~30s)…");
     try {
       const r = await api.generateSongMelody(id);
-      setAbMsg(`🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ Build in Ableton now uses it for the Chord melody track (re-run 🎶 for a different take).`);
+      setAbMsg(`🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ Lead → Live sends it as its OWN track (nothing else touched); the full ⚡ Build includes it too. Re-run 🎶 for a different take.`);
     } catch (e: any) {
       setAbMsg(String(e?.message ?? e));
     }
     setMelodyBusy(false);
+  };
+  // non-destructive push: ONLY the Lead track lands in Live — a previous full
+  // build (and any hand edits there) stays untouched
+  const pushMelody = async () => {
+    setAbMsg("⚡ Sending the Lead track to Ableton…");
+    try {
+      setAbMsg(await api.abletonBuildMelody(id));
+    } catch (e: any) {
+      setAbMsg(String(e?.message ?? e));
+    }
   };
   // live per-step progress while the Ableton build runs (backend emits one
   // event per connect/clear/track-create/section step)
@@ -224,7 +234,8 @@ export function SongWorkspace() {
           >
             🎹 Open in Composer
           </button>
-          <button onClick={() => void generateMelody()} disabled={!allStagesDone || melodyBusy} title={allStagesDone ? "Claude writes a motif-based lead melody for the Ableton build (replaces the formulaic Chord melody) — re-run for a different take" : "Complete every song-spec stage first"}>{melodyBusy ? "🎶 writing…" : "🎶 Melody"}</button>
+          <button onClick={() => void generateMelody()} disabled={!allStagesDone || melodyBusy} title={allStagesDone ? "Claude writes a motif-based lead melody (its own Lead track in Ableton) — re-run for a different take" : "Complete every song-spec stage first"}>{melodyBusy ? "🎶 writing…" : "🎶 Melody"}</button>
+          <button onClick={() => void pushMelody()} disabled={!allStagesDone || melodyBusy} title="send ONLY the Lead track to Live — no rebuild, your existing tracks stay untouched (a previous Lead is replaced)">⚡ Lead → Live</button>
           <button onClick={buildAbleton} disabled={!allStagesDone} title={allStagesDone ? "Stub the whole song in Ableton — a named Sections clip track + Bass/Chords/Melody/Filler/Arp MIDI parts from your progression (direct, no chat)" : "Complete every song-spec stage first (Concept → Generation Prompt)"}>⚡ Build in Ableton</button>
           {v.status !== "done" ? (
             <button className="primary" onClick={() => setStatus.mutate("done")}>Mark done</button>

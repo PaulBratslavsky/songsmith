@@ -1139,8 +1139,18 @@ async fn ableton_build_clips(state: State<'_, AppState>, song_id: String) -> R<S
     song_core::ableton::build_clips_for(&state.conn, &song_id).await.map_err(e2s)
 }
 
+/// Non-destructive Lead-only push (song_core::ableton::build_melody_track_for).
+#[tauri::command]
+async fn ableton_build_melody(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
+    let sid = song_id.clone();
+    song_core::ableton::build_melody_track_for(&state.conn, &song_id, move |msg| {
+        let _ = app.emit("ableton_progress", serde_json::json!({ "song_id": sid, "message": msg }));
+    })
+    .await
+    .map_err(e2s)
+}
 /// Stub the whole song in Ableton's Arrangement: Sections clip track + Bass /
-/// Chords / Pad / Chord melody / Filler / Arp MIDI parts from the progression.
+/// Chords / Pad / Chord melody / Lead / Filler / Arp MIDI parts.
 /// Thin wrapper over song_core::ableton::build_song_for (also an MCP tool).
 #[tauri::command]
 async fn ableton_build_song(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
@@ -1372,6 +1382,7 @@ pub fn run() {
             ableton_build,
             ableton_build_clips,
             ableton_build_song,
+            ableton_build_melody,
             ableton_build_progression,
             ableton_build_composition,
             ableton_build_outline,
