@@ -240,7 +240,10 @@ pub fn build_clips(bpm: i64, sections: &[(String, i64)]) -> Result<String> {
 /// `section_invs` (optional, aligned with `sections` by index) carries each
 /// section's per-chord inversion picks — the Chord Builder's progression
 /// export uses it; song builds pass `&[]` (root position).
-pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], section_invs: &[Vec<i64>], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
+/// `section_melody` (aligned with `sections` by index; empty slice or empty
+/// inner vec = none) carries a Melodist-written lead as ABSOLUTE note Values —
+/// when present for a section it REPLACES the formulaic "Chord melody" part.
+pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], section_invs: &[Vec<i64>], section_melody: &[Vec<Value>], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
     progress("Connecting to Ableton (port 9877)…".into());
     let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
@@ -299,7 +302,14 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
             if part == "Sections" {
                 let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
             } else {
-                let notes = part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[]));
+                // Melodist lead (when written) replaces the chord-figure formula
+                let melodist = part == "Chord melody"
+                    && section_melody.get(i).is_some_and(|m| !m.is_empty());
+                let notes = if melodist {
+                    section_melody[i].clone()
+                } else {
+                    part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[]))
+                };
                 if !notes.is_empty() {
                     let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                 }
@@ -500,8 +510,27 @@ pub async fn build_song_for(conn: &Connection, song_id: &str, progress: impl Fn(
         .as_ref()
         .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
         .unwrap_or_else(|| *preset.as_ref().map(|p| crate::midi::profile_for_genre(&p.genre)).unwrap_or(&crate::midi::POP_DEFAULT));
+    // Melodist lead (when the user generated one): stored degree-based notes
+    // per section label → absolute MIDI per section index
+    let section_melody: Vec<Vec<Value>> = match db::get_song_melody(conn, song_id).await.ok().flatten() {
+        Some(raw) => {
+            let stored: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            let melody_secs = stored.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let root_pc = crate::midi::chord_tones(&song.key_root).map(|(pc, _)| pc).unwrap_or(0);
+            let minor = song.key_mode != "major";
+            sections.iter().map(|(label, _, _)| {
+                melody_secs.iter()
+                    .find(|s| s.get("label").and_then(|v| v.as_str())
+                        .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false))
+                    .and_then(|s| s.get("notes").and_then(|v| v.as_array()))
+                    .map(|n| crate::midi::melody_notes_abs(n, root_pc, minor, profile.vel_scale))
+                    .unwrap_or_default()
+            }).collect()
+        }
+        None => vec![],
+    };
     let bpm = song.bpm;
-    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &[], &profile, &progress)).await?
+    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &[], &section_melody, &profile, &progress)).await?
 }
 
 #[cfg(test)]

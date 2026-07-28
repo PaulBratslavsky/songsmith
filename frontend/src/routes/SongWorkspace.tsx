@@ -45,6 +45,22 @@ export function SongWorkspace() {
   // navigating to a different song clears the stage selection (avoids stale highlight)
   useEffect(() => { setSelectedId(null); fd?.close?.(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
   const buildAbleton = async () => { setAbMsg("Stubbing the song in Ableton — Sections + Bass / Chords / Melody / Filler / Arp…"); try { setAbMsg(await api.abletonBuildSong(id)); } catch (e: any) { setAbMsg(String(e?.message ?? e)); } };
+  // 🎶 Melodist: Claude WRITES the lead melody (motif-based, per section) —
+  // the next ⚡ build uses it for the Chord melody track instead of the
+  // formulaic chord figure. Re-run for a different take.
+  const [melodyBusy, setMelodyBusy] = useState(false);
+  const generateMelody = async () => {
+    if (melodyBusy) return;
+    setMelodyBusy(true);
+    setAbMsg("🎶 Writing the lead melody (Melodist, Claude — ~30s)…");
+    try {
+      const r = await api.generateSongMelody(id);
+      setAbMsg(`🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ Build in Ableton now uses it for the Chord melody track (re-run 🎶 for a different take).`);
+    } catch (e: any) {
+      setAbMsg(String(e?.message ?? e));
+    }
+    setMelodyBusy(false);
+  };
   // live per-step progress while the Ableton build runs (backend emits one
   // event per connect/clear/track-create/section step)
   useEffect(() => {
@@ -208,6 +224,7 @@ export function SongWorkspace() {
           >
             🎹 Open in Composer
           </button>
+          <button onClick={() => void generateMelody()} disabled={!allStagesDone || melodyBusy} title={allStagesDone ? "Claude writes a motif-based lead melody for the Ableton build (replaces the formulaic Chord melody) — re-run for a different take" : "Complete every song-spec stage first"}>{melodyBusy ? "🎶 writing…" : "🎶 Melody"}</button>
           <button onClick={buildAbleton} disabled={!allStagesDone} title={allStagesDone ? "Stub the whole song in Ableton — a named Sections clip track + Bass/Chords/Melody/Filler/Arp MIDI parts from your progression (direct, no chat)" : "Complete every song-spec stage first (Concept → Generation Prompt)"}>⚡ Build in Ableton</button>
           {v.status !== "done" ? (
             <button className="primary" onClick={() => setStatus.mutate("done")}>Mark done</button>

@@ -61,6 +61,7 @@ export type CommandMap = {
   union_spine_sections: { args: { songId: string }; result: Section[] };
   import_reference: { args: { audioPath: string }; result: string };
   resume_import: { args: { songId: string }; result: string };
+  generate_song_melody: { args: { songId: string }; result: { motif: string; note_count: number; sections: number } };
   run_doctor: { args: Record<string, never>; result: { name: string; status: "ok" | "warn" | "fail"; detail: string }[] };
   install_ableton_script: { args: Record<string, never>; result: string };
   parse_pasted_lyrics: { args: { text: string }; result: ParsedLyrics };
@@ -263,6 +264,7 @@ export const api = {
   unionSpineSections: (songId: string) => call("union_spine_sections", { songId }),
   importReference: (audioPath: string) => call("import_reference", { audioPath }),
   resumeImport: (songId: string) => call("resume_import", { songId }),
+  generateSongMelody: (songId: string) => call("generate_song_melody", { songId }),
   runDoctor: () => call("run_doctor", {}),
   installAbletonScript: () => call("install_ableton_script", {}),
   // paste-lyrics import (words kept verbatim — parse/tag only, never rewrite)

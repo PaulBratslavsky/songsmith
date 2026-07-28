@@ -2,7 +2,7 @@
 //! song stub (moved out of the Tauri layer — audit Tier-2 #10). No sockets,
 //! no DB — everything here is deterministic and unit-testable.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Parse a chord name into (root pitch-class 0-11, chord-tone semitone offsets).
 pub fn chord_tones(name: &str) -> Option<(i64, Vec<i64>)> {
@@ -239,6 +239,70 @@ pub fn invert_tones(tones: &[i64], k: i64) -> Vec<i64> {
 /// picked closed-voicing inversion rotates the tone stack for the harmonic
 /// tracks; the BASS stays on the root (a picked inversion is a voicing
 /// choice, not a slash-bass instruction).
+/// Degree (1–7) + octave band (0|1) → absolute MIDI in the lead register
+/// (base C4=60 + key root), same convention as the Composer's melody lane.
+pub fn degree_to_midi(degree: i64, octave: i64, root_pc: i64, minor: bool) -> i64 {
+    let steps = if minor { [0, 2, 3, 5, 7, 8, 10] } else { [0, 2, 4, 5, 7, 9, 11] };
+    60 + root_pc + steps[((degree - 1).clamp(0, 6)) as usize] + 12 * octave.clamp(0, 1)
+}
+
+/// Validate + clamp a Melodist output against the song's REAL sections:
+/// sections match by label (unknown output labels drop; missing sections get
+/// empty notes), degrees clamp to 1–7, octaves to 0–1, every note fits inside
+/// its section's bars (16ths), sorted by onset, MONOPHONIC (a later onset
+/// truncates the ringing note; zero-length leftovers drop). The model's
+/// output is a proposal — this is the contract.
+pub fn clamp_melody(sections_out: &[Value], parts: &[(String, i64, Vec<(String, i64)>)]) -> Vec<Value> {
+    parts.iter().map(|(label, bars, _)| {
+        let cap = (*bars).max(1) * 16;
+        let mut notes: Vec<(i64, i64, i64, i64)> = sections_out.iter()
+            .find(|s| s.get("label").and_then(|v| v.as_str())
+                .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false))
+            .and_then(|s| s.get("notes").and_then(|v| v.as_array()).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|n| {
+                let d = n.get("degree")?.as_i64()?.clamp(1, 7);
+                let o = n.get("octave").and_then(|v| v.as_i64()).unwrap_or(0).clamp(0, 1);
+                let st = n.get("start")?.as_i64()?;
+                let len = n.get("length").and_then(|v| v.as_i64()).unwrap_or(4).max(1);
+                if st < 0 || st >= cap { return None; }
+                Some((d, o, st, len.min(cap - st)))
+            })
+            .collect();
+        notes.sort_by_key(|n| n.2);
+        let mut out: Vec<Value> = vec![];
+        for i in 0..notes.len() {
+            let (d, o, st, mut len) = notes[i];
+            if let Some(&(_, _, nst, _)) = notes.get(i + 1) {
+                if nst < st + len { len = nst - st; }
+            }
+            if len >= 1 {
+                out.push(json!({ "degree": d, "octave": o, "start": st, "length": len }));
+            }
+        }
+        json!({ "label": label, "notes": out })
+    }).collect()
+}
+
+/// Stored Melodist notes (degree/octave/start/length in 16ths) → the
+/// absolute-MIDI note Values the Ableton clip API takes (beats).
+pub fn melody_notes_abs(notes: &[Value], root_pc: i64, minor: bool, vel_scale: f64) -> Vec<Value> {
+    notes.iter().filter_map(|n| {
+        let d = n.get("degree")?.as_i64()?;
+        let o = n.get("octave").and_then(|v| v.as_i64()).unwrap_or(0);
+        let st = n.get("start")?.as_i64()?;
+        let len = n.get("length").and_then(|v| v.as_i64()).unwrap_or(4);
+        let vel = ((if st % 4 == 0 { 98.0 } else { 84.0 }) * vel_scale).clamp(1.0, 127.0) as i64;
+        Some(json!({
+            "pitch": degree_to_midi(d, o, root_pc, minor),
+            "start_time": st as f64 / 4.0,
+            "duration": (len as f64 / 4.0) * 0.95,
+            "velocity": vel,
+        }))
+    }).collect()
+}
+
 pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &ArrangementProfile, invs: &[i64]) -> Vec<Value> {
     let mut out = Vec::new();
     let v = |base: i64| ((base as f64 * p.vel_scale) as i64).clamp(20, 127);
@@ -424,6 +488,38 @@ mod tests {
             (0, "Am".into(), 6.0, 2.0),
         ]);
         assert!(chord_events(&[], 4).is_empty());
+    }
+
+    #[test]
+    /// clamp_melody enforces the Melodist contract: label matching (case/space
+    /// tolerant), degree/octave clamps, section-bounds clipping, monophonic
+    /// truncation, and unknown labels dropping; degree_to_midi lands the
+    /// melody register (A minor: 1/0 → A4=69).
+    #[test]
+    fn melodist_clamp_and_degree_mapping() {
+        let parts = vec![
+            ("Verse 1".to_string(), 2i64, vec![]),   // cap 32 sixteenths
+            ("Chorus".to_string(), 1i64, vec![]),
+        ];
+        let out = vec![
+            serde_json::json!({ "label": "verse 1 ", "notes": [
+                { "degree": 9, "octave": 5, "start": 0, "length": 8 },   // clamps to 7 / 1
+                { "degree": 3, "start": 4, "length": 40 },               // overlaps prev → prev truncates to 4; clips to cap
+                { "degree": 2, "start": 31, "length": 4 },               // clips to len 1
+                { "degree": 1, "start": 32, "length": 4 },               // outside → drops
+                { "degree": 1, "start": -1, "length": 4 },               // negative → drops
+            ]}),
+            serde_json::json!({ "label": "Bridge", "notes": [ { "degree": 1, "start": 0, "length": 4 } ] }),
+        ];
+        let c = clamp_melody(&out, &parts);
+        assert_eq!(c.len(), 2, "one entry per REAL section");
+        let v: Vec<(i64, i64, i64, i64)> = c[0]["notes"].as_array().unwrap().iter()
+            .map(|n| (n["degree"].as_i64().unwrap(), n["octave"].as_i64().unwrap(), n["start"].as_i64().unwrap(), n["length"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(v, vec![(7, 1, 0, 4), (3, 0, 4, 27), (2, 0, 31, 1)]);
+        assert!(c[1]["notes"].as_array().unwrap().is_empty(), "unknown Bridge label dropped; Chorus empty");
+        assert_eq!(degree_to_midi(1, 0, 9, true), 69, "A minor tonic → A4");
+        assert_eq!(degree_to_midi(3, 1, 9, true), 84, "A minor 3rd, octave up → C6");
     }
 
     #[test]

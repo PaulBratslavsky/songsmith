@@ -113,6 +113,16 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
         )",
         (),
     ).await?;
+    // Claude-written lead melody for the Ableton build (Melodist skill) —
+    // one row per song, replaced on regenerate
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS song_melody (
+            song_id TEXT PRIMARY KEY REFERENCES song(id),
+            data TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        (),
+    ).await?;
     let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
     // regenerate-as-draft: at most ONE pending draft per stage, stored outside
     // the artifact history (discarded drafts never pollute revisions)
@@ -379,6 +389,7 @@ const SEED_SKILLS: &[(&str, &str, &str, &str)] = &[
     ("songsmith-reference", "Reference Analyst", "reference", include_str!("skills/reference.md")),
     ("songsmith-style", "Style Builder", "style", include_str!("skills/style.md")),
     ("songsmith-ableton", "Ableton Arrange", "ableton", include_str!("skills/ableton.md")),
+    ("songsmith-melodist", "Melodist", "melodist", include_str!("skills/melodist.md")),
 ];
 
 fn strip_frontmatter(raw: &str) -> String {
@@ -833,6 +844,24 @@ pub async fn create_render(conn: &Connection, song_id: &str, label: &str, file_p
     ).await?;
     Ok(Render { id, song_id: song_id.into(), label: label.into(), file_path: file_path.into(), source: source.into(), notes: notes.into(), is_pick: false, analysis: String::new(), created_at: ts })
 }
+// ---- song melody (Melodist skill → the Ableton build's lead) ----------------
+pub async fn set_song_melody(conn: &Connection, song_id: &str, data: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO song_melody (song_id, data, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(song_id) DO UPDATE SET data = ?2, updated_at = ?3",
+        params![song_id, data, now()],
+    ).await?;
+    Ok(())
+}
+pub async fn get_song_melody(conn: &Connection, song_id: &str) -> Result<Option<String>> {
+    let mut rows = conn.query("SELECT data FROM song_melody WHERE song_id = ?1", params![song_id]).await?;
+    Ok(rows.next().await?.as_ref().map(|r| s(r, 0)))
+}
+pub async fn delete_song_melody(conn: &Connection, song_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM song_melody WHERE song_id = ?1", params![song_id]).await?;
+    Ok(())
+}
+
 pub async fn set_render_analysis(conn: &Connection, id: &str, analysis: &str) -> Result<()> {
     conn.execute("UPDATE render SET analysis = ?2 WHERE id = ?1", params![id, analysis]).await?;
     Ok(())

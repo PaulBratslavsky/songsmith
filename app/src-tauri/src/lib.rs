@@ -226,6 +226,11 @@ async fn install_ableton_script() -> R<String> {
 }
 
 #[tauri::command]
+async fn generate_song_melody(state: State<'_, AppState>, song_id: String) -> R<serde_json::Value> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    song_core::agent::generate_song_melody(&state.conn, &settings, &song_id).await.map_err(e2s)
+}
+#[tauri::command]
 async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     let progress = move |msg: String| {
@@ -1306,6 +1311,7 @@ pub fn run() {
             union_spine_sections,
             import_reference,
             resume_import,
+            generate_song_melody,
             run_doctor,
             install_ableton_script,
             parse_pasted_lyrics,

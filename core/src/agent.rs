@@ -869,6 +869,68 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
     Ok(msg)
 }
 
+/// Melodist (user request 2026-07-27: "the melody always follows the same
+/// pattern"): Claude WRITES the lead melody — motif-based, per section, as
+/// degree/octave note events — replacing the Ableton build's formulaic
+/// chord-figure. Same architecture as arrangement profiles: Claude decides
+/// the musical content ONCE (guided by the Melodist skill), deterministic
+/// code clamps it (midi::clamp_melody) and renders it. Stored per song;
+/// regenerate for a different take.
+pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_id: &str) -> Result<Value> {
+    let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let preset = db::get_preset(conn, &song.style_preset_id).await?;
+    let parts = crate::ableton::song_parts(conn, song_id).await;
+    if parts.is_empty() {
+        return Err(anyhow!("no sections yet — run the Structure stage first"));
+    }
+    let skill = db::get_active_skill_for_stage(conn, "melodist").await?
+        .ok_or_else(|| anyhow!("the Melodist skill is missing"))?;
+
+    // lyric lines per section label (phrasing hints — optional)
+    let mut lyric_map: std::collections::HashMap<String, Vec<String>> = Default::default();
+    if let Some(st) = db::list_stages(conn, song_id).await?.into_iter().find(|s| s.r#type == "lyrics") {
+        if let Some(a) = db::current_artifact(conn, &st.id).await? {
+            let v: Value = serde_json::from_str(&a.content).unwrap_or(Value::Null);
+            for sec in v.pointer("/data/sections").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let label = sec.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let lines: Vec<String> = sec.get("lines").and_then(|x| x.as_array())
+                    .map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                if !lines.is_empty() { lyric_map.insert(norm_label(&label), lines); }
+            }
+        }
+    }
+
+    let mut blocks = String::new();
+    for (label, bars, chords) in &parts {
+        let ch = chords.iter().map(|(n, b)| format!("{n}({b})")).collect::<Vec<_>>().join(" ");
+        blocks.push_str(&format!("- {label} · {bars} bars · chords: {}\n", if ch.is_empty() { "(none)".into() } else { ch }));
+        if let Some(lines) = lyric_map.get(&norm_label(label)) {
+            for l in lines.iter().take(6) {
+                blocks.push_str(&format!("    ♪ {l}\n"));
+            }
+        }
+    }
+    let (genre, mood) = preset.as_ref().map(|p| (p.genre.clone(), p.mood.clone())).unwrap_or_default();
+    let user = format!(
+        "KEY: {root} {mode} · BPM {bpm}\nGENRE: {genre}\nMOOD: {mood}\n🎯 INTENT: {intent}\n\nSECTIONS (in order — use these EXACT labels):\n{blocks}\nWrite the melody JSON.",
+        root = song.key_root, mode = song.key_mode, bpm = song.bpm,
+        intent = if song.intent.trim().is_empty() { "(none)" } else { song.intent.trim() },
+    );
+    let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
+    let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Melodist output"))?;
+    let sections_out = parsed.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let clamped = crate::midi::clamp_melody(&sections_out, &parts);
+    let total: usize = clamped.iter().map(|s| s.get("notes").and_then(|n| n.as_array()).map(|a| a.len()).unwrap_or(0)).sum();
+    if total == 0 {
+        return Err(anyhow!("the Melodist produced no usable notes — run it again"));
+    }
+    let motif = parsed.get("motif").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let stored = json!({ "motif": motif, "sections": clamped });
+    db::set_song_melody(conn, song_id, &stored.to_string()).await?;
+    Ok(json!({ "motif": motif, "note_count": total, "sections": stored["sections"].as_array().map(|a| a.len()).unwrap_or(0) }))
+}
+
 /// The style/song context block injected into field refinement so 💬 edits stay
 /// on-style. Without it, refined fields drift: Claude rewrites a Memphis-phonk
 /// style line with no idea the project IS Memphis phonk (audit Tier-2 #9).
