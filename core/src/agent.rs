@@ -876,7 +876,7 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
 /// the musical content ONCE (guided by the Melodist skill), deterministic
 /// code clamps it (midi::clamp_melody) and renders it. Stored per song;
 /// regenerate for a different take.
-pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_id: &str) -> Result<Value> {
+pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_id: &str, section: Option<&str>) -> Result<Value> {
     let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let preset = db::get_preset(conn, &song.style_preset_id).await?;
     let parts = crate::ableton::song_parts(conn, song_id).await;
@@ -885,6 +885,20 @@ pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_i
     }
     let skill = db::get_active_skill_for_stage(conn, "melodist").await?
         .ok_or_else(|| anyhow!("the Melodist skill is missing"))?;
+
+    // per-section rewrite ("redo just the bridge"): needs an existing take —
+    // the other sections and the motif are kept verbatim
+    let target = section.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let existing: Option<Value> = db::get_song_melody(conn, song_id).await?
+        .and_then(|s| serde_json::from_str(&s).ok());
+    if let Some(t) = &target {
+        if !parts.iter().any(|(l, _, _)| l.trim().eq_ignore_ascii_case(t)) {
+            return Err(anyhow!("no section named '{t}'"));
+        }
+        if existing.is_none() {
+            return Err(anyhow!("write the whole melody first (🎶), then rewrite individual sections"));
+        }
+    }
 
     // lyric lines per section label (phrasing hints — optional)
     let mut lyric_map: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -912,15 +926,48 @@ pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_i
         }
     }
     let (genre, mood) = preset.as_ref().map(|p| (p.genre.clone(), p.mood.clone())).unwrap_or_default();
-    let user = format!(
-        "KEY: {root} {mode} · BPM {bpm}\nGENRE: {genre}\nMOOD: {mood}\n🎯 INTENT: {intent}\n\nSECTIONS (in order — use these EXACT labels):\n{blocks}\nWrite the melody JSON.",
+    let mut user = format!(
+        "KEY: {root} {mode} · BPM {bpm}\nGENRE: {genre}\nMOOD: {mood}\n🎯 INTENT: {intent}\n\nSECTIONS (in order — use these EXACT labels):\n{blocks}",
         root = song.key_root, mode = song.key_mode, bpm = song.bpm,
         intent = if song.intent.trim().is_empty() { "(none)" } else { song.intent.trim() },
     );
+    if let (Some(t), Some(ex)) = (&target, &existing) {
+        user.push_str(&format!(
+            "\nEXISTING MELODY (its motif and every OTHER section stay exactly as they are):\n{ex}\n\nREWRITE ONLY the section \"{t}\" — a fresh variation that still develops the established motif. Output the JSON with JUST that one section.\n"
+        ));
+    } else {
+        user.push_str("\nWrite the melody JSON.\n");
+    }
     let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Melodist output"))?;
     let sections_out = parsed.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let clamped = crate::midi::clamp_melody(&sections_out, &parts);
+
+    // section rewrite: splice ONLY the target into the existing take
+    if let (Some(t), Some(mut stored)) = (target.clone(), existing) {
+        let new_sec = clamped.iter()
+            .find(|s| s.get("label").and_then(|l| l.as_str()).map(|l| l.trim().eq_ignore_ascii_case(&t)).unwrap_or(false))
+            .cloned()
+            .ok_or_else(|| anyhow!("the Melodist output had no '{t}' section"))?;
+        let n = new_sec.get("notes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        if n == 0 {
+            return Err(anyhow!("the rewrite came back empty — run it again"));
+        }
+        let mut replaced = false;
+        if let Some(arr) = stored.get_mut("sections").and_then(|v| v.as_array_mut()) {
+            for s in arr.iter_mut() {
+                if s.get("label").and_then(|l| l.as_str()).map(|l| l.trim().eq_ignore_ascii_case(&t)).unwrap_or(false) {
+                    *s = new_sec.clone();
+                    replaced = true;
+                }
+            }
+            if !replaced { arr.push(new_sec.clone()); }
+        }
+        db::set_song_melody(conn, song_id, &stored.to_string()).await?;
+        let motif = stored.get("motif").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        return Ok(json!({ "motif": motif, "note_count": n, "sections": 1, "rewrote": t }));
+    }
+
     let total: usize = clamped.iter().map(|s| s.get("notes").and_then(|n| n.as_array()).map(|a| a.len()).unwrap_or(0)).sum();
     if total == 0 {
         return Err(anyhow!("the Melodist produced no usable notes — run it again"));
@@ -929,6 +976,61 @@ pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_i
     let stored = json!({ "motif": motif, "sections": clamped });
     db::set_song_melody(conn, song_id, &stored.to_string()).await?;
     Ok(json!({ "motif": motif, "note_count": total, "sections": stored["sections"].as_array().map(|a| a.len()).unwrap_or(0) }))
+}
+
+/// Arranger (user idea 2026-07-28, generalizing the Melodist): Claude writes
+/// ONE instrumental part (bass / pad / chords / arp) as a stored take —
+/// regenerate for variations, push non-destructively as that one Live track,
+/// and the full build prefers the take over the formula.
+pub async fn generate_song_part(conn: &Connection, settings: &Settings, song_id: &str, part: &str) -> Result<Value> {
+    let part = part.trim().to_lowercase();
+    if !["bass", "pad", "chords", "arp"].contains(&part.as_str()) {
+        return Err(anyhow!("unknown part '{part}' — one of: bass, pad, chords, arp"));
+    }
+    let mono = part == "bass" || part == "arp";
+    let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let preset = db::get_preset(conn, &song.style_preset_id).await?;
+    let parts = crate::ableton::song_parts(conn, song_id).await;
+    if parts.is_empty() {
+        return Err(anyhow!("no sections yet — run the Structure stage first"));
+    }
+    let skill = db::get_active_skill_for_stage(conn, "arranger").await?
+        .ok_or_else(|| anyhow!("the Arranger skill is missing"))?;
+
+    // the current formulaic pattern, for contrast ("do better than this")
+    let profile = preset.as_ref()
+        .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
+        .unwrap_or_else(|| *preset.as_ref().map(|p| crate::midi::profile_for_genre(&p.genre)).unwrap_or(&crate::midi::POP_DEFAULT));
+    let current = match part.as_str() {
+        "bass" => format!("{:?}", profile.bass),
+        "pad" => (if profile.pad { "held triad bed" } else { "off" }).to_string(),
+        "chords" => format!("{:?}", profile.chords),
+        _ => format!("{:?}", profile.arp),
+    };
+
+    let mut blocks = String::new();
+    for (label, bars, chords) in &parts {
+        let ch = chords.iter().map(|(n, b)| format!("{n}({b})")).collect::<Vec<_>>().join(" ");
+        blocks.push_str(&format!("- {label} · {bars} bars · chords: {}\n", if ch.is_empty() { "(none)".into() } else { ch }));
+    }
+    let (genre, mood) = preset.as_ref().map(|p| (p.genre.clone(), p.mood.clone())).unwrap_or_default();
+    let user = format!(
+        "PART TO WRITE: {part}\nKEY: {root} {mode} · BPM {bpm}\nGENRE: {genre}\nMOOD: {mood}\n🎯 INTENT: {intent}\nCURRENT FORMULAIC PATTERN (write something better): {current}\n\nSECTIONS (in order — use these EXACT labels):\n{blocks}\nWrite the {part} JSON.",
+        root = song.key_root, mode = song.key_mode, bpm = song.bpm,
+        intent = if song.intent.trim().is_empty() { "(none)" } else { song.intent.trim() },
+    );
+    let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
+    let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Arranger output"))?;
+    let sections_out = parsed.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let clamped = crate::midi::clamp_part_take(&sections_out, &parts, mono);
+    let total: usize = clamped.iter().map(|s| s.get("notes").and_then(|n| n.as_array()).map(|a| a.len()).unwrap_or(0)).sum();
+    if total == 0 {
+        return Err(anyhow!("the Arranger produced no usable notes — run it again"));
+    }
+    let idea = parsed.get("idea").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let stored = json!({ "idea": idea, "sections": clamped });
+    db::set_song_part(conn, song_id, &part, &stored.to_string()).await?;
+    Ok(json!({ "part": part, "idea": idea, "note_count": total }))
 }
 
 /// The style/song context block injected into field refinement so 💬 edits stay

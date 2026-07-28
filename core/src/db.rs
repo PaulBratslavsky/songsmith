@@ -123,6 +123,18 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
         )",
         (),
     ).await?;
+    // Claude-written PART takes (Arranger skill: bass/pad/chords/arp) — one
+    // row per (song, part), replaced on regenerate
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS song_part (
+            song_id TEXT NOT NULL REFERENCES song(id),
+            part TEXT NOT NULL,
+            data TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (song_id, part)
+        )",
+        (),
+    ).await?;
     let _ = conn.execute("ALTER TABLE artifact ADD COLUMN label TEXT", ()).await;
     // regenerate-as-draft: at most ONE pending draft per stage, stored outside
     // the artifact history (discarded drafts never pollute revisions)
@@ -390,6 +402,7 @@ const SEED_SKILLS: &[(&str, &str, &str, &str)] = &[
     ("songsmith-style", "Style Builder", "style", include_str!("skills/style.md")),
     ("songsmith-ableton", "Ableton Arrange", "ableton", include_str!("skills/ableton.md")),
     ("songsmith-melodist", "Melodist", "melodist", include_str!("skills/melodist.md")),
+    ("songsmith-arranger", "Arranger", "arranger", include_str!("skills/arranger.md")),
 ];
 
 fn strip_frontmatter(raw: &str) -> String {
@@ -860,6 +873,26 @@ pub async fn get_song_melody(conn: &Connection, song_id: &str) -> Result<Option<
 pub async fn delete_song_melody(conn: &Connection, song_id: &str) -> Result<()> {
     conn.execute("DELETE FROM song_melody WHERE song_id = ?1", params![song_id]).await?;
     Ok(())
+}
+pub async fn set_song_part(conn: &Connection, song_id: &str, part: &str, data: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO song_part (song_id, part, data, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(song_id, part) DO UPDATE SET data = ?3, updated_at = ?4",
+        params![song_id, part, data, now()],
+    ).await?;
+    Ok(())
+}
+pub async fn get_song_part(conn: &Connection, song_id: &str, part: &str) -> Result<Option<String>> {
+    let mut rows = conn.query("SELECT data FROM song_part WHERE song_id = ?1 AND part = ?2", params![song_id, part]).await?;
+    Ok(rows.next().await?.as_ref().map(|r| s(r, 0)))
+}
+pub async fn list_song_parts(conn: &Connection, song_id: &str) -> Result<Vec<(String, String)>> {
+    let mut rows = conn.query("SELECT part, data FROM song_part WHERE song_id = ?1", params![song_id]).await?;
+    let mut out = vec![];
+    while let Some(r) = rows.next().await? {
+        out.push((s(&r, 0), s(&r, 1)));
+    }
+    Ok(out)
 }
 
 pub async fn set_render_analysis(conn: &Connection, id: &str, analysis: &str) -> Result<()> {

@@ -253,6 +253,13 @@ pub fn degree_to_midi(degree: i64, octave: i64, root_pc: i64, minor: bool) -> i6
 /// truncates the ringing note; zero-length leftovers drop). The model's
 /// output is a proposal — this is the contract.
 pub fn clamp_melody(sections_out: &[Value], parts: &[(String, i64, Vec<(String, i64)>)]) -> Vec<Value> {
+    clamp_part_take(sections_out, parts, true)
+}
+
+/// The generalized take contract (Melodist + Arranger): `mono` enforces the
+/// monophonic truncation (lead/bass/arp); polyphonic parts (pad/chords) keep
+/// overlaps — their stacks ARE simultaneous notes — but still clamp/clip/sort.
+pub fn clamp_part_take(sections_out: &[Value], parts: &[(String, i64, Vec<(String, i64)>)], mono: bool) -> Vec<Value> {
     parts.iter().map(|(label, bars, _)| {
         let cap = (*bars).max(1) * 16;
         let mut notes: Vec<(i64, i64, i64, i64)> = sections_out.iter()
@@ -274,8 +281,10 @@ pub fn clamp_melody(sections_out: &[Value], parts: &[(String, i64, Vec<(String, 
         let mut out: Vec<Value> = vec![];
         for i in 0..notes.len() {
             let (d, o, st, mut len) = notes[i];
-            if let Some(&(_, _, nst, _)) = notes.get(i + 1) {
-                if nst < st + len { len = nst - st; }
+            if mono {
+                if let Some(&(_, _, nst, _)) = notes.get(i + 1) {
+                    if nst < st + len { len = nst - st; }
+                }
             }
             if len >= 1 {
                 out.push(json!({ "degree": d, "octave": o, "start": st, "length": len }));
@@ -285,22 +294,44 @@ pub fn clamp_melody(sections_out: &[Value], parts: &[(String, i64, Vec<(String, 
     }).collect()
 }
 
-/// Stored Melodist notes (degree/octave/start/length in 16ths) → the
-/// absolute-MIDI note Values the Ableton clip API takes (beats).
-pub fn melody_notes_abs(notes: &[Value], root_pc: i64, minor: bool, vel_scale: f64) -> Vec<Value> {
+/// Per-part rendering constants: (base MIDI for degree 1 at octave 0,
+/// accent velocity, off-accent velocity). Registers match the formulaic
+/// parts so a generated take sits where the old one did.
+pub fn part_take_render(part: &str) -> (i64, f64, f64) {
+    match part {
+        "bass" => (36, 104.0, 92.0),
+        "pad" => (60, 52.0, 44.0),
+        "chords" => (48, 82.0, 70.0),
+        "arp" => (60, 88.0, 64.0),
+        _ => (60, 98.0, 84.0), // lead
+    }
+}
+
+/// Stored take notes (degree/octave/start/length in 16ths) → the
+/// absolute-MIDI note Values the Ableton clip API takes (beats), in the
+/// part's own register/velocity band.
+pub fn take_notes_abs(notes: &[Value], root_pc: i64, minor: bool, vel_scale: f64, part: &str) -> Vec<Value> {
+    let (base, hi, lo) = part_take_render(part);
     notes.iter().filter_map(|n| {
         let d = n.get("degree")?.as_i64()?;
         let o = n.get("octave").and_then(|v| v.as_i64()).unwrap_or(0);
         let st = n.get("start")?.as_i64()?;
         let len = n.get("length").and_then(|v| v.as_i64()).unwrap_or(4);
-        let vel = ((if st % 4 == 0 { 98.0 } else { 84.0 }) * vel_scale).clamp(1.0, 127.0) as i64;
+        let vel = ((if st % 4 == 0 { hi } else { lo }) * vel_scale).clamp(1.0, 127.0) as i64;
+        let steps = if minor { [0, 2, 3, 5, 7, 8, 10] } else { [0, 2, 4, 5, 7, 9, 11] };
+        let pitch = base + root_pc + steps[((d - 1).clamp(0, 6)) as usize] + 12 * o.clamp(0, 1);
         Some(json!({
-            "pitch": degree_to_midi(d, o, root_pc, minor),
+            "pitch": pitch,
             "start_time": st as f64 / 4.0,
             "duration": (len as f64 / 4.0) * 0.95,
             "velocity": vel,
         }))
     }).collect()
+}
+
+/// Stored Melodist notes → absolute MIDI in the lead register (compat shim).
+pub fn melody_notes_abs(notes: &[Value], root_pc: i64, minor: bool, vel_scale: f64) -> Vec<Value> {
+    take_notes_abs(notes, root_pc, minor, vel_scale, "lead")
 }
 
 pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &ArrangementProfile, invs: &[i64]) -> Vec<Value> {

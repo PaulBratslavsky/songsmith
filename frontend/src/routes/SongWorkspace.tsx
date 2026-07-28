@@ -61,15 +61,41 @@ export function SongWorkspace() {
     }
     setMelodyBusy(false);
   };
-  // non-destructive push: ONLY the Lead track lands in Live — a previous full
-  // build (and any hand edits there) stays untouched
-  const pushMelody = async () => {
-    setAbMsg("⚡ Sending the Lead track to Ableton…");
+  // non-destructive push: ONLY the named track lands in Live — a previous
+  // full build (and any hand edits there) stays untouched
+  const pushPart = async (part: string) => {
+    setAbMsg(`⚡ Sending the ${part} track to Ableton…`);
     try {
-      setAbMsg(await api.abletonBuildMelody(id));
+      setAbMsg(await api.abletonBuildPart(id, part));
     } catch (e: any) {
       setAbMsg(String(e?.message ?? e));
     }
+  };
+  const pushMelody = () => pushPart("lead");
+  // 🎛 variations: Claude writes ONE part (lead/bass/pad/chords/arp); the
+  // lead additionally supports a per-SECTION rewrite ("redo just the bridge")
+  const [variantPart, setVariantPart] = useState("lead");
+  const [variantSection, setVariantSection] = useState("");
+  const [variantBusy, setVariantBusy] = useState(false);
+  const generatePart = async () => {
+    if (variantBusy) return;
+    setVariantBusy(true);
+    const what = variantPart === "lead" && variantSection ? `lead (${variantSection} only)` : variantPart;
+    setAbMsg(`🎶 Writing the ${what} (Claude — ~30s)…`);
+    try {
+      if (variantPart === "lead") {
+        const r = await api.generateSongMelody(id, variantSection || undefined);
+        setAbMsg(r.rewrote
+          ? `🎶 ${r.rewrote} rewritten — ${r.note_count} notes (motif and the other sections kept).\n⚡ → Live swaps the Lead track; the Composer's melody lane shows it too.`
+          : `🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ → Live swaps just the Lead track; edit it by hand in the Composer's melody lane.`);
+      } else {
+        const r = await api.generateSongPart(id, variantPart);
+        setAbMsg(`🎶 ${r.part} written — ${r.note_count} notes.\nIdea: ${r.idea}\n⚡ → Live swaps just the ${r.part} track; the full ⚡ Build uses it too. Re-run 🎶 for another variation.`);
+      }
+    } catch (e: any) {
+      setAbMsg(String(e?.message ?? e));
+    }
+    setVariantBusy(false);
   };
   // live per-step progress while the Ableton build runs (backend emits one
   // event per connect/clear/track-create/section step)
@@ -245,6 +271,30 @@ export function SongWorkspace() {
           <button className="danger" onClick={() => setConfirmDelete(true)}>Delete</button>
         </div>
       </div>
+
+      {/* 🎛 per-part variations (Arranger): write a part with Claude, push it
+          as its own Live track — same non-destructive contract as the Lead */}
+      {allStagesDone && (
+        <div className="row" style={{ gap: 6, alignItems: "center", marginBottom: 10 }}>
+          <span className="cmp-cap" title="regenerate individual instrument parts — each lands as its own track in Live, nothing else touched">🎛 Variations</span>
+          <select value={variantPart} onChange={(e) => setVariantPart(e.target.value)} style={{ width: 92 }}>
+            {["lead", "bass", "pad", "chords", "arp"].map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+          {variantPart === "lead" && (
+            <select value={variantSection} onChange={(e) => setVariantSection(e.target.value)} style={{ maxWidth: 140 }} title="rewrite only one section of the lead — the motif and every other section stay">
+              <option value="">whole song</option>
+              {spineSections.map((s) => <option key={s.id} value={s.label}>{s.label}</option>)}
+            </select>
+          )}
+          <button className="sm" disabled={variantBusy} onClick={() => void generatePart()} title={`Claude writes a ${variantPart} take (re-run for a different variation)`}>
+            {variantBusy ? "🎶 writing…" : "🎶 write"}
+          </button>
+          <button className="sm" disabled={variantBusy} onClick={() => void pushPart(variantPart)} title={`send ONLY the ${variantPart} track to Live — replaces that one track, touches nothing else`}>
+            ⚡ → Live
+          </button>
+          <span className="faint" style={{ fontSize: 11 }}>each part swaps just its own track in Live · the full ⚡ Build uses written takes too</span>
+        </div>
+      )}
       {abMsg && (
         <div style={{ position: "relative", marginBottom: 12 }}>
           <button className="sm ghost" title="clear" onClick={() => setAbMsg("")} style={{ position: "absolute", top: 4, right: 4, zIndex: 1 }}>✕</button>

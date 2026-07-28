@@ -241,10 +241,11 @@ pub fn build_clips(bpm: i64, sections: &[(String, i64)]) -> Result<String> {
 /// `section_invs` (optional, aligned with `sections` by index) carries each
 /// section's per-chord inversion picks — the Chord Builder's progression
 /// export uses it; song builds pass `&[]` (root position).
-/// `section_melody` (aligned with `sections` by index; empty slice or empty
-/// inner vec = none) carries a Melodist-written lead as ABSOLUTE note Values —
-/// when present for a section it REPLACES the formulaic "Chord melody" part.
-pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], section_invs: &[Vec<i64>], section_melody: &[Vec<Value>], profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
+/// `takes` maps a TRACK name ("Lead", "Pad", "Bass", "Chords", "Arp") to
+/// Claude-written ABSOLUTE notes per section index (empty inner vec = that
+/// section sits out). "Lead" exists only via takes; for the others a
+/// non-empty take section replaces the profile formula (empty falls back).
+pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], section_invs: &[Vec<i64>], takes: &std::collections::HashMap<String, Vec<Vec<Value>>>, profile: &crate::midi::ArrangementProfile, progress: &dyn Fn(String)) -> Result<String> {
     progress("Connecting to Ableton (port 9877)…".into());
     let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
@@ -271,12 +272,14 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
     // pad off, so "Black" exported with a blank Pad track). Skip them.
     // "Lead" exists only when the Melodist wrote a melody (its own track —
     // user decision 2026-07-28: never hijack Chord melody, never overwrite).
-    let has_lead = section_melody.iter().any(|m| !m.is_empty());
+    // A generated take OVERRIDES a profile-disabled part: explicit user
+    // intent beats the genre default.
+    let has_take = |name: &str| takes.get(name).is_some_and(|t| t.iter().any(|m| !m.is_empty()));
     let track_names: Vec<&str> = all_track_names.iter().copied().filter(|p| match *p {
-        "Pad" => profile.pad,
-        "Arp" => profile.arp != crate::midi::ArpRate::Off,
+        "Pad" => profile.pad || has_take("Pad"),
+        "Arp" => profile.arp != crate::midi::ArpRate::Off || has_take("Arp"),
         "Drums" => profile.drums != crate::midi::DrumPattern::Off,
-        "Lead" => has_lead,
+        "Lead" => has_take("Lead"),
         _ => true,
     }).collect();
 
@@ -302,21 +305,23 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
         let active = section_parts(label);
         for (t, &ti) in tracks.iter().enumerate() {
             let part = track_names[t];
-            // section-aware density: leave a gap so it builds. "Lead" bypasses
-            // the energy map — the Melodist already chose its silences.
-            if part != "Lead" && !active.contains(&part) { continue; }
+            // A written take for THIS section bypasses the energy map — the
+            // Melodist/Arranger already chose its silences. Otherwise the
+            // section-aware density applies (leave a gap so it builds).
+            let take = takes.get(part).and_then(|o| o.get(i)).filter(|n| !n.is_empty());
+            if take.is_none() {
+                if part == "Lead" { continue; } // Lead exists only via takes
+                if !active.contains(&part) { continue; }
+            }
             let _ = ableton_cmd(&mut s, json!({"type":"create_clip","params":{"track_index": ti, "clip_index": ci, "length": length}}));
             if part == "Sections" {
                 let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
             } else {
-                // "Lead" carries the Melodist melody (empty section = no clip);
-                // every other part keeps its profile-driven figure
-                let notes = if part == "Lead" {
-                    section_melody.get(i).cloned().unwrap_or_default()
-                } else {
-                    part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[]))
+                // a written take wins; otherwise the profile-driven figure
+                let notes = match take {
+                    Some(n) => n.clone(),
+                    None => part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[])),
                 };
-                if part == "Lead" && notes.is_empty() { continue; } // silence by choice — no empty clip
                 if !notes.is_empty() {
                     let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                 }
@@ -478,14 +483,15 @@ pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Val
     Ok(log.join("\n"))
 }
 
-/// Push ONLY the Melodist lead into Live as its own "Lead" track — the
-/// NON-DESTRUCTIVE path (user decision 2026-07-28): no tempo change, no
-/// clearing of any other track, no full rebuild. A previous "Lead" is
-/// replaced (that one track is ours); everything else in the session —
-/// including a prior full build and any hand edits — stays untouched.
-pub fn build_lead_track(sections: &[(String, i64)], section_melody: &[Vec<Value>], progress: &dyn Fn(String)) -> Result<String> {
-    if !section_melody.iter().any(|m| !m.is_empty()) {
-        return Ok("No melody to send — click 🎶 Melody first.".into());
+/// Push ONE written take into Live as its own named track ("Lead", "Pad",
+/// "Bass", "Chords", "Arp") — the NON-DESTRUCTIVE path (user decision
+/// 2026-07-28): no tempo change, no clearing of any other track, no full
+/// rebuild. A previous track of the SAME name is replaced (that one is
+/// ours); everything else in the session — a prior full build, hand edits —
+/// stays untouched. Clips land at the right bars so it lines up.
+pub fn build_take_track(track: &str, sections: &[(String, i64)], section_notes: &[Vec<Value>], progress: &dyn Fn(String)) -> Result<String> {
+    if !section_notes.iter().any(|m| !m.is_empty()) {
+        return Ok(format!("No {track} take to send — write one first (🎶)."));
     }
     progress("Connecting to Ableton (port 9877)…".into());
     let addr: std::net::SocketAddr = "127.0.0.1:9877".parse()?;
@@ -495,26 +501,26 @@ pub fn build_lead_track(sections: &[(String, i64)], section_melody: &[Vec<Value>
     s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
     let nap = || std::thread::sleep(Duration::from_millis(35));
     let _ = ableton_cmd(&mut s, json!({"type":"switch_to_arrangement_view","params":{}}));
-    let _ = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": ["Lead"]}}));
+    let _ = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": [track]}}));
     nap();
     let ti = ableton_cmd(&mut s, json!({"type":"create_midi_track","params":{"index":-1}}))
         .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()))
-        .ok_or_else(|| anyhow!("could not create the Lead track"))?;
-    let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": "Lead"}}));
+        .ok_or_else(|| anyhow!("could not create the {track} track"))?;
+    let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": track}}));
     nap();
 
-    let mut log = vec!["Lead track only — nothing else touched".to_string()];
+    let mut log = vec![format!("{track} track only — nothing else touched")];
     let (mut bar, mut ci) = (1i64, 0i64);
     for (i, (label, bars)) in sections.iter().enumerate() {
-        let notes = section_melody.get(i).cloned().unwrap_or_default();
+        let notes = section_notes.get(i).cloned().unwrap_or_default();
         let dest = ((bar - 1) as f64) * 4.0;
         bar += bars;
-        if notes.is_empty() { continue; } // Melodist silence — no clip
+        if notes.is_empty() { continue; } // silence by choice — no clip
         progress(format!("Laying {label} ({} notes)…", notes.len()));
         let length = (*bars as f64) * 4.0;
         let _ = ableton_cmd(&mut s, json!({"type":"create_clip","params":{"track_index": ti, "clip_index": ci, "length": length}}));
         let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
-        let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": part_color("Lead")}}));
+        let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": part_color(track)}}));
         let _ = ableton_cmd(&mut s, json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": ci, "name": label}}));
         let _ = ableton_cmd(&mut s, json!({"type":"duplicate_session_clip_to_arrangement","params":{"track_index": ti, "clip_index": ci, "destination_time": dest}}));
         log.push(format!("✓ {label} @ bar {} · {} notes", bar - bars, notes.len()));
@@ -563,36 +569,55 @@ pub async fn build_song_for(conn: &Connection, song_id: &str, progress: impl Fn(
         .as_ref()
         .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
         .unwrap_or_else(|| *preset.as_ref().map(|p| crate::midi::profile_for_genre(&p.genre)).unwrap_or(&crate::midi::POP_DEFAULT));
-    let section_melody = melody_abs_for_sections(conn, &song, &sections, profile.vel_scale).await;
+    let takes = takes_for_sections(conn, &song, &sections, profile.vel_scale).await;
     let bpm = song.bpm;
-    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &[], &section_melody, &profile, &progress)).await?
+    tokio::task::spawn_blocking(move || build_song(bpm, &sections, &[], &takes, &profile, &progress)).await?
 }
 
-/// Stored Melodist melody (degree-based, per section label) → absolute-MIDI
-/// notes per section INDEX. Empty (all-empty) when none was generated.
-async fn melody_abs_for_sections(conn: &Connection, song: &crate::models::Song, sections: &[(String, i64, Vec<(String, i64)>)], vel_scale: f64) -> Vec<Vec<Value>> {
-    match db::get_song_melody(conn, &song.id).await.ok().flatten() {
-        Some(raw) => {
-            let stored: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-            let melody_secs = stored.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let root_pc = crate::midi::chord_tones(&song.key_root).map(|(pc, _)| pc).unwrap_or(0);
-            let minor = song.key_mode != "major";
-            sections.iter().map(|(label, _, _)| {
-                melody_secs.iter()
-                    .find(|s| s.get("label").and_then(|v| v.as_str())
-                        .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false))
-                    .and_then(|s| s.get("notes").and_then(|v| v.as_array()))
-                    .map(|n| crate::midi::melody_notes_abs(n, root_pc, minor, vel_scale))
-                    .unwrap_or_default()
-            }).collect()
-        }
-        None => vec![],
+/// The lowercase part key ↔ Live track name mapping for written takes.
+fn take_track_name(part: &str) -> Option<&'static str> {
+    match part {
+        "lead" => Some("Lead"), "bass" => Some("Bass"), "pad" => Some("Pad"),
+        "chords" => Some("Chords"), "arp" => Some("Arp"),
+        _ => None,
     }
 }
 
-/// The Melodist lead as its OWN Live track (fetch melody + sections, then
-/// `build_lead_track`) — the non-destructive push behind "⚡ Lead → Live".
-pub async fn build_melody_track_for(conn: &Connection, song_id: &str, progress: impl Fn(String) + Send + 'static) -> Result<String> {
+/// Every stored take (Melodist lead + Arranger parts), converted from
+/// degree-based note events to absolute-MIDI per section INDEX, keyed by
+/// its Live track name. Empty map when nothing was written.
+async fn takes_for_sections(conn: &Connection, song: &crate::models::Song, sections: &[(String, i64, Vec<(String, i64)>)], vel_scale: f64) -> std::collections::HashMap<String, Vec<Vec<Value>>> {
+    let root_pc = crate::midi::chord_tones(&song.key_root).map(|(pc, _)| pc).unwrap_or(0);
+    let minor = song.key_mode != "major";
+    let convert = |raw: &str, part: &str| -> Vec<Vec<Value>> {
+        let stored: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        let take_secs = stored.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        sections.iter().map(|(label, _, _)| {
+            take_secs.iter()
+                .find(|s| s.get("label").and_then(|v| v.as_str())
+                    .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false))
+                .and_then(|s| s.get("notes").and_then(|v| v.as_array()))
+                .map(|n| crate::midi::take_notes_abs(n, root_pc, minor, vel_scale, part))
+                .unwrap_or_default()
+        }).collect()
+    };
+    let mut map = std::collections::HashMap::new();
+    if let Ok(Some(raw)) = db::get_song_melody(conn, &song.id).await {
+        map.insert("Lead".to_string(), convert(&raw, "lead"));
+    }
+    for (part, raw) in db::list_song_parts(conn, &song.id).await.unwrap_or_default() {
+        if let Some(track) = take_track_name(&part) {
+            map.insert(track.to_string(), convert(&raw, &part));
+        }
+    }
+    map
+}
+
+/// One written take as its OWN Live track — the non-destructive push behind
+/// "⚡ Lead → Live" and the per-part variation buttons. `part` is lowercase
+/// ("lead", "bass", "pad", "chords", "arp").
+pub async fn build_take_track_for(conn: &Connection, song_id: &str, part: &str, progress: impl Fn(String) + Send + 'static) -> Result<String> {
+    let track = take_track_name(part).ok_or_else(|| anyhow!("unknown part '{part}'"))?;
     let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let sections = song_parts(conn, song_id).await;
     if sections.is_empty() {
@@ -603,9 +628,16 @@ pub async fn build_melody_track_for(conn: &Connection, song_id: &str, progress: 
         .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
         .map(|pr| pr.vel_scale)
         .unwrap_or(1.0);
-    let section_melody = melody_abs_for_sections(conn, &song, &sections, vel).await;
+    let takes = takes_for_sections(conn, &song, &sections, vel).await;
+    let section_notes = takes.get(track).cloned().unwrap_or_default();
     let secs: Vec<(String, i64)> = sections.iter().map(|(l, b, _)| (l.clone(), *b)).collect();
-    tokio::task::spawn_blocking(move || build_lead_track(&secs, &section_melody, &progress)).await?
+    let track = track.to_string();
+    tokio::task::spawn_blocking(move || build_take_track(&track, &secs, &section_notes, &progress)).await?
+}
+
+/// Back-compat wrapper: the Melodist lead push.
+pub async fn build_melody_track_for(conn: &Connection, song_id: &str, progress: impl Fn(String) + Send + 'static) -> Result<String> {
+    build_take_track_for(conn, song_id, "lead", progress).await
 }
 
 #[cfg(test)]

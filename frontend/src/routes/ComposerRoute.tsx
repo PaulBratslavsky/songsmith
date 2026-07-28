@@ -3,7 +3,7 @@ import { useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../ipc/api";
 import { Sketchpad } from "../components/compose/Sketchpad";
-import { compositionFromSong, compositionFromProgression } from "../lib/music/compose/compositionFromSong";
+import { compositionFromSong, compositionFromProgression, applyTakesToComposition } from "../lib/music/compose/compositionFromSong";
 import type { Composition } from "../lib/music/compose/types";
 import type { PitchClass } from "../lib/music/types";
 import { normalizePitchClass } from "../lib/music/theory/notes";
@@ -73,6 +73,9 @@ function useSongComposition(songId: string | null): {
   // the song's section spine (docs/SECTION-SPINE-SPEC.md, Phase 2): owns the
   // Composition's section order/bars when non-empty; [] = legacy chords order
   const sections = useQuery({ queryKey: ["sections", songId], queryFn: () => api.listSections(songId!), enabled: !!songId });
+  // Melodist/Arranger takes — they pre-fill the melody/bass lanes so a
+  // generated take can be EDITED here instead of only re-rolled
+  const takes = useQuery({ queryKey: ["takes", songId], queryFn: () => api.getSongTakes(songId!), enabled: !!songId });
 
   // Every query must have SETTLED before we build the composition.
   // The stage query keys are shared with SongWorkspace's cache, so chords can
@@ -85,7 +88,8 @@ function useSongComposition(songId: string | null): {
     !!song.data &&
     (!chordsStageId || chords.isFetched) &&
     (!lyricsStageId || lyrics.isFetched) &&
-    sections.isFetched;
+    sections.isFetched &&
+    takes.isFetched;
 
   const comp = useMemo<Composition | null>(() => {
     if (!songId || !song.data || !stagesSettled) return null;
@@ -93,12 +97,13 @@ function useSongComposition(songId: string | null): {
     const cd = parseArtifact("chords", chords.data?.artifact?.content).data;
     const ld = parseArtifact("lyrics", lyrics.data?.artifact?.content).data;
     if (!cd?.sections.length) return null;
-    return compositionFromSong(v.key_root, v.key_mode, cd, ld, {
+    const base = compositionFromSong(v.key_root, v.key_mode, cd, ld, {
       id: `song-${songId}`,
       name: v.title || "Imported song",
       bpm: Number(v.bpm) || undefined,
     }, sections.data ?? []);
-  }, [songId, song.data, stagesSettled, chords.data, lyrics.data, sections.data]);
+    return applyTakesToComposition(base, takes.data?.melody, takes.data?.bass);
+  }, [songId, song.data, stagesSettled, chords.data, lyrics.data, sections.data, takes.data]);
 
   return {
     comp,

@@ -226,9 +226,9 @@ async fn install_ableton_script() -> R<String> {
 }
 
 #[tauri::command]
-async fn generate_song_melody(state: State<'_, AppState>, song_id: String) -> R<serde_json::Value> {
+async fn generate_song_melody(state: State<'_, AppState>, song_id: String, section: Option<String>) -> R<serde_json::Value> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
-    song_core::agent::generate_song_melody(&state.conn, &settings, &song_id).await.map_err(e2s)
+    song_core::agent::generate_song_melody(&state.conn, &settings, &song_id, section.as_deref()).await.map_err(e2s)
 }
 #[tauri::command]
 async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
@@ -1149,6 +1149,32 @@ async fn ableton_build_melody(app: tauri::AppHandle, state: State<'_, AppState>,
     .await
     .map_err(e2s)
 }
+/// The song's stored takes (Melodist lead + Arranger bass) for the Composer's
+/// lanes — degree-based, already in the Composer's vocabulary.
+#[tauri::command]
+async fn get_song_takes(state: State<'_, AppState>, song_id: String) -> R<serde_json::Value> {
+    let melody = db::get_song_melody(&state.conn, &song_id).await.map_err(e2s)?
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let bass = db::get_song_part(&state.conn, &song_id, "bass").await.map_err(e2s)?
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    Ok(serde_json::json!({ "melody": melody, "bass": bass }))
+}
+/// Arranger: Claude writes one part (bass/pad/chords/arp) as a stored take.
+#[tauri::command]
+async fn generate_song_part(state: State<'_, AppState>, song_id: String, part: String) -> R<serde_json::Value> {
+    let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    song_core::agent::generate_song_part(&state.conn, &settings, &song_id, &part).await.map_err(e2s)
+}
+/// Non-destructive single-part push (any written take, incl. the lead).
+#[tauri::command]
+async fn ableton_build_part(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String, part: String) -> R<String> {
+    let sid = song_id.clone();
+    song_core::ableton::build_take_track_for(&state.conn, &song_id, &part, move |msg| {
+        let _ = app.emit("ableton_progress", serde_json::json!({ "song_id": sid, "message": msg }));
+    })
+    .await
+    .map_err(e2s)
+}
 /// Stub the whole song in Ableton's Arrangement: Sections clip track + Bass /
 /// Chords / Pad / Chord melody / Lead / Filler / Arp MIDI parts.
 /// Thin wrapper over song_core::ableton::build_song_for (also an MCP tool).
@@ -1383,6 +1409,9 @@ pub fn run() {
             ableton_build_clips,
             ableton_build_song,
             ableton_build_melody,
+            generate_song_part,
+            ableton_build_part,
+            get_song_takes,
             ableton_build_progression,
             ableton_build_composition,
             ableton_build_outline,

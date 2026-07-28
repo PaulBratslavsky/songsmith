@@ -61,8 +61,11 @@ export type CommandMap = {
   union_spine_sections: { args: { songId: string }; result: Section[] };
   import_reference: { args: { audioPath: string }; result: string };
   resume_import: { args: { songId: string }; result: string };
-  generate_song_melody: { args: { songId: string }; result: { motif: string; note_count: number; sections: number } };
+  generate_song_melody: { args: { songId: string; section?: string | null }; result: { motif: string; note_count: number; sections: number; rewrote?: string } };
   ableton_build_melody: { args: { songId: string }; result: string };
+  generate_song_part: { args: { songId: string; part: string }; result: { part: string; idea: string; note_count: number } };
+  ableton_build_part: { args: { songId: string; part: string }; result: string };
+  get_song_takes: { args: { songId: string }; result: { melody: { motif?: string; sections: { label: string; notes: { degree: number; octave: number; start: number; length: number }[] }[] } | null; bass: { idea?: string; sections: { label: string; notes: { degree: number; octave: number; start: number; length: number }[] }[] } | null } };
   run_doctor: { args: Record<string, never>; result: { name: string; status: "ok" | "warn" | "fail"; detail: string }[] };
   install_ableton_script: { args: Record<string, never>; result: string };
   parse_pasted_lyrics: { args: { text: string }; result: ParsedLyrics };
@@ -265,8 +268,11 @@ export const api = {
   unionSpineSections: (songId: string) => call("union_spine_sections", { songId }),
   importReference: (audioPath: string) => call("import_reference", { audioPath }),
   resumeImport: (songId: string) => call("resume_import", { songId }),
-  generateSongMelody: (songId: string) => call("generate_song_melody", { songId }),
+  generateSongMelody: (songId: string, section?: string) => call("generate_song_melody", { songId, section }),
   abletonBuildMelody: (songId: string) => call("ableton_build_melody", { songId }),
+  generateSongPart: (songId: string, part: string) => call("generate_song_part", { songId, part }),
+  abletonBuildPart: (songId: string, part: string) => call("ableton_build_part", { songId, part }),
+  getSongTakes: (songId: string) => call("get_song_takes", { songId }),
   runDoctor: () => call("run_doctor", {}),
   installAbletonScript: () => call("install_ableton_script", {}),
   // paste-lyrics import (words kept verbatim — parse/tag only, never rewrite)

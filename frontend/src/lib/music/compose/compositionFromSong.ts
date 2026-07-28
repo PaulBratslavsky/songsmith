@@ -33,6 +33,7 @@ import type {
   KeyMode,
   LyricLine,
   LyricWord,
+  NoteSpan,
   Section,
 } from './types';
 import {
@@ -164,6 +165,63 @@ export function compositionFromAnalysis(
     return parseStoredComposition(withNotes) ?? withNotes;
   }
   return comp;
+}
+
+/** A stored Melodist/Arranger take: per-section degree-based note events —
+ *  ALREADY the Composer's vocabulary (degree 1–7, octave 0|1, 16th ticks). */
+export type PartTake = {
+  sections: { label: string; notes: { degree: number; octave: number; start: number; length: number }[] }[];
+};
+
+/**
+ * Fill the Composition's melody/bass lanes from stored takes (Melodist lead →
+ * melody, Arranger bass → bass): sections match by label (first-unused), note
+ * starts offset by the section's startTick and clip to its length. The takes
+ * become EDITABLE lanes — tweak a generated take by hand instead of only
+ * re-rolling it. Lanes with no take stay as they were.
+ */
+export function applyTakesToComposition(
+  comp: Composition,
+  melody: PartTake | null | undefined,
+  bass: PartTake | null | undefined,
+): Composition {
+  const mk = (take: PartTake | null | undefined): NoteSpan[] => {
+    if (!take?.sections?.length) return [];
+    const used = new Set<number>();
+    const spans: NoteSpan[] = [];
+    for (const sec of comp.sections) {
+      const idx = take.sections.findIndex(
+        (s, i) => !used.has(i) && s.label.trim().toLowerCase() === sec.name.trim().toLowerCase(),
+      );
+      if (idx < 0) continue;
+      used.add(idx);
+      for (const n of take.sections[idx].notes ?? []) {
+        const start = sec.startTick + Math.max(0, Math.round(n.start));
+        if (start >= sec.startTick + sec.lengthTicks) continue;
+        const length = Math.min(
+          Math.max(1, Math.round(n.length)),
+          sec.startTick + sec.lengthTicks - start,
+        );
+        spans.push({
+          id: uid('take'),
+          degree: Math.min(7, Math.max(1, Math.round(n.degree))) as Degree,
+          octave: n.octave ? 1 : 0,
+          start,
+          length,
+        });
+      }
+    }
+    return spans.sort((a, b) => a.start - b.start);
+  };
+  const m = mk(melody);
+  const b = mk(bass);
+  if (!m.length && !b.length) return comp;
+  const next: Composition = {
+    ...comp,
+    melody: m.length ? m : comp.melody,
+    bass: b.length ? b : comp.bass,
+  };
+  return parseStoredComposition(next) ?? next;
 }
 
 /**

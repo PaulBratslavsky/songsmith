@@ -817,6 +817,9 @@ const handlers: MockHandlers = {
   resume_import: () => "Nothing was missing — the import is already complete.",
   generate_song_melody: () => { throw new Error("melody generation needs the desktop app (Claude)"); },
   ableton_build_melody: () => { throw new Error("Ableton needs the desktop app"); },
+  generate_song_part: () => { throw new Error("part generation needs the desktop app (Claude)"); },
+  ableton_build_part: () => { throw new Error("Ableton needs the desktop app"); },
+  get_song_takes: () => ({ melody: null, bass: null }),
   run_doctor: () => [{ name: "Mock mode", status: "warn" as const, detail: "environment checks need the desktop app" }],
   install_ableton_script: () => { throw new Error("installing the Ableton script needs the desktop app"); },
   // paste-lyrics import (words verbatim; mock = deterministic header split only)
@@ -923,6 +926,6 @@ const MOCK_TOOLS = [
   "list_progressions","save_progression","update_progression","delete_progression",
   "list_compositions","get_composition","save_composition","delete_composition",
   "list_renders","add_render","set_render_pick","delete_render",
-  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference","import_reference","resume_import","generate_song_melody","ableton_build_melody",
+  "ableton_build_song","ableton_build_progression","ableton_build_outline","analyze_reference","import_reference","resume_import","generate_song_melody","ableton_build_melody","generate_song_part","ableton_build_part",
   "get_settings","set_settings",
 ].map((name) => ({ name, description: "", destructive: name === "delete_song" || name === "delete_progression" || name === "delete_composition" || name === "delete_section" }));
