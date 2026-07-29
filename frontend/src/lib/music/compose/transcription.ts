@@ -30,6 +30,11 @@ export function noteSpansFromTranscription(
   events: TranscribedNote[],
   lane: 'melody' | 'bass',
   bpm: number,
+  /** The analysis' first downbeat (seconds). Event times are ABSOLUTE, but
+   *  bar 1 of the grid is this instant — and the render audio is nudged by
+   *  exactly this much — so notes must be rebased or they land late against
+   *  both the chords and the audio (audit 2026-07-28). */
+  offsetSec = 0,
 ): NoteSpan[] {
   if (!events.length || !(bpm > 0)) return [];
   // every playable (degree, octave) with its resolved MIDI
@@ -52,11 +57,11 @@ export function noteSpansFromTranscription(
   const center = (cands[0].midi + cands[cands.length - 1].midi) / 2;
   const shift = Math.round((median - center) / 12) * 12;
 
-  const toTick = (sec: number) => Math.round((sec * bpm * TICKS_PER_BEAT) / 60);
+  const toTick = (sec: number) => Math.round(((sec - offsetSec) * bpm * TICKS_PER_BEAT) / 60);
   const spans: NoteSpan[] = [];
   for (const e of [...events].sort((a, b) => a.start - b.start)) {
     const start = toTick(e.start);
-    if (start < 0 || start >= comp.totalTicks) continue;
+    if (start < 0 || start >= comp.totalTicks) continue; // pre-downbeat pickup notes drop
     const length = Math.max(1, Math.min(toTick(e.end) - start, comp.totalTicks - start));
     const target = e.midi - shift;
     let best = cands[0];

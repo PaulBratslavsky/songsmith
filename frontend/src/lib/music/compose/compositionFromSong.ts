@@ -114,6 +114,8 @@ export function compositionFromAnalysis(
     sections: { label: string; bars: number; chords: { name: string; beats: number }[] }[];
     /** Phase 2: transcribed note events (seconds) from the vocals/bass stems. */
     melody?: TranscribedNote[]; bass?: TranscribedNote[];
+    /** analyzer v2: bar 1 of the grid — the notes rebase onto it */
+    first_downbeat_sec?: number;
   },
   name: string,
   /** The owning song's SPINE (iteration loop): when an analysis section's
@@ -160,10 +162,11 @@ export function compositionFromAnalysis(
   // Phase 2: the transcribed melody/bass fold into the diatonic lanes — an
   // editable sketch of what the AI sang/played, in the Composer's vocabulary.
   if (a.melody?.length || a.bass?.length) {
+    const downbeat = Number(a.first_downbeat_sec) || 0;
     const withNotes: Composition = {
       ...comp,
-      melody: noteSpansFromTranscription(comp, a.melody ?? [], 'melody', comp.bpm),
-      bass: noteSpansFromTranscription(comp, a.bass ?? [], 'bass', comp.bpm),
+      melody: noteSpansFromTranscription(comp, a.melody ?? [], 'melody', comp.bpm, downbeat),
+      bass: noteSpansFromTranscription(comp, a.bass ?? [], 'bass', comp.bpm, downbeat),
     };
     return parseStoredComposition(withNotes) ?? withNotes;
   }

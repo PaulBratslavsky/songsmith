@@ -221,7 +221,11 @@ export function Library() {
   useEffect(() => {
     let un = () => {};
     (async () => {
-      un = await listen<{ message: string }>("import_progress", (p) => setImportMsg(p.message));
+      // the Library shows the NEW-import stream only (resume events carry a
+      // song_id and belong to that song's banner)
+      un = await listen<{ song_id?: string; message: string }>("import_progress", (p) => {
+        if (!p.song_id) setImportMsg(p.message);
+      });
     })();
     return () => un();
   }, []);

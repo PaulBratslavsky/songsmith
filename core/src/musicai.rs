@@ -131,6 +131,7 @@ pub async fn transcribe_lyrics(
             }
         }
     }
+    rescale_ms_if_needed(&mut transcript);
     transcript.sort_by(|a, b| {
         let sa = a.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let sb = b.get("start").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -156,13 +157,12 @@ fn collect_transcript(v: &Value, out: &mut Vec<Value>) {
             let text = o.get("text").or_else(|| o.get("word")).or_else(|| o.get("line")).and_then(|t| t.as_str());
             let start = ["start", "startTime", "start_time"].iter().find_map(|k| o.get(*k)).and_then(num_or_str_f64);
             let end = ["end", "endTime", "end_time"].iter().find_map(|k| o.get(*k)).and_then(num_or_str_f64);
-            if let (Some(text), Some(mut start), Some(mut end)) = (text, start, end) {
+            if let (Some(text), Some(start), Some(end)) = (text, start, end) {
                 if !text.trim().is_empty() {
-                    // >10h "seconds" means the workflow emitted milliseconds
-                    if start > 36_000.0 {
-                        start /= 1000.0;
-                        end /= 1000.0;
-                    }
+                    // units are decided ONCE for the whole transcript (see
+                    // rescale_ms_if_needed) — the old per-entry heuristic
+                    // scaled late lines and left early ones in milliseconds,
+                    // scattering the lyrics (audit 2026-07-28)
                     out.push(json!({ "start": start, "end": end, "text": text.trim() }));
                     return; // don't also collect this object's children (words within a line)
                 }
@@ -172,6 +172,25 @@ fn collect_transcript(v: &Value, out: &mut Vec<Value>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Decide seconds-vs-milliseconds ONCE per transcript: if the last timestamp
+/// is longer than any song could be (1 hour), the whole list is milliseconds.
+/// Deciding per entry mixed the two units within one transcript.
+fn rescale_ms_if_needed(entries: &mut [Value]) {
+    let max_end = entries.iter()
+        .filter_map(|e| e.get("end").or_else(|| e.get("start")).and_then(|v| v.as_f64()))
+        .fold(0.0_f64, f64::max);
+    if max_end <= 3600.0 {
+        return; // plausible as seconds — leave it alone
+    }
+    for e in entries.iter_mut() {
+        for k in ["start", "end"] {
+            if let Some(v) = e.get(k).and_then(|x| x.as_f64()) {
+                e[k] = json!(v / 1000.0);
+            }
+        }
     }
 }
 
@@ -199,13 +218,23 @@ mod tests {
                 { "word": "first", "startTime": 1000.0, "endTime": 1400.0 } ] },
             { "line": "second line", "startTime": 60000.0, "endTime": 62000.0 }
         ]}), &mut out);
-        // hmm: 1000.0 sec < 36000 → NOT scaled; acceptable — ms detection is
-        // per-entry heuristic and late-song entries (>10h as seconds) scale
         assert_eq!(out.len(), 2, "line objects win over nested words");
         assert_eq!(out[0]["text"], "first line");
+        // REGRESSION (audit 2026-07-28): the unit decision is made for the
+        // WHOLE transcript — the old per-entry rule scaled the 60000 ms line
+        // and left the 1000 ms one alone, scattering the lyrics.
+        rescale_ms_if_needed(&mut out);
+        assert_eq!(out[0]["start"], json!(1.0), "early ms entry scaled too");
+        assert_eq!(out[1]["start"], json!(60.0), "late ms entry scaled");
+
+        // a plausible seconds transcript is left untouched
+        let mut secs = vec![json!({ "start": 1.5, "end": 3.0, "text": "a" }), json!({ "start": 200.0, "end": 202.0, "text": "b" })];
+        rescale_ms_if_needed(&mut secs);
+        assert_eq!(secs[1]["start"], json!(200.0), "seconds are not rescaled");
 
         let mut out = vec![];
         collect_transcript(&json!({ "transcript": [{ "text": "late", "start": "200000", "end": "201000" }] }), &mut out);
+        rescale_ms_if_needed(&mut out);
         assert_eq!(out[0]["start"], json!(200.0), "string ms timestamps parse + scale");
     }
 }

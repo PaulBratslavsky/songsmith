@@ -272,12 +272,26 @@ pub fn clamp_melody(sections_out: &[Value], parts: &[(String, i64, Vec<(String, 
 /// monophonic truncation (lead/bass/arp); polyphonic parts (pad/chords) keep
 /// overlaps — their stacks ARE simultaneous notes — but still clamp/clip/sort.
 pub fn clamp_part_take(sections_out: &[Value], parts: &[(String, i64, Vec<(String, i64)>)], mono: bool) -> Vec<Value> {
+    // Match each song section to a DISTINCT output section (first unused):
+    // `.find()` gave every same-labeled section the FIRST one's notes, so a
+    // song with two "Chorus" rows played identical material clipped to the
+    // wrong bar counts (audit 2026-07-28).
+    let mut used: Vec<bool> = vec![false; sections_out.len()];
     parts.iter().map(|(label, bars, _)| {
         let cap = (*bars).max(1) * 16;
-        let mut notes: Vec<(i64, i64, i64, i64)> = sections_out.iter()
-            .find(|s| s.get("label").and_then(|v| v.as_str())
-                .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false))
-            .and_then(|s| s.get("notes").and_then(|v| v.as_array()).cloned())
+        let pick = sections_out.iter().position(|s| {
+            s.get("label").and_then(|v| v.as_str())
+                .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false)
+        }).map(|first| {
+            // prefer an unused entry with this label; fall back to the first
+            sections_out.iter().enumerate().position(|(j, s)| {
+                !used[j] && s.get("label").and_then(|v| v.as_str())
+                    .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false)
+            }).unwrap_or(first)
+        });
+        if let Some(j) = pick { if j < used.len() { used[j] = true; } }
+        let mut notes: Vec<(i64, i64, i64, i64)> = pick
+            .and_then(|j| sections_out[j].get("notes").and_then(|v| v.as_array()).cloned())
             .unwrap_or_default()
             .iter()
             .filter_map(|n| {
@@ -564,6 +578,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// REGRESSION (audit 2026-07-28): two sections sharing a label must get
+    /// their OWN take entries — `.find()` handed both the first one's notes,
+    /// clipped to the wrong bar counts.
+    #[test]
+    fn duplicate_labels_get_distinct_take_sections() {
+        let parts = vec![
+            ("Chorus".to_string(), 1i64, vec![]),  // cap 16
+            ("Chorus".to_string(), 2i64, vec![]),  // cap 32
+        ];
+        let out = vec![
+            serde_json::json!({ "label": "Chorus", "notes": [{ "degree": 1, "start": 0, "length": 4 }] }),
+            serde_json::json!({ "label": "Chorus", "notes": [
+                { "degree": 5, "start": 0, "length": 4 }, { "degree": 6, "start": 20, "length": 4 }] }),
+        ];
+        let c = clamp_part_take(&out, &parts, true);
+        let deg = |i: usize| c[i]["notes"].as_array().unwrap().iter().map(|n| n["degree"].as_i64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(deg(0), vec![1], "first Chorus keeps the first entry");
+        assert_eq!(deg(1), vec![5, 6], "second Chorus gets the SECOND entry, not a copy");
     }
 
     /// fold_into_band keeps the pitch class (a linear clamp does not).

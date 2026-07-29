@@ -124,7 +124,13 @@ async fn run_analyzer(settings: &Settings, audio_path: &str, lyrics: bool, stems
         return Err(anyhow!("analyzer failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(serde_json::from_str::<Value>(stdout.trim()).unwrap_or_else(|_| json!({ "raw": stdout })))
+    // A zero exit with non-JSON stdout used to become {"raw": …}, which the
+    // import treated as an analysis with no tempo and no sections — a broken
+    // analyzer fed the whole pipeline silently (audit 2026-07-28). Fail loudly.
+    serde_json::from_str::<Value>(stdout.trim()).map_err(|e| {
+        let head: String = stdout.trim().chars().take(200).collect();
+        anyhow!("the analyzer printed something that isn't JSON ({e}): {head}")
+    })
 }
 fn style_input(args: &Value) -> StyleInput {
     StyleInput {

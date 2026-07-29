@@ -29,11 +29,18 @@ export function ImportResumeBanner({ songId, stages, onChanged }: {
 
   // resume progress arrives on the same import_progress events the Library uses
   useEffect(() => {
+    // `listen` resolves async — without the flag, unmounting before it
+    // resolves leaks the listener (audit 2026-07-28). Events carrying a
+    // song_id are filtered so a Library import can't write into this banner.
+    let live = true;
     let un = () => {};
     (async () => {
-      un = await listen<{ message: string }>("import_progress", (p) => setResumeMsg(p.message));
+      const off = await listen<{ song_id?: string; message: string }>("import_progress", (p) => {
+        if (!p.song_id || p.song_id === songId) setResumeMsg(p.message);
+      });
+      if (live) un = off; else off();
     })();
-    return () => un();
+    return () => { live = false; un(); };
   }, [songId]);
 
   const resumeImport = async () => {

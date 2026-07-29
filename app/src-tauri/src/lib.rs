@@ -163,7 +163,10 @@ async fn run_doctor(state: State<'_, AppState>) -> R<Vec<DoctorCheck>> {
         out.push(check("Reference analyzer", "warn", "not configured — audio import/analysis is off (Settings → Reference analyzer)".into()));
     } else {
         let program = settings.analyzer_cmd.split_whitespace().next().unwrap_or("").to_string();
-        if !std::path::Path::new(&program).exists() {
+        // Only an EXPLICIT path can be checked for existence — a bare command
+        // like `python3` is resolved from PATH and used to false-fail here
+        // (audit 2026-07-28). Bare names fall through to the real run below.
+        if program.contains('/') && !std::path::Path::new(&program).exists() {
             out.push(check("Reference analyzer", "fail", format!("{program} does not exist")));
         } else {
             let deps = tokio::time::timeout(std::time::Duration::from_secs(120), {
@@ -233,8 +236,11 @@ async fn generate_song_melody(state: State<'_, AppState>, song_id: String, secti
 #[tauri::command]
 async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
+    // carry the song id so a banner only shows ITS song's progress — every
+    // mounted banner used to echo any running import (audit 2026-07-28)
+    let sid = song_id.clone();
     let progress = move |msg: String| {
-        let _ = app.emit("import_progress", serde_json::json!({ "message": msg }));
+        let _ = app.emit("import_progress", serde_json::json!({ "song_id": sid, "message": msg }));
     };
     song_core::agent::resume_import(&state.conn, &settings, &song_id, &progress).await.map_err(e2s)
 }

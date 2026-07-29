@@ -604,7 +604,7 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     // 4. key/tempo + Structure + Chords artifacts
     let root = structure.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("A");
     let mode = structure.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("minor");
-    let bpm = structure.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120);
+    let bpm = json_bpm(structure.get("bpm")).unwrap_or(120);
     db::update_song_key(conn, &song.id, root, mode, bpm).await?;
 
     let stages = db::list_stages(conn, &song.id).await?;
@@ -693,9 +693,21 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     // Composer-ready analysis stashed, so 🎼 Analyze → Composer is INSTANT)
     let file_name = std::path::Path::new(audio_path).file_name()
         .map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "import".into());
-    if let Ok(rd) = db::create_render(conn, &song.id, &file_name, audio_path, "import", "the audio this song was imported from").await {
-        let summary = analysis_summary(&structure, chords_for_render, &raw);
-        let _ = db::set_render_analysis(conn, &rd.id, &summary.to_string()).await;
+    // Failure here is NOT cosmetic: with no render row, ⟳ Resume import has
+    // no audio to re-analyze, so the recovery path disappears. Say so instead
+    // of reporting "Import complete" (audit 2026-07-28).
+    match db::create_render(conn, &song.id, &file_name, audio_path, "import", "the audio this song was imported from").await {
+        Ok(rd) => {
+            let summary = analysis_summary(&structure, chords_for_render, &raw);
+            if let Err(e) = db::set_render_analysis(conn, &rd.id, &summary.to_string()).await {
+                progress(format!("⚠ the render's analysis could not be stashed: {e} — Analyze → Composer will re-run it"));
+                issues.push("stash analysis".into());
+            }
+        }
+        Err(e) => {
+            progress(format!("⚠ could not attach the audio as a render: {e} — add it by hand on the Renders tab (⟳ Resume needs it)"));
+            issues.push("attach render".into());
+        }
     }
 
     // the 🎯 intent from the written concept — every later run steers by it
@@ -842,9 +854,12 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
         }
     }
 
-    // 3. Approve everything with content — surfacing errors this time.
+    // 3. Approve everything whose CURRENT ARTIFACT isn't approved yet.
+    // Filtering on stage STATUS skipped the lyrics stage resume had just
+    // written (it sets status "done" itself), so the artifact stayed
+    // unapproved and advance_song never ran for it (audit 2026-07-28).
     for st in db::list_stages(conn, song_id).await? {
-        if db::current_artifact(conn, &st.id).await?.is_some() && st.status != "approved" && st.status != "done" {
+        if db::current_artifact(conn, &st.id).await?.is_some_and(|a| !a.approved) {
             if let Err(e) = crate::tools::approve_stage(conn, &st.id).await {
                 progress(format!("⚠ could not approve {}: {e}", stage_label(&st.r#type)));
                 failed.push(format!("approve {} ({e})", stage_label(&st.r#type)));
@@ -957,7 +972,16 @@ pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_i
     let sections_out = parsed.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let clamped = crate::midi::clamp_melody(&sections_out, &parts);
 
-    // section rewrite: splice ONLY the target into the existing take
+    // section rewrite: splice ONLY the target into the existing take. Re-READ
+    // the stored take here — the copy fetched before the (slow) Claude call is
+    // stale if anything else wrote in the meantime, and writing it back would
+    // silently revert that work (audit 2026-07-28).
+    let existing = match &target {
+        Some(_) => db::get_song_melody(conn, song_id).await?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .or(existing),
+        None => existing,
+    };
     if let (Some(t), Some(mut stored)) = (target.clone(), existing) {
         let new_sec = clamped.iter()
             .find(|s| s.get("label").and_then(|l| l.as_str()).map(|l| l.trim().eq_ignore_ascii_case(&t)).unwrap_or(false))
@@ -1620,7 +1644,7 @@ fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value 
         })
         .collect();
     json!({
-        "bpm": structure.get("bpm").and_then(|v| v.as_i64()).unwrap_or(120),
+        "bpm": json_bpm(structure.get("bpm")).unwrap_or(120),
         "key_root": structure.pointer("/key/root").and_then(|v| v.as_str()).unwrap_or("A"),
         "key_mode": structure.pointer("/key/mode").and_then(|v| v.as_str()).unwrap_or("minor"),
         "sections": sections,
@@ -1634,13 +1658,30 @@ fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value 
     })
 }
 
+/// A BPM out of model JSON, tolerant of the shapes Claude actually emits:
+/// 86, 86.0 (a float — `as_i64` returns None for it, which used to silently
+/// fall back to 120 and drift the whole grid), or "86 BPM" as a string.
+fn json_bpm(v: Option<&Value>) -> Option<i64> {
+    let v = v?;
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f.round() as i64))
+        .or_else(|| v.as_str().and_then(|s| {
+            let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            digits.parse::<f64>().ok().map(|f| f.round() as i64)
+        }))
+        .filter(|b| (20..=300).contains(b))
+}
+
 /// Transcript lines → per-spine-row lyric sections: each line lands in the
 /// section whose [start_sec, next start_sec) window contains it — verbatim
 /// words, deterministic assignment. Shared by the importer and resume_import.
 fn lyric_sections_from_transcript(rows: &[crate::models::Section], starts: &[f64], transcript: &[Value]) -> Vec<Value> {
     rows.iter().enumerate().map(|(i, row)| {
         let lo = starts.get(i).copied().unwrap_or(-1.0);
-        let hi = starts.get(i + 1).copied().filter(|&h| h >= 0.0).unwrap_or(f64::MAX);
+        // The window ends at the NEXT KNOWN start, not the next slot: a
+        // section missing its start_sec used to make its predecessor swallow
+        // the rest of the song, duplicating those lines (audit 2026-07-28).
+        let hi = starts.iter().skip(i + 1).copied().find(|&h| h >= 0.0).unwrap_or(f64::MAX);
         let lines: Vec<String> = if lo < 0.0 { vec![] } else {
             transcript.iter().filter_map(|t| {
                 let ts = t.get("start").and_then(|v| v.as_f64())?;

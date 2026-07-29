@@ -245,7 +245,10 @@ export function Sketchpad({
 
   // Phase 1 render round-trip: the analyzed render's audio follows the
   // transport so you rebuild the AI song against the real thing
-  const renderAudio = useRenderAudio(audioPath, comp.bpm, isPlaying, currentStep, audioNudgeMs);
+  const renderAudio = useRenderAudio(
+    audioPath, comp.bpm, isPlaying, currentStep, audioNudgeMs,
+    focusRange ? `${focusRange.start}:${focusRange.end}` : '', // re-arm ⇒ re-seek
+  );
   useEffect(() => {
     renderAudio.setEnabled(ab !== 'mine'); // A/B drives the render side too
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setEnabled is stable
@@ -283,9 +286,13 @@ export function Sketchpad({
 
   // N3: incoming MIDI notes → step entry (armed lane, nearest scale degree)
   useEffect(() => {
+    // `listen` resolves ASYNC: without this flag an effect that re-runs (key
+    // change) or unmounts before it resolves leaves the old listener alive,
+    // mapping notes with a stale scale (audit 2026-07-28).
+    let live = true;
     let un = () => {};
     (async () => {
-      un = await listen<{ note: number; velocity: number; on: boolean }>('midi_note', (m) => {
+      const off = await listen<{ note: number; velocity: number; on: boolean }>('midi_note', (m) => {
         const st = midiRef.current;
         if (!st.armed || !m.on) return;
         // pitch → nearest scale degree (grid lanes are degree-based)
@@ -302,10 +309,17 @@ export function Sketchpad({
         actions.placeNote(st.lane, (best + 1) as Degree, tick, st.dur);
         setMidiStep(Math.min(tick + st.dur, comp.totalTicks));
       });
+      if (live) un = off; else off(); // resolved after teardown → drop it now
     })();
-    return () => un();
+    return () => { live = false; un(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refs carry per-note state
   }, [pcs, comp.totalTicks, actions]);
+
+  // A step cursor left past the end of a NEWLY loaded (shorter) composition
+  // silently swallows every played note — clamp it on load (audit 2026-07-28)
+  useEffect(() => {
+    setMidiStep((s) => (s >= comp.totalTicks ? 0 : s));
+  }, [comp.totalTicks, comp.id]);
 
   // Latest preview fns (depend on key) read through a ref so the stable
   // handler bundles don't change identity when the composition edits.
@@ -714,7 +728,14 @@ export function Sketchpad({
         <div className="card" style={{ padding: 8, marginBottom: 8 }}>
           <div className="row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span className="cmp-cap">Render audio</span>
-            <button type="button" className={'sm' + (renderAudio.enabled ? ' primary' : '')} onClick={() => renderAudio.setEnabled(!renderAudio.enabled)} title="hear the analyzed render along with the grid">
+            <button type="button" className={'sm' + (renderAudio.enabled ? ' primary' : '')} onClick={() => {
+              // keep A/B in step: muting the render here IS "mine", unmuting
+              // is "both" — otherwise the two controls disagreed and picking
+              // the already-selected A/B did nothing (audit 2026-07-28)
+              const on = !renderAudio.enabled;
+              renderAudio.setEnabled(on);
+              setAb(on ? 'both' : 'mine');
+            }} title="hear the analyzed render along with the grid">
               {renderAudio.enabled ? '🎧 on' : '🎧 muted'}
             </button>
             <label className="row" style={{ margin: 0, gap: 4, alignItems: 'center', textTransform: 'none' }}>

@@ -100,7 +100,9 @@ export function RenderAB({ renders }: { renders: R[] }) {
       if (!ctx) return;
       const p = ctx.currentTime - startRef.current.at + startRef.current.offset;
       setPos(p);
-      if (dur && p >= dur) stop();
+      // rewind at the end — leaving pos AT the duration made the next ▶ a
+      // silent blip until you dragged the slider back (audit 2026-07-28)
+      if (dur && p >= dur) { stop(); setPos(0); }
     }, 200);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stop is stable enough

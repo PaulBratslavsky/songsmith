@@ -308,9 +308,15 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
             // A written take for THIS section bypasses the energy map — the
             // Melodist/Arranger already chose its silences. Otherwise the
             // section-aware density applies (leave a gap so it builds).
-            let take = takes.get(part).and_then(|o| o.get(i)).filter(|n| !n.is_empty());
+            let part_take = takes.get(part);
+            let take = part_take.and_then(|o| o.get(i)).filter(|n| !n.is_empty());
             if take.is_none() {
                 if part == "Lead" { continue; } // Lead exists only via takes
+                // A part that HAS a written take owns its silences: an empty
+                // section means "sit out", so don't fall back to the formula
+                // here — that made the full build contradict ⚡ → Live, which
+                // leaves it silent (audit 2026-07-28).
+                if part_take.is_some_and(|o| o.iter().any(|n| !n.is_empty())) { continue; }
                 if !active.contains(&part) { continue; }
             }
             // Resolve the notes BEFORE creating anything: a part whose profile
@@ -598,13 +604,23 @@ async fn takes_for_sections(conn: &Connection, song: &crate::models::Song, secti
     let convert = |raw: &str, part: &str| -> Vec<Vec<Value>> {
         let stored: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
         let take_secs = stored.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        // first-UNUSED label match: with `.find()`, two sections sharing a
+        // label both got the first one's notes (audit 2026-07-28)
+        let mut used: Vec<bool> = vec![false; take_secs.len()];
         sections.iter().map(|(label, _, _)| {
-            take_secs.iter()
-                .find(|s| s.get("label").and_then(|v| v.as_str())
-                    .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false))
-                .and_then(|s| s.get("notes").and_then(|v| v.as_array()))
-                .map(|n| crate::midi::take_notes_abs(n, root_pc, minor, vel_scale, part))
-                .unwrap_or_default()
+            let hit = take_secs.iter().enumerate().position(|(j, s)| {
+                !used[j] && s.get("label").and_then(|v| v.as_str())
+                    .map(|l| l.trim().eq_ignore_ascii_case(label.trim())).unwrap_or(false)
+            });
+            match hit {
+                Some(j) => {
+                    used[j] = true;
+                    take_secs[j].get("notes").and_then(|v| v.as_array())
+                        .map(|n| crate::midi::take_notes_abs(n, root_pc, minor, vel_scale, part))
+                        .unwrap_or_default()
+                }
+                None => vec![],
+            }
         }).collect()
     };
     let mut map = std::collections::HashMap::new();
@@ -629,12 +645,14 @@ pub async fn build_take_track_for(conn: &Connection, song_id: &str, part: &str, 
     if sections.is_empty() {
         return Ok("No sections found — run the Structure stage first.".into());
     }
+    // resolve the profile exactly as the full build does (stored arrangement,
+    // else the genre keyword fallback) so a take sounds the SAME whichever
+    // button pushed it (audit 2026-07-28)
     let preset = db::get_preset(conn, &song.style_preset_id).await.ok().flatten();
-    let vel = preset.as_ref()
+    let profile = preset.as_ref()
         .and_then(|p| crate::midi::profile_from_json(&p.arrangement))
-        .map(|pr| pr.vel_scale)
-        .unwrap_or(1.0);
-    let takes = takes_for_sections(conn, &song, &sections, vel).await;
+        .unwrap_or_else(|| *preset.as_ref().map(|p| crate::midi::profile_for_genre(&p.genre)).unwrap_or(&crate::midi::POP_DEFAULT));
+    let takes = takes_for_sections(conn, &song, &sections, profile.vel_scale).await;
     let section_notes = takes.get(track).cloned().unwrap_or_default();
     let secs: Vec<(String, i64)> = sections.iter().map(|(l, b, _)| (l.clone(), *b)).collect();
     let track = track.to_string();

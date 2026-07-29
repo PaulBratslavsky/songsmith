@@ -54,6 +54,12 @@ def mono_clean(events, min_dur=0.08, min_amp=0.12):
         keep = True
         while out and e["start"] < out[-1]["end"]:
             prev = out[-1]
+            # identical onset: the (start, -amp) sort already put the LOUDER
+            # note in `out`, so drop the incoming one instead of truncating
+            # prev to zero and evicting it (audit 2026-07-28)
+            if e["start"] <= prev["start"]:
+                keep = False
+                break
             if e["amp"] < 0.6 * prev["amp"] and e["end"] <= prev["end"] + 0.02:
                 keep = False  # a quiet blip riding a strong held note
                 break
@@ -186,7 +192,7 @@ def main():
         y_harm = y_harm[:len(y)] if len(y_harm) > len(y) else y_harm
     chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr)
     key = estimate_key(chroma.mean(axis=1))
-    beat_chroma = librosa.util.sync(chroma, beats, aggregate=np.median)
+    beat_chroma = librosa.util.sync(chroma, beats, aggregate=np.median, pad=False)
 
     # --- beat-level chord scores: triad templates + a BASS-ROOT bonus (the
     # bass stem knows the root better than mid-register chroma — Cm/Eb/Ab
@@ -198,7 +204,7 @@ def main():
     scores = tmpl @ normed  # 24 × nbeats
     if "bass" in stems and nbeats > 0:
         yb, _ = librosa.load(stems["bass"], sr=sr, mono=True)
-        bsync = librosa.util.sync(librosa.feature.chroma_cqt(y=yb, sr=sr), beats, aggregate=np.median)
+        bsync = librosa.util.sync(librosa.feature.chroma_cqt(y=yb, sr=sr), beats, aggregate=np.median, pad=False)
         for b in range(min(nbeats, bsync.shape[1])):
             col = bsync[:, b]
             if float(col.max()) > 1e-4:  # silent bass beat → no opinion
@@ -237,7 +243,9 @@ def main():
         if not seg:
             break
         t = float(beat_times[b0]) if b0 < len(beat_times) else None
-        bar_chords.append({"bar": len(bar_chords) + 1, "time": round(t, 2) if t else None,
+        # `if t` would map a legitimate 0.0 (the FIRST bar) to None and drop
+        # the song's opening chord from every section (audit 2026-07-28)
+        bar_chords.append({"bar": len(bar_chords) + 1, "time": round(t, 2) if t is not None else None,
                            "chord": Counter(seg).most_common(1)[0][0]})
 
     # --- first DOWNBEAT: the 4-beat phase whose beats carry the most onset
@@ -250,7 +258,7 @@ def main():
 
     # --- structural segmentation (agglomerative on beat-synced features) ---
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    beat_mfcc = librosa.util.sync(mfcc, beats, aggregate=np.mean)
+    beat_mfcc = librosa.util.sync(mfcc, beats, aggregate=np.mean, pad=False)
     feat = np.vstack([librosa.util.normalize(beat_chroma, axis=0),
                       librosa.util.normalize(beat_mfcc, axis=0)])
     nseg = max(2, min(args.sections, feat.shape[1] - 1))

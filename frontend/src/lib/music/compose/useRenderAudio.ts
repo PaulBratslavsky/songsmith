@@ -13,6 +13,10 @@ export function useRenderAudio(
   isPlaying: boolean,
   currentStep: number | null,
   initialNudgeMs = 0,
+  /** Changes whenever the transport is re-armed elsewhere (focusing a
+   *  section). The tick heuristic below can't see a jump smaller than its
+   *  threshold, so this forces the re-seek explicitly. */
+  seekKey = '',
 ) {
   const [buffer, setBuffer] = useState<AudioBuffer | null>(null);
   const [enabled, setEnabled] = useState(true);
@@ -23,6 +27,7 @@ export function useRenderAudio(
   const srcRef = useRef<AudioBufferSourceNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
   const prevStep = useRef<number | null>(null);
+  const prevSeekKey = useRef(seekKey);
   const nudgeRef = useRef(0);
   nudgeRef.current = nudgeMs;
 
@@ -78,19 +83,34 @@ export function useRenderAudio(
       const jumped =
         prevStep.current != null &&
         (currentStep < prevStep.current || currentStep - prevStep.current > 8);
-      if (srcRef.current == null || jumped) startAt(currentStep);
+      // a re-armed transport always re-seeks, even when the new start is only
+      // a tick or two ahead (audit 2026-07-28: focusing a section that begins
+      // just after the playhead left the audio running unsynced)
+      const rearmed = prevSeekKey.current !== seekKey;
+      prevSeekKey.current = seekKey;
+      if (srcRef.current == null || jumped || rearmed) startAt(currentStep);
     } else if (!isPlaying) {
       stopSrc();
+      prevSeekKey.current = seekKey;
     }
     prevStep.current = currentStep;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- startAt reads refs
-  }, [isPlaying, currentStep, buffer]);
+  }, [isPlaying, currentStep, buffer, seekKey]);
 
   // mute/volume ride the gain node without restarting
   useEffect(() => {
     if (gainRef.current) gainRef.current.gain.value = enabled ? gain : 0;
   }, [gain, enabled]);
-  useEffect(() => () => stopSrc(), []);
+  // release the AudioContext on unmount — browsers cap them (~6), so leaking
+  // one per Composer open eventually kills audio outright (audit 2026-07-28)
+  useEffect(() => () => {
+    stopSrc();
+    const ctx = ctxRef.current;
+    ctxRef.current = null;
+    gainRef.current = null;
+    if (ctx && ctx.state !== 'closed') void ctx.close().catch(() => { /* already gone */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount only
+  }, []);
 
   // min/max-ish peaks for the waveform strip (600 columns, coarse scan)
   const peaks = useMemo(() => {

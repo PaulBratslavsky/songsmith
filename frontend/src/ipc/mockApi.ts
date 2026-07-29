@@ -157,7 +157,7 @@ function seed(): Any {
     ],
     skills, progressions: [], renders: [],
     compositions: [{ id: uid(), name: "Neon idea", song_id: null, data: JSON.stringify(seedComposition), created_at: ts, updated_at: ts }],
-    settings: { claude_model: "", claude_bin: "", ableton_mcp: "", music_folder: "", analyzer_cmd: "" },
+    settings: { claude_model: "", claude_bin: "", ableton_mcp: "", music_folder: "", analyzer_cmd: "", musicai_api_key: "", musicai_workflow: "" },
     // mock claude.ai subscription auth — starts signed in so the card looks real
     auth: { logged_in: true, account: "you@claude.ai", subscription: "Claude Pro" },
   };
