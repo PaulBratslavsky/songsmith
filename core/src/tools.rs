@@ -30,7 +30,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "list_style_presets", description: "List all style presets.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_style_preset", description: "Get a style preset by id.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "create_style_preset", description: "Create a style preset (genre, mood, influences, key/tempo, vocal range, themes).", destructive: false, input_schema: obj(style_props.clone(), &["name"]) },
-        ToolSpec { name: "update_style_preset", description: "Update a style preset.", destructive: false, input_schema: obj({ let mut p = style_props.clone(); p["id"] = s("preset id"); p }, &["id"]) },
+        ToolSpec { name: "update_style_preset", description: "Update a style preset — PARTIAL: pass only the fields you want to change and every omitted field keeps its current value. Pass a field as \"\" to deliberately clear it.", destructive: false, input_schema: obj({ let mut p = style_props.clone(); p["id"] = s("preset id"); p }, &["id"]) },
         ToolSpec { name: "set_preset_arrangement", description: "Store a style preset's Ableton arrangement profile JSON ({bass, sub_bass, chords, pad, arp, sparse_melody, vel_scale}); pass \"\" to clear back to the genre-keyword fallback.", destructive: false, input_schema: obj(json!({"id": s("preset id"),"arrangement": s("profile JSON or \"\"")}), &["id","arrangement"]) },
         ToolSpec { name: "generate_preset_arrangement", description: "Ask Claude to map a style preset onto the Ableton arrangement profile (bass figure, chord treatment, arp rate, density) and store it on the preset. The Build-in-Ableton stub then follows it instead of the genre-keyword fallback.", destructive: false, input_schema: obj(json!({"id": s("preset id")}), &["id"]) },
         ToolSpec { name: "generate_style_preset", description: "Auto-generate a style preset from a name/seed using the style skill.", destructive: false, input_schema: obj(json!({"name": s("name or seed"),"notes": s("optional context")}), &["name"]) },
@@ -62,7 +62,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "list_skills", description: "List all skills.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_skill", description: "Get a skill by id.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "create_skill", description: "Create a user skill (custom songwriting method).", destructive: false, input_schema: obj(json!({"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["key","name","stage_type","instructions"]) },
-        ToolSpec { name: "update_skill", description: "Update a skill's content.", destructive: false, input_schema: obj(json!({"id": s(""),"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["id"]) },
+        ToolSpec { name: "update_skill", description: "Update a skill — PARTIAL: pass only the fields you want to change (omitted fields keep their current value, so renaming a skill can't blank its instructions).", destructive: false, input_schema: obj(json!({"id": s(""),"key": s(""),"name": s(""),"stage_type": s(""),"instructions": s("")}), &["id"]) },
         ToolSpec { name: "set_skill_enabled", description: "Enable or disable a skill.", destructive: false, input_schema: obj(json!({"id": s(""),"enabled": {"type":"boolean"}}), &["id","enabled"]) },
         ToolSpec { name: "list_outlines", description: "List saved song outlines (section skeletons + tempo, no musical content).", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "save_outline", description: "Save a reusable song outline: named ordered sections (label + bars) and a tempo. Export any outline to Ableton with ableton_build_outline.", destructive: false, input_schema: obj(json!({"name": s(""),"bpm": {"type":"integer"},"sections": {"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"bars":{"type":"integer"}},"required":["label"]}}}), &["name","sections"]) },
@@ -206,15 +206,24 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "get_style_preset" => v(db::get_preset(conn, arg(args, "id")?).await?),
         "create_style_preset" => v(db::create_preset(conn, style_input(args)).await?),
         "update_style_preset" => {
+            // PARTIAL update: omitted fields keep their current value (same
+            // rule as update_section). This was a full REPLACE — a chat edit
+            // fixing one word blanked name/genre/influences/mood/themes/
+            // vocal_range (user-hit 2026-07-29; only lyric_exemplars had been
+            // special-cased). Passing a field explicitly as "" still clears it.
             let id = arg(args, "id")?;
-            let mut input = style_input(args);
-            // a caller that omits lyric_exemplars (e.g. a chat edit passing the
-            // classic 7-field set) must not silently wipe the user's exemplars
-            if arg_opt(args, "lyric_exemplars").is_none() {
-                if let Some(existing) = db::get_preset(conn, id).await? {
-                    input.lyric_exemplars = existing.lyric_exemplars;
-                }
-            }
+            let cur = db::get_preset(conn, id).await?.ok_or_else(|| anyhow!("preset not found"))?;
+            let pick = |key: &str, current: &str| arg_opt(args, key).unwrap_or(current).to_string();
+            let input = StyleInput {
+                name: pick("name", &cur.name),
+                genre: pick("genre", &cur.genre),
+                mood: pick("mood", &cur.mood),
+                influences: pick("influences", &cur.influences),
+                key_tempo_feel: pick("key_tempo_feel", &cur.key_tempo_feel),
+                vocal_range: pick("vocal_range", &cur.vocal_range),
+                themes: pick("themes", &cur.themes),
+                lyric_exemplars: pick("lyric_exemplars", &cur.lyric_exemplars),
+            };
             v(db::update_preset(conn, id, input).await?)
         }
         "generate_style_preset" => v(agent::generate_style_preset(conn, settings, arg(args, "name")?, arg_opt(args, "notes"), |_| {}).await?),
@@ -281,7 +290,20 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
         "list_skills" => v(db::list_skills(conn).await?),
         "get_skill" => v(db::get_skill(conn, arg(args, "id")?).await?),
         "create_skill" => v(db::create_skill(conn, skill_input(args)).await?),
-        "update_skill" => v(db::update_skill(conn, arg(args, "id")?, skill_input(args)).await?),
+        "update_skill" => {
+            // PARTIAL update — the same wipe bug as update_style_preset, and
+            // worse here: renaming a skill used to blank its INSTRUCTIONS.
+            let id = arg(args, "id")?;
+            let cur = db::get_skill(conn, id).await?.ok_or_else(|| anyhow!("skill not found"))?;
+            let pick = |key: &str, current: &str| arg_opt(args, key).unwrap_or(current).to_string();
+            let input = SkillInput {
+                key: pick("key", &cur.key),
+                name: pick("name", &cur.name),
+                stage_type: pick("stage_type", &cur.stage_type),
+                instructions: pick("instructions", &cur.instructions),
+            };
+            v(db::update_skill(conn, id, input).await?)
+        }
         "set_skill_enabled" => v(db::set_skill_enabled(conn, arg(args, "id")?, args.get("enabled").and_then(|b| b.as_bool()).unwrap_or(true)).await?),
         "list_outlines" => v(db::list_outlines(conn).await?),
         "save_outline" => {
@@ -369,6 +391,60 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REGRESSION (user-hit 2026-07-29): every `update_*` tool is a PARTIAL
+    /// update. `update_style_preset` and `update_skill` were full REPLACES
+    /// built from `style_input`/`skill_input` (missing arg → ""), so a chat
+    /// edit that fixed one word blanked the preset's name/genre/influences/
+    /// mood/themes/vocal_range — and renaming a skill blanked its whole
+    /// instruction body. Explicitly passing "" must still clear a field.
+    #[tokio::test]
+    async fn update_tools_are_partial_not_replace() {
+        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        let settings = Settings::default();
+
+        // ---- style preset ----
+        let full = json!({
+            "name": "Ever-Present", "genre": "ethereal choral hymn", "mood": "awe",
+            "influences": "Pärt · Whitacre", "key_tempo_feel": "Ab major, 56 BPM",
+            "vocal_range": "SATB, descant to Bb5", "themes": "God's presence",
+            "lyric_exemplars": "Before the morning knew my name",
+        });
+        let preset = dispatch(&conn, &settings, "create_style_preset", &full).await.unwrap();
+        let id = preset["id"].as_str().unwrap().to_string();
+
+        // a one-field edit keeps EVERYTHING else
+        let after = dispatch(&conn, &settings, "update_style_preset",
+            &json!({ "id": id, "mood": "awe rather than triumph" })).await.unwrap();
+        assert_eq!(after["mood"], json!("awe rather than triumph"), "the edited field changed");
+        for (k, want) in [("name", "Ever-Present"), ("genre", "ethereal choral hymn"),
+                          ("influences", "Pärt · Whitacre"), ("key_tempo_feel", "Ab major, 56 BPM"),
+                          ("vocal_range", "SATB, descant to Bb5"), ("themes", "God's presence"),
+                          ("lyric_exemplars", "Before the morning knew my name")] {
+            assert_eq!(after[k], json!(want), "{k} must survive a partial update");
+        }
+        // an EXPLICIT empty string still clears
+        let cleared = dispatch(&conn, &settings, "update_style_preset",
+            &json!({ "id": id, "themes": "" })).await.unwrap();
+        assert_eq!(cleared["themes"], json!(""), "explicit \"\" clears");
+        assert_eq!(cleared["name"], json!("Ever-Present"), "…without touching the rest");
+
+        // ---- skill ----
+        let skill = dispatch(&conn, &settings, "create_skill", &json!({
+            "key": "user-hymn", "name": "Hymn Writer", "stage_type": "lyrics",
+            "instructions": "Write in the English hymn tradition.",
+        })).await.unwrap();
+        let sid = skill["id"].as_str().unwrap().to_string();
+        let renamed = dispatch(&conn, &settings, "update_skill",
+            &json!({ "id": sid, "name": "Hymnodist" })).await.unwrap();
+        assert_eq!(renamed["name"], json!("Hymnodist"));
+        assert_eq!(renamed["instructions"], json!("Write in the English hymn tradition."),
+            "renaming a skill must not blank its instructions");
+        assert_eq!(renamed["stage_type"], json!("lyrics"));
+        assert_eq!(renamed["key"], json!("user-hymn"));
+    }
 
     /// The five spine tools round-trip through `dispatch` (the UI/agent/MCP
     /// surface): create appends + inserts, update is PARTIAL (omitted fields
