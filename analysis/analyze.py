@@ -235,10 +235,22 @@ def main():
     else:
         beat_labels = []
 
-    # --- bar-level chords (assume 4/4): majority vote of the smoothed beats ---
+    # --- first DOWNBEAT: the 4-beat phase whose beats carry the most onset
+    # energy. It sets the Composer's auto-nudge AND the bar grid below —
+    # chunking from beats[0] put bar lines wherever tracking happened to
+    # start, so a "bar" straddled two real bars (2026-07-29).
+    first_downbeat, phase = 0.0, 0
+    if len(beats) >= 8:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        phases = [float(np.mean(onset_env[np.asarray(beats[p::4])])) for p in range(4)]
+        phase = int(np.argmax(phases))
+        first_downbeat = float(beat_times[phase]) if phase < len(beat_times) else 0.0
+
+    # --- bar-level chords (assume 4/4, starting ON the downbeat): majority
+    # vote of the smoothed beats ---
     from collections import Counter
     bar_chords = []
-    for b0 in range(0, nbeats, 4):
+    for b0 in range(phase, nbeats, 4):
         seg = beat_labels[b0:b0 + 4]
         if not seg:
             break
@@ -247,14 +259,6 @@ def main():
         # the song's opening chord from every section (audit 2026-07-28)
         bar_chords.append({"bar": len(bar_chords) + 1, "time": round(t, 2) if t is not None else None,
                            "chord": Counter(seg).most_common(1)[0][0]})
-
-    # --- first DOWNBEAT: the 4-beat phase whose beats carry the most onset
-    # energy — makes the Composer's auto-nudge tight instead of approximate ---
-    first_downbeat = 0.0
-    if len(beats) >= 8:
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        phases = [float(np.mean(onset_env[np.asarray(beats[p::4])])) for p in range(4)]
-        first_downbeat = float(beat_times[int(np.argmax(phases))])
 
     # --- structural segmentation (agglomerative on beat-synced features) ---
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
