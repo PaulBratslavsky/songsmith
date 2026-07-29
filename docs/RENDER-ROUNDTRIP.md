@@ -1,7 +1,7 @@
 # The render round-trip: AI song in → human-produced song in your DAW
 
-STATUS: Phases 1–3 SHIPPED 2026-07-24 (+ import error handling, the Music.AI add-on,
-and the Ableton Reference audio track).
+STATUS: COMPLETE for phases 1–3 (2026-07-24) plus the iteration loop, written
+parts (Melodist + Arranger), analyzer v2/v3, and the 2026-07-28/29 audit fixes.
 
 The north star (user, 2026-07-24): *"a tool that sits between Suno and your DAW —
 take an AI song idea and turn it into a human-produced song."* This doc maps that
@@ -13,10 +13,13 @@ Suno render (audio file)
    │  🎼 Analyze → Composer        (Renders tab)        → an editable Composition
    ▼
 LOCAL ANALYSIS (analysis/analyze.py — audio never leaves the machine)
-   demucs (htdemucs, CPU) ──► vocals.wav + bass.wav stems
-   librosa               ──► tempo · key guess · bar chords · section boundaries
+   demucs (htdemucs, CPU) ──► vocals · bass · nodrums (= vocals+bass+other) stems
+   librosa               ──► tempo · beats · DOWNBEAT phase
+                             key + bar chords FROM THE DRUM-FREE STEM
+                             (+ bass-root bonus, stay-put smoothing)
+                             section boundaries (agglomerative on beat features)
    faster-whisper        ──► lyric transcript  (vocals stem → mix fallback ladder)
-   basic-pitch (ONNX)    ──► melody + bass note events (seconds, mono-cleaned)
+   basic-pitch (ONNX)    ──► melody + bass note events (energy-gated, mono-cleaned)
    ▼
 REFERENCE ANALYST (Claude) — corrects key from chord content, snaps tempo, cleans
    chords to the diatonic set, derives the form (repeated lyric blocks find the
@@ -26,17 +29,79 @@ REFERENCE ANALYST (Claude) — corrects key from chord content, snaps tempo, cle
 THE SONG / THE COMPOSITION
    spine + Structure + Chords + Lyrics (transcript lines by start_sec window)
    Concept → Lyric Spec → Prompt via reverse context · everything approved
-   render attached with the ANALYSIS STASHED (summary + note events + transcript)
+   render attached with the ANALYSIS STASHED
+   (summary + note events + transcript + first_downbeat_sec)
    ▼
 COMPOSER (Phase 2–3)
-   melody/bass lanes pre-filled from the transcription (diatonic fold)
-   render audio follows the transport (waveform strip, nudge, volume)
+   melody/bass lanes pre-filled from the transcription (diatonic fold, rebased
+     onto the downbeat) — and from WRITTEN TAKES when they exist
+   render audio follows the transport (waveform strip, auto-nudge, volume)
    section FOCUS: loop one section, A/B original ↔ your lanes, ✓ done marks
    ▼
+WRITTEN PARTS (Claude — the 🎛 Variations row)
+   🎶 Melodist  → the Lead take (motif-based, per section)
+   🎶 Arranger  → bass / pad / chords / arp takes (one skill, part-parameterized)
+   ⚡ → Live    → pushes ONE named track, non-destructively
+   ▼
 ABLETON (⚡ export)
-   Composer Chords/Melody/Bass as named MIDI tracks
+   Sections + Bass/Chords/Pad/Chord melody/Lead/Filler/Arp/Drums
+   (a written take REPLACES its part's formula, including its silences)
    + the render as a "Reference" AUDIO clip at bar 1 (mute/solo to A/B in Live)
+   ▼
+ITERATE
+   rebuild sections → export back to the song → 🔄 refresh the Generation Prompt
+   → paste into Suno → import v2 → A/B v1 vs v2 on the Renders tab
 ```
+
+## Analyzer accuracy (v2 2026-07-28, v3 2026-07-29)
+
+The stems are paid for once and used everywhere, and the grid is anchored to a
+measured downbeat:
+
+- **Chords/key read the DRUM-FREE stem** — kicks and hats smear chroma.
+- **The bass stem votes on roots** (+0.12 on templates rooted at the bar's
+  strongest bass pitch class): Cm/Eb/Ab confusions are root confusions.
+- **Stay-put smoothing** (mini-Viterbi over per-beat labels, then a bar majority
+  vote) stops one noisy beat from flipping a bar.
+- **Energy gate on note events**: basic-pitch reports confidence, not loudness,
+  so notes sitting in silence (reverb tails, stem bleed) are dropped.
+- **`pad=False` on every `util.sync`** — it otherwise emits `len(beats)+1`
+  columns and every chord/section was stamped ONE BEAT LATE (audit).
+- **Bars start on the measured downbeat phase**, not on `beats[0]`, so bar times
+  (and the section `start_sec` derived from them) are musically real.
+
+Measured on one render (Stay.wav, 146 bars): chord changes 92 → 54, distinct
+chords 12 → 9, key confidence 0.588 → 0.647, and after v3 the opening reads as a
+clean 8-bar `Eb Ab Ab Ab | Cm Cm Cm Cm` cycle with bar 1 on the downbeat.
+
+**Analyses are snapshots**: fixes do NOT retroactively apply to songs already
+imported. Re-run 🎼 Analyze → Composer on a render to restash a corrected one.
+
+## Written parts: the take contract
+
+One shape serves the Melodist (lead) and the Arranger (bass/pad/chords/arp):
+
+```
+{ "motif" | "idea": "…", "sections": [ { "label": "Verse 1",
+    "notes": [ { "degree": 1-7, "octave": 0|1, "start": <16ths>, "length": <16ths> } ] } ] }
+```
+
+- **Degrees, not pitches** — in-key by construction, and the same vocabulary the
+  Composer's lanes use, so a take is hand-editable after generation.
+- `midi::clamp_part_take` is the CONTRACT, not a suggestion: label matching is
+  **consume-once** (two "Chorus" rows get their own entries), degrees/octaves
+  clamp, notes clip to the section's bars, and mono parts (lead/bass/arp) get
+  overlap truncation while poly parts (pad/chords) keep their stacks.
+- An **empty section means "sit out"** — both the full build and the single-track
+  push honor it, so they can't contradict each other.
+- Storage: `song_melody` (lead) and `song_part` (one row per part). Regenerating
+  replaces that take only. `midi::part_take_render` holds each part's register
+  and velocity band; `takes_for_sections` converts degrees → absolute MIDI.
+- A written take also **overrides a profile-disabled part** (an explicit pad take
+  beats a genre profile with pads off) and bypasses the section energy map.
+- Per-section rewrite: `generate_song_melody(song, section)` sends the existing
+  take as context, rewrites ONE section, and splices it back after re-reading
+  the stored take (so a concurrent full regeneration can't be reverted).
 
 ## The transcription fallback ladder (lyrics)
 
@@ -81,6 +146,8 @@ kill-on-drops the CLI.)
 diatonic (degree 1–7, octave band 0|1), so absolute-MIDI note events fold lossily
 ON PURPOSE (an editable sketch in the vocabulary you compose in, not a piano roll):
 
+- rebase onto `first_downbeat_sec` (bar 1 of the grid IS the downbeat, and the
+  audio is nudged by the same amount — unrebased notes sat late against both);
 - quantize to 16th ticks at the summary bpm;
 - shift the whole lane by whole octaves so its median lands in the band;
 - per note, pick the (degree, octave) whose resolved playback MIDI is nearest,
@@ -96,8 +163,9 @@ LYRICS are untranscribable.
 ## Section build-out (Phase 3)
 
 Click a section band block in the Composer to FOCUS it: the loop confines to its
-ticks, the render audio re-seeks to the matching slice (any transport jump >8 ticks
-or backward re-seeks), and with audio attached an A/B strip picks what you hear —
+ticks, the render audio re-seeks to the matching slice (a backward jump, a forward
+jump >8 ticks, OR a change of the focus `seekKey` — a small forward jump used to
+slip past the heuristic), and with audio attached an A/B strip picks what you hear —
 `🎵 original` (transport-only mute; edit previews stay audible), `🎹 mine`, or both.
 `✓ mark done` persists on the composition (`Section.done`) and dims the block —
 per-section bookkeeping while you rebuild. Unfocusing resets A/B so no mute lingers.
@@ -110,7 +178,14 @@ per-section bookkeeping while you rebuild. Unfocusing resets A/B so no mute ling
   import can take up to 60s — the client widens its socket timeout around it, and any
   failure logs a ⚠ line without sinking the MIDI build).
 - Song-level ⚡ builds skip profile-disabled parts entirely (pad/arp/drums off in the
-  arrangement profile → no track at all — empty clips read as a broken export).
+  arrangement profile → no track at all — empty clips read as a broken export), and
+  notes are resolved BEFORE `create_clip` so a partially-covering take can't leave
+  blank clips behind.
+- `build_take_track` is the non-destructive push: it clears and rewrites exactly ONE
+  named track (Lead/Bass/Pad/Chords/Arp) and touches nothing else — no tempo change,
+  no rebuild — so you can audition takes against a session you've already worked in.
+- Drums remain formula-only (GM pitches, not scale degrees — a different vocabulary
+  from the take contract).
 - Remote-script patches live at BOTH
   `~/Library/Preferences/Ableton/Live 12.4.x/User Remote Scripts/AbletonMCP/__init__.py`
   and need a Live restart (or control-surface toggle) to load.
@@ -121,8 +196,20 @@ per-section bookkeeping while you rebuild. Unfocusing resets A/B so no mute ling
 |---|---|
 | Analyzer (stems/whisper/basic-pitch) | `analysis/analyze.py` (uv venv; `settings.analyzer_cmd`) |
 | Import pipeline + resume | `core/src/agent.rs` (`import_reference_full`, `resume_import`) |
-| Stashed analysis | `render.analysis` (JSON: bpm/key/sections+start_sec/melody/bass/transcript) |
+| Stashed analysis | `render.analysis` (JSON: bpm/key/sections+start_sec/melody/bass/transcript/first_downbeat_sec) |
 | Music.AI client | `core/src/musicai.rs` (opt-in via `settings.musicai_api_key/_workflow`) |
 | MIDI→lane fold | `frontend/src/lib/music/compose/transcription.ts` |
 | Focus/A-B/done | `Sketchpad.tsx` + `useCompositionPlayback` (`range`/`mute` opts) + `SectionBand.tsx` |
-| Ableton builders | `core/src/ableton.rs` (`build_song`, `build_midi_tracks` + reference audio) |
+| Ableton builders | `core/src/ableton.rs` (`build_song`, `build_take_track`, `build_midi_tracks` + reference audio) |
+| Written parts | skills `melodist.md` / `arranger.md`; `agent::generate_song_melody` / `generate_song_part`; `midi::clamp_part_take` / `take_notes_abs`; tables `song_melody` / `song_part` |
+| Takes → Composer lanes | `get_song_takes` + `applyTakesToComposition` (ComposerRoute) |
+| A/B renders (v1 vs v2) | `frontend/src/components/RenderAB.tsx` |
+| Setup doctor + bundled Live script | `run_doctor` / `install_ableton_script` (`app/src-tauri/resources/AbletonMCP_init.py`) |
+
+## Test nets
+
+| Layer | What it covers |
+|---|---|
+| `cargo test -p song_core` (128) | the contracts: bass root pitch class across all 144 root pairs, consume-once duplicate labels, Settings round-trip (every field, so a new setting can't ship dead), the take clamp, 8 whole-flow scenarios incl. 4 resume paths |
+| `make flowcheck` | Tier B: a scratch song through all 6 stages with REAL Claude, then 29 deterministic coherence checks. ALWAYS via make (it rebuilds the shim first — a stale shim once produced false failures) |
+| the audit workflow | `docs/`-adjacent history: two multi-agent passes (2026-07-28/29) whose findings were each adversarially verified by two independent skeptics before any fix landed |

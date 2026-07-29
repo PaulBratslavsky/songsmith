@@ -31,6 +31,12 @@ artifact              a stage's content, APPEND-ONLY revisions:
                       regeneration, edits, and restores all append a new version.
 composition           Composer sketches (melody/chords/bass), linked to a song when
                       imported from one.
+song_melody           the Melodist's LEAD take: one row per song, degree-based note
+song_part             events per section. song_part is the same for the Arranger's
+                      bass / pad / chords / arp (one row per song+part).
+                      Regenerating replaces that take only; the Ableton build and
+                      the Composer's lanes both READ these — they are the single
+                      home of "the written part" (docs/RENDER-ROUNDTRIP.md).
 render                final audio takes: label + file path on disk + source
                       ("import" = the audio the song was imported from) + a stashed
                       `analysis` JSON on imports (the Composer-ready summary: bpm/key/

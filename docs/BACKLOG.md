@@ -1,5 +1,26 @@
 # Backlog (small queued items — canonical, committed)
 
+## Open (2026-07-29)
+
+- **Drums through the Arranger.** Bass/pad/chords/arp/lead are all Claude-written
+  takes now (docs/RENDER-ROUNDTRIP.md, "the take contract"); drums are still
+  formula-only because they speak GM pitches (36 kick / 38 snare / 42 hat), not
+  scale degrees, so they need a second output shape rather than a new part name.
+- **`flow_resume_is_idempotent_on_complete_song` flaked once in ~30 full-suite
+  runs** (0/20 focused reruns). Most likely the `SONGSMITH_MOCK_CLAUDE`
+  process-global env race that `core/src/flow_tests.rs`'s header documents —
+  `agent::tests` sets/removes it while flow_tests run. The durable fix is to
+  delete that env hook entirely now that every flow test scripts `claude_bin`.
+- **Analyses are snapshots.** The analyzer's beat-sync and downbeat fixes
+  (2026-07-29) do not retroactively apply to songs imported earlier: their
+  stashed `render.analysis` still carries the old one-beat-late chords. Re-run
+  🎼 Analyze → Composer per render to restash. A "re-analyze every render"
+  batch action would remove the manual step (not built — it overwrites stored
+  analyses, so it needs an explicit confirm).
+- **Awaiting user hardware/session verification:** 🎹 MIDI keyboard step entry;
+  the Ableton "Reference" audio track (needs a Live restart to load remote-script
+  patch v3); the Music.AI add-on's live round-trip (needs an API key).
+
 - ✅ DONE (2026-07-07, Rust backlog batch) **Seed new songs' key/BPM from the style preset** (user,
   2026-07-07 — approved "yes"): `core/src/db.rs` now has a pure `parse_key_tempo(feel)` (first
   explicit key mention wins; BPM ranges → rounded midpoint) and `db::create_song` seeds
