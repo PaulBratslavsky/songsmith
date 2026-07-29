@@ -150,7 +150,10 @@ export function compositionFromAnalysis(
     })),
   } as unknown as ChordsData;
   const comp = compositionFromSong(a.key_root, a.key_mode, chordsData, null, {
-    id: `analysis-${name}`,
+    // the schema caps ids at 64 chars — a long render filename used to push
+    // it over, parseStoredComposition returned null, and Analyze → Composer
+    // failed with "the analysis found no sections" (audit 2026-07-28)
+    id: `analysis-${name}`.slice(0, 64),
     name,
     bpm: Number(a.bpm) || undefined,
   }, rows);

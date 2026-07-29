@@ -393,10 +393,34 @@ function DoctorCard() {
   };
   const icon = (s: string) => (s === "ok" ? "✅" : s === "warn" ? "⚠️" : "❌");
   const needsScript = checks?.some((c) => c.name.startsWith("Ableton Remote Script") && c.status !== "ok");
+  const counts = checks
+    ? {
+        total: checks.length,
+        ok: checks.filter((c) => c.status === "ok").length,
+        warn: checks.filter((c) => c.status === "warn").length,
+        fail: checks.filter((c) => c.status === "fail").length,
+      }
+    : null;
+  const summary = counts
+    ? counts.fail > 0
+      ? `${counts.fail} check${counts.fail === 1 ? "" : "s"} failing — fix the ❌ rows below.`
+      : counts.warn > 0
+        ? `Working, with ${counts.warn} thing${counts.warn === 1 ? "" : "s"} worth a look.`
+        : "Everything Songsmith needs is in place."
+    : null;
   return (
     <div className="card">
       <h2>🩺 Setup doctor</h2>
       <p className="muted">Checks everything Songsmith needs on this machine: the Claude CLI login, the local analyzer's Python deps, the Ableton Remote Script (per Live install), and the music folder.</p>
+      {counts && (
+        <div className="row" style={{ gap: 6, margin: "8px 0", flexWrap: "wrap" }}>
+          <span className="badge"><b>{counts.total}</b>&nbsp;Checks</span>
+          <span className="badge done"><b>{counts.ok}</b>&nbsp;OK</span>
+          <span className="badge in_progress"><b>{counts.warn}</b>&nbsp;Warnings</span>
+          <span className="badge error"><b>{counts.fail}</b>&nbsp;Failing</span>
+        </div>
+      )}
+      {summary && <p className="faint" style={{ margin: "4px 0 8px" }}>{summary}</p>}
       <div className="row" style={{ gap: 8 }}>
         <button className="primary" disabled={busy} onClick={() => void run()}>{busy ? "checking…" : checks ? "Re-run checks" : "Run checks"}</button>
         {needsScript && (
@@ -409,7 +433,7 @@ function DoctorCard() {
       {checks && (
         <div className="col" style={{ gap: 4, marginTop: 10 }}>
           {checks.map((c) => (
-            <div key={c.name} className="row" style={{ gap: 8, alignItems: "baseline" }}>
+            <div key={c.name} className="row" style={{ gap: 8, alignItems: "baseline", opacity: c.status === "ok" ? 0.65 : 1 }}>
               <span>{icon(c.status)}</span>
               <b style={{ fontSize: 12, whiteSpace: "nowrap" }}>{c.name}</b>
               <span className="faint" style={{ fontSize: 11 }}>{c.detail}</span>

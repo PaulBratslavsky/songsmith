@@ -313,18 +313,24 @@ pub fn build_song(bpm: i64, sections: &[(String, i64, Vec<(String, i64)>)], sect
                 if part == "Lead" { continue; } // Lead exists only via takes
                 if !active.contains(&part) { continue; }
             }
+            // Resolve the notes BEFORE creating anything: a part whose profile
+            // disables it writes zero notes, and an EMPTY clip reads as a
+            // broken export (audit 2026-07-28 — a Pad take covering only the
+            // chorus used to lay blank Pad clips across every other section).
+            let notes = if part == "Sections" {
+                vec![]
+            } else {
+                match take {
+                    Some(n) => n.clone(),
+                    None => part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[])),
+                }
+            };
+            if part != "Sections" && notes.is_empty() { continue; } // no notes → no clip
             let _ = ableton_cmd(&mut s, json!({"type":"create_clip","params":{"track_index": ti, "clip_index": ci, "length": length}}));
             if part == "Sections" {
                 let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": clip_color(label)}}));
             } else {
-                // a written take wins; otherwise the profile-driven figure
-                let notes = match take {
-                    Some(n) => n.clone(),
-                    None => part_notes(part, chords, *bars, profile, section_invs.get(i).map(|v| v.as_slice()).unwrap_or(&[])),
-                };
-                if !notes.is_empty() {
-                    let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
-                }
+                let _ = ableton_cmd(&mut s, json!({"type":"add_notes_to_clip","params":{"track_index": ti, "clip_index": ci, "notes": notes}}));
                 let _ = ableton_cmd(&mut s, json!({"type":"set_clip_color","params":{"track_index": ti, "clip_index": ci, "color": part_color(part)}}));
             }
             let _ = ableton_cmd(&mut s, json!({"type":"set_clip_name","params":{"track_index": ti, "clip_index": ci, "name": label}}));

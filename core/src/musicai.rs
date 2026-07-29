@@ -31,7 +31,22 @@ fn client(api_key: &str) -> Result<reqwest::Client> {
         reqwest::header::AUTHORIZATION,
         api_key.parse().map_err(|_| anyhow!("the Music.AI API key contains invalid characters"))?,
     );
-    Ok(reqwest::Client::builder().default_headers(headers).build()?)
+    // per-request timeouts: without them a stalled connection hangs the
+    // resume forever (the 5-minute deadline only bounds SUCCESSFUL polls)
+    Ok(reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()?)
+}
+
+/// A timeout-bounded client for the PRE-SIGNED urls (upload/result), which
+/// carry their own auth and must not get the API-key header.
+fn plain_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180)) // the audio upload is the big one
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()?)
 }
 
 /// Upload the audio, run the configured workflow, and return transcript
@@ -56,7 +71,7 @@ pub async fn transcribe_lyrics(
     let bytes = tokio::fs::read(audio_path).await
         .map_err(|e| anyhow!("could not read the audio file: {e}"))?;
     // the signed upload URL is pre-authorized — no API-key header client here
-    reqwest::Client::new().put(upload_url)
+    plain_client()?.put(upload_url)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(bytes).send().await?
         .error_for_status().map_err(|e| anyhow!("Music.AI upload failed: {e}"))?;
@@ -105,7 +120,8 @@ pub async fn transcribe_lyrics(
     if let Some(obj) = result.as_object() {
         for url in obj.values().filter_map(|v| v.as_str()) {
             // result URLs are pre-signed — plain client
-            let Ok(resp) = reqwest::Client::new().get(url).send().await else { continue };
+            let Ok(client) = plain_client() else { continue };
+            let Ok(resp) = client.get(url).send().await else { continue };
             let Ok(text) = resp.text().await else { continue };
             if let Ok(v) = serde_json::from_str::<Value>(&text) {
                 collect_transcript(&v, &mut transcript);

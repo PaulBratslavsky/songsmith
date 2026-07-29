@@ -784,9 +784,23 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
                 // has one, else cumulative bars at the song's BPM (the import
                 // assumes audio starts at bar 1 anyway).
                 let stash_secs = analysis.as_ref().and_then(|a| a.get("sections")).and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                let stash_starts: Vec<Option<f64>> = (0..rows.len())
-                    .map(|i| stash_secs.get(i).and_then(|x| x.get("start_sec")).and_then(|v| v.as_f64()))
-                    .collect();
+                // Match the stash to the CURRENT spine by LABEL (first unused),
+                // falling back to position. Index-only alignment silently
+                // shifted every lyric window when the spine was edited after
+                // the import — a renamed or inserted section moved the words
+                // into the wrong parts of the song (audit 2026-07-28).
+                let mut used: Vec<bool> = vec![false; stash_secs.len()];
+                let stash_starts: Vec<Option<f64>> = rows.iter().enumerate().map(|(i, row)| {
+                    let by_label = stash_secs.iter().enumerate().position(|(j, x)| {
+                        !used[j] && x.get("label").and_then(|l| l.as_str())
+                            .map(|l| norm_label(l) == norm_label(&row.label)).unwrap_or(false)
+                    });
+                    let idx = by_label.or_else(|| stash_secs.get(i).map(|_| i).filter(|&j| !used[j]));
+                    idx.and_then(|j| {
+                        used[j] = true;
+                        stash_secs[j].get("start_sec").and_then(|v| v.as_f64())
+                    })
+                }).collect();
                 let starts: Vec<f64> = if !rows.is_empty() && stash_starts.iter().all(|s| s.is_some()) {
                     stash_starts.into_iter().flatten().collect()
                 } else {

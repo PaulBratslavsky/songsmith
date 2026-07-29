@@ -40,6 +40,18 @@ pub fn nearest_pitch(pc: i64, reference: i64) -> i64 {
     [base - 12, base, base + 12].into_iter().min_by_key(|&p| (p - reference).abs()).unwrap()
 }
 
+/// Fold `pitch` into the register band by WHOLE OCTAVES, preserving its pitch
+/// class. A plain `.clamp(lo, hi)` shifts by 1–11 semitones and silently
+/// changes the note (audit 2026-07-28: `A → D` voice-led to 50, clamped to 47
+/// = B, so the bass played B under a D chord). Bands are ≥12 semitones wide,
+/// so every pitch class has a representative inside.
+pub fn fold_into_band(pitch: i64, lo: i64, hi: i64) -> i64 {
+    let mut p = pitch;
+    while p < lo { p += 12; }
+    while p > hi { p -= 12; }
+    p.clamp(0, 127)
+}
+
 // ---- Arrangement profiles (style-aware builds, Phase 1) ---------------------
 //
 // The style knowledge behind the Ableton stub. Replaces the old single
@@ -347,7 +359,7 @@ pub fn part_notes(part: &str, chords: &[(String, i64)], bars: i64, p: &Arrangeme
             "Bass" => {
                 // voice-led root register; sub_bass drops an octave into 808 land
                 let (base, lo, hi) = if p.sub_bass { (24 + pc, 24, 40) } else { (36 + pc, 31, 47) };
-                let root = (if prev_bass < 0 { base } else { nearest_pitch(pc, prev_bass) }).clamp(lo, hi);
+                let root = fold_into_band(if prev_bass < 0 { base } else { nearest_pitch(pc, prev_bass) }, lo, hi);
                 prev_bass = root;
                 let fifth = root + 7;
                 match p.bass {
@@ -521,7 +533,51 @@ mod tests {
         assert!(chord_events(&[], 4).is_empty());
     }
 
+    /// REGRESSION (audit 2026-07-28): the bass must always play the chord's
+    /// ROOT. Voice-leading picks the nearest octave, which can land outside
+    /// the register band — folding keeps the pitch class, the old linear
+    /// clamp silently changed the note (A→D played B under the D chord).
     #[test]
+    fn bass_root_pitch_class_survives_the_register_band() {
+        const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        for (profile, lo, hi) in [(&POP_DEFAULT, 31, 47), (&TRAP_808, 24, 40)] {
+            // every ordered pair of roots — the voice-leading walks between them
+            for a in 0..12i64 {
+                for b in 0..12i64 {
+                    let names = [NAMES[a as usize].to_string(), NAMES[b as usize].to_string()];
+                    let chords: Vec<(String, i64)> = names.iter().map(|n: &String| (n.clone(), 4)).collect();
+                    let notes = part_notes("Bass", &chords, 2, profile, &[]);
+                    assert!(!notes.is_empty(), "bass wrote nothing for {names:?}");
+                    // the FIRST note of each chord is its root (humanize jitters
+                    // onsets by a few ms, so the window starts slightly early)
+                    for (i, want_pc) in [(0.0_f64, a), (4.0, b)] {
+                        let first = notes.iter()
+                            .filter(|n| { let t = n["start_time"].as_f64().unwrap(); t >= i - 0.25 && t < i + 1.0 })
+                            .min_by(|x, y| x["start_time"].as_f64().unwrap().partial_cmp(&y["start_time"].as_f64().unwrap()).unwrap());
+                        if let Some(n) = first {
+                            let pitch = n["pitch"].as_i64().unwrap();
+                            assert_eq!(pitch.rem_euclid(12), want_pc,
+                                "{} {names:?}: bass played pc {} instead of the root {want_pc}", profile.name, pitch.rem_euclid(12));
+                            assert!((lo..=hi).contains(&pitch), "{} bass {pitch} left the band {lo}..{hi}", profile.name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// fold_into_band keeps the pitch class (a linear clamp does not).
+    #[test]
+    fn fold_into_band_preserves_pitch_class() {
+        for (lo, hi) in [(31, 47), (24, 40)] {
+            for p in 0..96i64 {
+                let f = fold_into_band(p, lo, hi);
+                assert_eq!(f.rem_euclid(12), p.rem_euclid(12), "fold changed the pitch class of {p}");
+                assert!((lo..=hi).contains(&f), "fold left {p} outside {lo}..{hi}");
+            }
+        }
+    }
+
     /// clamp_melody enforces the Melodist contract: label matching (case/space
     /// tolerant), degree/octave clamps, section-bounds clipping, monophonic
     /// truncation, and unknown labels dropping; degree_to_midi lands the

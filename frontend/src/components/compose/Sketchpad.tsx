@@ -212,6 +212,14 @@ export function Sketchpad({
   useEffect(() => {
     if (!focusId) setAb('both'); // unfocus never leaves a hidden mute behind
   }, [focusId]);
+  // A focus id from a PREVIOUS composition (library open / New blank / a
+  // reload that reminted section ids) points at nothing: the focus strip
+  // disappears while `ab` stays on 'mine'/'original', leaving the render
+  // audio muted with no visible control to fix it (audit 2026-07-28).
+  useEffect(() => {
+    if (focusId && !focusedSec) { setFocusId(null); setAb('both'); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- focusedSec is derived
+  }, [focusId, focusedSec]);
   // Sticky placement mode: newly-dropped chords are sevenths while on.
   const [seventhMode, setSeventhMode] = useState(false);
   // N1: composition view — the editable lane grid or read-only notation.

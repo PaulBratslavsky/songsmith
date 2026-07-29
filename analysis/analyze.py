@@ -255,6 +255,11 @@ def main():
                       librosa.util.normalize(beat_mfcc, axis=0)])
     nseg = max(2, min(args.sections, feat.shape[1] - 1))
     bounds = librosa.segment.agglomerative(feat, nseg)
+    # librosa.util.sync yields len(beats)+1 columns, so a boundary can land ON
+    # index len(beats) — indexing `beats` with it raises IndexError and the
+    # analyzer dies with no JSON at all (audit 2026-07-28). Clip to the last
+    # real beat.
+    bounds = np.clip(np.asarray(bounds), 0, len(beats) - 1)
     bound_times = librosa.frames_to_time(beats[bounds], sr=sr)
     edges = list(bound_times) + [dur]
 

@@ -1250,6 +1250,8 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
             "ableton_mcp" => st.ableton_mcp = s(&r, 1),
             "music_folder" => st.music_folder = s(&r, 1),
             "analyzer_cmd" => st.analyzer_cmd = s(&r, 1),
+            "musicai_api_key" => st.musicai_api_key = s(&r, 1),
+            "musicai_workflow" => st.musicai_workflow = s(&r, 1),
             _ => {}
         }
     }
@@ -1258,7 +1260,7 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
 pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
     // one transaction: settings change as a unit, never a half-applied mix
     let tx = conn.transaction().await?;
-    for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd)] {
+    for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd), ("musicai_api_key", &st.musicai_api_key), ("musicai_workflow", &st.musicai_workflow)] {
         tx.execute(
             "INSERT INTO setting (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2",
             params![k, v.as_str()],
@@ -1279,6 +1281,30 @@ mod tests {
         let conn = db.connect().unwrap();
         migrate(&conn).await.unwrap();
         (db, conn)
+    }
+
+    /// REGRESSION (audit 2026-07-28): EVERY Settings field must round-trip.
+    /// set_settings writes an explicit key list, so a field added to the
+    /// struct without touching db.rs silently never persists — that is
+    /// exactly how the Music.AI add-on shipped dead (you paste the key, hit
+    /// Save, and it vanishes on reload).
+    #[tokio::test]
+    async fn settings_round_trip_every_field() {
+        let (_db, conn) = mem_conn().await;
+        let want = Settings {
+            claude_model: "m".into(), claude_bin: "/bin/claude".into(), ableton_mcp: "{}".into(),
+            music_folder: "/music".into(), analyzer_cmd: "/py /a.py".into(),
+            musicai_api_key: "sk-test".into(), musicai_workflow: "lyric-transcription".into(),
+        };
+        set_settings(&conn, &want).await.unwrap();
+        let got = get_settings(&conn).await.unwrap();
+        // serde round-trip compares EVERY field — a new field fails this the
+        // moment it is added to the struct without the two db.rs lists
+        assert_eq!(
+            serde_json::to_value(&got).unwrap(),
+            serde_json::to_value(&want).unwrap(),
+            "a Settings field did not persist — add it to BOTH get_settings and set_settings",
+        );
     }
 
     // ---- Preset key/BPM seeding (BACKLOG: seed new songs from the preset) ----
