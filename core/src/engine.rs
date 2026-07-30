@@ -196,7 +196,26 @@ where
     let stderr_buf = stderr_task.await.unwrap_or_default();
     if !status.success() {
         let err = stderr_buf.trim();
-        return Err(anyhow!("claude CLI failed: {}", if err.is_empty() { "is Claude Code signed in? run `claude` once to authenticate." } else { err }));
+        if !err.is_empty() {
+            return Err(anyhow!("claude CLI failed: {err}"));
+        }
+        // Empty stderr tells us nothing, so don't invent a diagnosis: the old
+        // message always blamed sign-in, which sent the user checking auth
+        // when the real cause was a transient failure mid-run (2026-07-29).
+        // Report what we actually saw on the stream instead.
+        let saw = if let Some(sub) = &result_subtype {
+            format!("its last result was \"{sub}\"")
+        } else if !assistant_text.trim().is_empty() || !streamed.trim().is_empty() {
+            "it had started answering".to_string()
+        } else {
+            "it produced no output at all".to_string()
+        };
+        let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+        return Err(anyhow!(
+            "the claude CLI exited (code {code}) without an error message — {saw}. \
+             Retry: this is usually transient (a service blip or a usage limit). \
+             If it repeats, run `claude` once in a terminal to confirm you're signed in."
+        ));
     }
 
     // An error-shaped `result` event (is_error / non-"success" subtype) must be

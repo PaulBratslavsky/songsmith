@@ -16,6 +16,12 @@ CRAFT — write harmony that serves the song
 7. GENRE-TRUE. Honor the genre's harmonic language (e.g. phonk/trap: dark minor loops, modal, sparse; pop: diatonic with one fresh twist; gospel/soul: rich extensions and secondary dominants). Don't default to I-V-vi-IV unless the genre and emotion truly call for it.
 
 PRODUCE
+EVERY section of the section map gets an entry, using its EXACT label — including
+instrumentals, intros, breaks and outros (a section you leave out has NO harmony
+downstream: it exports to the DAW as an empty bar range). If a section should be
+harmonically bare, say so with a sparse progression (a single held chord, or the
+tonic pedal) and explain it in `feel` — never by omitting the section.
+
 For each section: a progression as scale-degree romans AND concrete chords in the key, with a bar/beat feel. In `feel`, note the harmonic intent (e.g. "verse loops on i, never resolves; pre-chorus ends on V to pull into the lift") and any voicing guidance (open voicings, let ring, inversions for a walking bass).
 
 End with the artifact as a single fenced ```json block:
