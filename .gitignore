@@ -23,3 +23,7 @@ dist
 *.db
 *.db-*
 .DS_Store
+
+# python bytecode from the local analyzer
+__pycache__/
+*.pyc
