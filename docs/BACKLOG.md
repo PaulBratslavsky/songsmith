@@ -2,6 +2,15 @@
 
 ## Open (2026-07-29)
 
+- ✅ RESOLVED (2026-07-30) — **"claude startup costs minutes per stage"** was a
+  MISMEASUREMENT. A >300s spawn observed during a service-degradation window was
+  blamed on MCP server boot; measured properly, ten global servers add 1.0-1.3s
+  and connect asynchronously (`pending`/`needs-auth` never blocks the turn). Stage
+  time is real generation time. `call_claude` now passes
+  `--mcp-config '{"mcpServers":{}}' --strict-mcp-config` anyway, for ISOLATION —
+  single-turn text generation shouldn't have third-party servers in its failure
+  path — not for speed. Chat keeps its own servers (`chat_send`).
+
 - **Drums through the Arranger.** Bass/pad/chords/arp/lead are all Claude-written
   takes now (docs/RENDER-ROUNDTRIP.md, "the take contract"); drums are still
   formula-only because they speak GM pitches (36 kick / 38 snare / 42 hat), not
