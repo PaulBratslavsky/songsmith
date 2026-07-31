@@ -84,6 +84,16 @@ where
         .arg("--verbose")
         .arg("--include-partial-messages")
         .arg("--no-session-persistence")
+        // ISOLATION (2026-07-30): stage runs are single-turn TEXT generation —
+        // they never call a tool. Loading the user's global MCP servers puts
+        // unrelated third-party processes (and their auth prompts) in the path
+        // of every song stage, so a broken or hanging server elsewhere could
+        // stall a generation. Chat keeps its own servers: it spawns separately
+        // with its own --mcp-config (app/src-tauri chat_send).
+        // Measured cost when the servers are healthy: ~1s per call, so this is
+        // for determinism, not speed.
+        .arg("--mcp-config").arg(r#"{"mcpServers":{}}"#)
+        .arg("--strict-mcp-config")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
