@@ -631,14 +631,16 @@ fn map_song(r: &libsql::Row) -> Song {
 // includes the current artifact's timestamp (max-version) as a correlated subquery
 const STAGE_SELECT: &str = "SELECT id, song_id, type, ordinal, status, skill_id, created_at, updated_at, \
     (SELECT created_at FROM artifact WHERE stage_id = stage.id ORDER BY version DESC LIMIT 1) AS artifact_at, \
-    (SELECT content LIKE '%\"verbatim\":true%' FROM artifact WHERE stage_id = stage.id ORDER BY version DESC LIMIT 1) AS verbatim FROM stage";
+    (SELECT content LIKE '%\"imported\":true%' OR content LIKE '%\"verbatim\":true%' \
+     FROM artifact WHERE stage_id = stage.id ORDER BY version DESC LIMIT 1) AS imported FROM stage";
 fn map_stage(r: &libsql::Row) -> Stage {
     Stage {
         id: s(r, 0), song_id: s(r, 1), r#type: s(r, 2), ordinal: i(r, 3), status: s(r, 4),
         skill_id: so(r, 5), created_at: s(r, 6), updated_at: s(r, 7), artifact_at: so(r, 8),
         // SQLite has no bool: the LIKE yields 1/0, and NULL when the stage has
-        // no artifact at all
-        verbatim: r.get::<Option<i64>>(9).ok().flatten().unwrap_or(0) != 0,
+        // no artifact at all. `verbatim` is the pre-rename marker, still matched
+        // so songs imported before this change keep working.
+        imported: r.get::<Option<i64>>(9).ok().flatten().unwrap_or(0) != 0,
     }
 }
 
