@@ -102,6 +102,34 @@ export function SongWorkspace() {
     }
     setVariantBusy(false);
   };
+  // Live progress for the Melodist/Arranger writes. These are MINUTES-long
+  // generations; without this the UI showed a static "writing…" and a working
+  // run looked hung (user-hit, 2026-08-03). The backend reports how much has
+  // streamed and how many sections have been emitted so far.
+  const [writeProg, setWriteProg] = useState<{ part: string; chars: number; sections: number } | null>(null);
+  useEffect(() => {
+    let un = () => {};
+    (async () => {
+      un = await listen<{ song_id: string; part: string; chars: number; sections: number }>(
+        "write_progress",
+        (p) => { if (p.song_id === id) setWriteProg({ part: p.part, chars: p.chars, sections: p.sections }); },
+      );
+    })();
+    return () => un();
+  }, [id]);
+  // whichever write is in flight — "lead" covers both the 🎶 Melody button and
+  // the variations row's lead, matching the backend's cancel key
+  const writingPart = melodyBusy ? "lead" : variantBusy ? variantPart : null;
+  useEffect(() => { if (!writingPart) setWriteProg(null); }, [writingPart]);
+  const cancelWrite = async () => {
+    if (!writingPart) return;
+    try {
+      const had = await api.cancelWrite(id, writingPart);
+      setAbMsg(had ? "✋ Cancelled — nothing was saved; the previous take is untouched." : "It had already finished.");
+    } catch (e: any) {
+      setAbMsg(String(e?.message ?? e));
+    }
+  };
   // live per-step progress while the Ableton build runs (backend emits one
   // event per connect/clear/track-create/section step)
   useEffect(() => {
@@ -304,6 +332,19 @@ export function SongWorkspace() {
         <div style={{ position: "relative", marginBottom: 12 }}>
           <button className="sm ghost" title="clear" onClick={() => setAbMsg("")} style={{ position: "absolute", top: 4, right: 4, zIndex: 1 }}>✕</button>
           <pre className="artifact-text" style={{ whiteSpace: "pre-wrap", maxHeight: 200, margin: 0, paddingRight: 32 }}>{abMsg}</pre>
+        </div>
+      )}
+      {/* proof of life for the minutes-long Melodist/Arranger writes, plus the
+          way out — a static label with no cancel is what made a working run
+          read as a freeze */}
+      {writingPart && (
+        <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 12 }}>
+          <span className="faint" style={{ fontSize: 12 }}>
+            {writeProg
+              ? `🎶 ${writingPart} — ${writeProg.sections} section${writeProg.sections === 1 ? "" : "s"} written · ${(writeProg.chars / 1000).toFixed(1)}k chars streamed`
+              : `🎶 ${writingPart} — waiting for Claude's first tokens…`}
+          </span>
+          <button className="sm ghost" onClick={() => void cancelWrite()} title="Stop the generation — nothing is saved and the previous take stays as it is">✋ cancel</button>
         </div>
       )}
 

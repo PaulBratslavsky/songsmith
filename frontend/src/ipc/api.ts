@@ -97,6 +97,7 @@ export type CommandMap = {
   midi_close_input: { args: Record<string, never>; result: null };
   discard_stage_draft: { args: { stageId: string }; result: null };
   cancel_stage: { args: { stageId: string }; result: void };
+  cancel_write: { args: { songId: string; part: string }; result: boolean };
   self_check_stage: { args: { stageId: string }; result: StageDraft };
   approve_stage: { args: { stageId: string }; result: unknown };
   advance_stage: { args: { songId: string }; result: unknown };
@@ -293,6 +294,9 @@ export const api = {
   runStage: (stageId: string, userInput?: string) =>
     call("run_stage", { stageId, userInput: userInput ?? null }),
   cancelStage: (stageId: string) => call("cancel_stage", { stageId }),
+  /** Abort an in-flight Melodist/Arranger write. `part` is "lead" for the
+   *  melody, else bass/pad/chords/arp. Resolves false if it already finished. */
+  cancelWrite: (songId: string, part: string) => call("cancel_write", { songId, part }),
   selfCheckStage: (stageId: string) => call("self_check_stage", { stageId }),
   approveStage: (stageId: string) => call("approve_stage", { stageId }),
   acceptStageDraft: (stageId: string) => call("accept_stage_draft", { stageId }),

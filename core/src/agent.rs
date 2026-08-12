@@ -905,7 +905,17 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
 /// the musical content ONCE (guided by the Melodist skill), deterministic
 /// code clamps it (midi::clamp_melody) and renders it. Stored per song;
 /// regenerate for a different take.
-pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_id: &str, section: Option<&str>) -> Result<Value> {
+pub async fn generate_song_melody<F>(
+    conn: &Connection,
+    settings: &Settings,
+    song_id: &str,
+    section: Option<&str>,
+    on_token: F,
+    cancel: Option<CancelToken>,
+) -> Result<Value>
+where
+    F: Fn(String) + Send,
+{
     let song = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let preset = db::get_preset(conn, &song.style_preset_id).await?;
     let parts = crate::ableton::song_parts(conn, song_id).await;
@@ -967,7 +977,11 @@ pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_i
     } else {
         user.push_str("\nWrite the melody JSON.\n");
     }
-    let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
+    // A whole-song lead is a MINUTES-long generation (measured ~5 min over 11
+    // sections). Streaming the tokens out and honouring a cancel is what stops
+    // a working run from being indistinguishable from a hang (user-hit,
+    // 2026-08-03).
+    let out = call_claude(settings, &skill.instructions, &user, &on_token, cancel.as_ref()).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Melodist output"))?;
     let sections_out = parsed.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let clamped = crate::midi::clamp_melody(&sections_out, &parts);
@@ -1020,7 +1034,17 @@ pub async fn generate_song_melody(conn: &Connection, settings: &Settings, song_i
 /// ONE instrumental part (bass / pad / chords / arp) as a stored take —
 /// regenerate for variations, push non-destructively as that one Live track,
 /// and the full build prefers the take over the formula.
-pub async fn generate_song_part(conn: &Connection, settings: &Settings, song_id: &str, part: &str) -> Result<Value> {
+pub async fn generate_song_part<F>(
+    conn: &Connection,
+    settings: &Settings,
+    song_id: &str,
+    part: &str,
+    on_token: F,
+    cancel: Option<CancelToken>,
+) -> Result<Value>
+where
+    F: Fn(String) + Send,
+{
     let part = part.trim().to_lowercase();
     if !["bass", "pad", "chords", "arp"].contains(&part.as_str()) {
         return Err(anyhow!("unknown part '{part}' — one of: bass, pad, chords, arp"));
@@ -1057,7 +1081,8 @@ pub async fn generate_song_part(conn: &Connection, settings: &Settings, song_id:
         root = song.key_root, mode = song.key_mode, bpm = song.bpm,
         intent = if song.intent.trim().is_empty() { "(none)" } else { song.intent.trim() },
     );
-    let out = call_claude(settings, &skill.instructions, &user, &|_| {}, None).await?;
+    // same reasoning as the Melodist: minutes-long, so stream and allow cancel
+    let out = call_claude(settings, &skill.instructions, &user, &on_token, cancel.as_ref()).await?;
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Arranger output"))?;
     let sections_out = parsed.get("sections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let clamped = crate::midi::clamp_part_take(&sections_out, &parts, mono);

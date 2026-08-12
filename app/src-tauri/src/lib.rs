@@ -229,9 +229,46 @@ async fn install_ableton_script() -> R<String> {
 }
 
 #[tauri::command]
-async fn generate_song_melody(state: State<'_, AppState>, song_id: String, section: Option<String>) -> R<serde_json::Value> {
+async fn generate_song_melody(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String, section: Option<String>) -> R<serde_json::Value> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
-    song_core::agent::generate_song_melody(&state.conn, &settings, &song_id, section.as_deref()).await.map_err(e2s)
+    let key = write_key("lead", &song_id);
+    let cancel = agent::CancelToken::new();
+    state.running.lock().unwrap().insert(key.clone(), cancel.clone());
+    let result = song_core::agent::generate_song_melody(
+        &state.conn, &settings, &song_id, section.as_deref(),
+        write_progress(&app, &song_id, "lead"), Some(cancel),
+    ).await;
+    state.running.lock().unwrap().remove(&key);
+    result.map_err(e2s)
+}
+
+/// Key under which an in-flight part/melody write registers its cancel token,
+/// so `cancel_write` can find it. Shares `AppState.running` with stage runs —
+/// the namespaces can't collide because stage keys are bare stage ids.
+fn write_key(kind: &str, song_id: &str) -> String {
+    format!("{kind}:{song_id}")
+}
+
+/// Token sink for a part/melody write. The Melodist streams a big JSON blob for
+/// minutes; raw tokens are useless to a human, so this reports PROGRESS instead:
+/// how much has arrived and how many sections have been emitted so far (each
+/// section object carries exactly one `"label"`). Without this the UI showed a
+/// static "writing…" and a working run was indistinguishable from a hang.
+fn write_progress(app: &tauri::AppHandle, song_id: &str, part: &str) -> impl Fn(String) + Send {
+    let app = app.clone();
+    let song_id = song_id.to_string();
+    let part = part.to_string();
+    let acc = std::sync::Mutex::new(String::new());
+    move |tok: String| {
+        let (chars, sections) = {
+            let mut a = acc.lock().unwrap();
+            a.push_str(&tok);
+            (a.len(), a.matches("\"label\"").count())
+        };
+        let _ = app.emit("write_progress", serde_json::json!({
+            "song_id": song_id, "part": part, "chars": chars, "sections": sections,
+        }));
+    }
 }
 #[tauri::command]
 async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
@@ -1167,9 +1204,28 @@ async fn get_song_takes(state: State<'_, AppState>, song_id: String) -> R<serde_
 }
 /// Arranger: Claude writes one part (bass/pad/chords/arp) as a stored take.
 #[tauri::command]
-async fn generate_song_part(state: State<'_, AppState>, song_id: String, part: String) -> R<serde_json::Value> {
+async fn generate_song_part(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String, part: String) -> R<serde_json::Value> {
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
-    song_core::agent::generate_song_part(&state.conn, &settings, &song_id, &part).await.map_err(e2s)
+    let key = write_key(&part, &song_id);
+    let cancel = agent::CancelToken::new();
+    state.running.lock().unwrap().insert(key.clone(), cancel.clone());
+    let result = song_core::agent::generate_song_part(
+        &state.conn, &settings, &song_id, &part,
+        write_progress(&app, &song_id, &part), Some(cancel),
+    ).await;
+    state.running.lock().unwrap().remove(&key);
+    result.map_err(e2s)
+}
+
+/// Abort an in-flight Melodist/Arranger write: fires its cancel token, which
+/// kills the Claude child (`kill_on_drop`). Idempotent — cancelling something
+/// that already finished is a no-op, not an error.
+#[tauri::command]
+async fn cancel_write(state: State<'_, AppState>, song_id: String, part: String) -> R<bool> {
+    let token = state.running.lock().unwrap().remove(&write_key(&part, &song_id));
+    let had = token.is_some();
+    if let Some(t) = token { t.cancel(); }
+    Ok(had)
 }
 /// Non-destructive single-part push (any written take, incl. the lead).
 #[tauri::command]
@@ -1354,6 +1410,7 @@ pub fn run() {
             import_reference,
             resume_import,
             generate_song_melody,
+            cancel_write,
             run_doctor,
             install_ableton_script,
             parse_pasted_lyrics,

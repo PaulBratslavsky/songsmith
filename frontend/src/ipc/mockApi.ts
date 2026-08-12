@@ -730,6 +730,7 @@ const handlers: MockHandlers = {
   midi_open_input: () => { throw new Error("MIDI input needs the desktop app"); },
   midi_close_input: () => null,
   cancel_stage: () => undefined, // mock runs finish instantly — nothing to cancel
+  cancel_write: () => false, // ditto for Melodist/Arranger writes
   approve_stage: (a) => {
     const stage = db.stages.find((s: Any) => s.id === a.stageId);
     const art = currentArtifact(a.stageId);

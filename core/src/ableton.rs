@@ -713,6 +713,46 @@ mod tests {
     use crate::models::StyleInput;
     use libsql::Builder;
 
+    /// The real thing, against a running Live. Ignored by default because it
+    /// needs Ableton open with AbletonMCP listening on 9877 AND it mutates the
+    /// open set (it adds one track). Run deliberately:
+    ///
+    ///   cargo test -p song_core -- --ignored take_push_adds_a_new_track
+    ///
+    /// Proves what the unit test above cannot: that the names we read back from
+    /// Live are the ones `free_take_track_name` is actually choosing between.
+    #[test]
+    #[ignore]
+    fn take_push_adds_a_new_track_in_a_live_session() {
+        let before = {
+            let mut s = TcpStream::connect_timeout(
+                &"127.0.0.1:9877".parse().unwrap(), Duration::from_millis(1500),
+            ).expect("Ableton must be open with AbletonMCP on 9877");
+            s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+            live_track_names(&mut s)
+        };
+        let expected = free_take_track_name(&before, "Lead");
+        assert!(!before.contains(&expected), "{expected} already exists — the name picker is wrong");
+
+        // one bar, one note: enough to force the track + clip path
+        let sections = vec![("Verse 1".to_string(), 1i64)];
+        let notes = vec![vec![json!({"pitch": 60, "start_time": 0.0, "duration": 1.0, "velocity": 90})]];
+        let out = build_take_track("Lead", &sections, &notes, &|_| {}).expect("push failed");
+        assert!(out.contains(&expected), "log should name the new track: {out}");
+
+        let after = {
+            let mut s = TcpStream::connect_timeout(
+                &"127.0.0.1:9877".parse().unwrap(), Duration::from_millis(1500),
+            ).unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
+            live_track_names(&mut s)
+        };
+        assert!(after.contains(&expected), "'{expected}' should exist in Live now; got {after:?}");
+        for old in &before {
+            assert!(after.contains(old), "'{old}' was DELETED — the push must be additive; got {after:?}");
+        }
+    }
+
     /// A take push ADDS a track; it must never pick a name already in the set,
     /// because the old behaviour (delete-then-recreate) threw away the previous
     /// take and any hand edits made to it in Live.
