@@ -13,4 +13,12 @@ status: string, skill_id: string | null, created_at: string, updated_at: string,
  * when this stage's current artifact was created (null if never run) —
  * used to detect when a downstream stage is out of date vs. an edited upstream
  */
-artifact_at: string | null, };
+artifact_at: string | null, 
+/**
+ * true when the current artifact is the USER'S VERBATIM CONTENT (pasted
+ * lyrics and the structure back-filled from their headers) rather than
+ * generated output. Such a stage is never "out of date": nothing upstream
+ * can invalidate words the user wrote, and offering to re-run the Lyricist
+ * over them would destroy them (user-hit, 2026-08-12).
+ */
+verbatim: boolean, };
