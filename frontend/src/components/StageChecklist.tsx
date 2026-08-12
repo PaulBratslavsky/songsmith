@@ -24,14 +24,14 @@ export function staleStagesInOrder(stages: Stage[]): Stage[] {
 /** Stages whose current artifact is older than a later-edited upstream stage —
  *  i.e. out of date and worth re-running. Timestamps are ISO, so string-comparable.
  *
- *  A `verbatim` stage is NEVER stale. The rule below assumes the pipeline ran
- *  forward (concept → … → lyrics), but the paste flows run it BACKWARD: the
- *  user's words come first and everything else is derived from them, so writing
- *  a Concept afterwards made its own sources look out of date. Worse, the batch
- *  "Refresh out-of-date stages" would then re-run the Lyricist over pasted
- *  lyrics and rewrite them — the exact thing the verbatim contract forbids
- *  (user-hit, 2026-08-12). Nothing upstream can invalidate words the user
- *  wrote, so provenance beats ordinal here.
+ *  An `imported` stage is NEVER stale. The rule below assumes the pipeline ran
+ *  forward (concept → … → lyrics), but BOTH import flows run it BACKWARD: the
+ *  source lands first (pasted words, or a Structure/Chords/Lyrics measured from
+ *  imported audio) and Concept is derived from it, so writing that Concept made
+ *  the song's own evidence look out of date. Acting on the flag destroys it —
+ *  "Refresh out-of-date stages" re-runs the Lyricist over a paste, and discards
+ *  the key, tempo and progression measured from the actual audio in favour of
+ *  invention (user-hit, 2026-08-12). Provenance beats ordinal here.
  *
  *  They still count as upstream for genuinely-derived stages below them. */
 export function staleStageIds(stages: Stage[]): Set<string> {
@@ -39,7 +39,7 @@ export function staleStageIds(stages: Stage[]): Set<string> {
   const out = new Set<string>();
   let newestUpstream = "";
   for (const s of sorted) {
-    if (s.artifact_at && newestUpstream && s.artifact_at < newestUpstream && !s.verbatim) out.add(s.id);
+    if (s.artifact_at && newestUpstream && s.artifact_at < newestUpstream && !s.imported) out.add(s.id);
     if (s.artifact_at && s.artifact_at > newestUpstream) newestUpstream = s.artifact_at;
   }
   return out;

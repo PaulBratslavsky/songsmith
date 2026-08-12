@@ -15,10 +15,16 @@ status: string, skill_id: string | null, created_at: string, updated_at: string,
  */
 artifact_at: string | null, 
 /**
- * true when the current artifact is the USER'S VERBATIM CONTENT (pasted
- * lyrics and the structure back-filled from their headers) rather than
- * generated output. Such a stage is never "out of date": nothing upstream
- * can invalidate words the user wrote, and offering to re-run the Lyricist
- * over them would destroy them (user-hit, 2026-08-12).
+ * true when the current artifact came from OUTSIDE the stage pipeline —
+ * pasted lyrics, or a Structure/Chords/Lyrics measured from imported audio
+ * — rather than being generated from upstream stages.
+ *
+ * Such a stage is never "out of date". The staleness rule compares
+ * timestamps by ordinal, but both import flows run the pipeline BACKWARD
+ * (the source lands first, Concept is derived from it), so an ordinal-only
+ * rule flags the very evidence the song was built from. Acting on that
+ * flag destroys it: re-running Lyrics rewrites a paste, and re-running
+ * Structure/Chords discards the key, tempo and progression measured from
+ * the actual audio (user-hit, 2026-08-12).
  */
-verbatim: boolean, };
+imported: boolean, };
