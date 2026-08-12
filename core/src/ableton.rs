@@ -513,15 +513,23 @@ pub fn build_take_track(track: &str, sections: &[(String, i64)], section_notes: 
     s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
     let nap = || std::thread::sleep(Duration::from_millis(35));
     let _ = ableton_cmd(&mut s, json!({"type":"switch_to_arrangement_view","params":{}}));
-    let _ = ableton_cmd(&mut s, json!({"type":"clear_named_tracks","params":{"names": [track]}}));
+    // ADD a take, never replace one: pick the first free "<Part> N" name rather
+    // than deleting the existing track. `clear_named_tracks` DELETES matching
+    // tracks, so the old path threw away the previous take and any hand edits
+    // made to it in Live (user-hit, 2026-08-03).
+    progress("Reading the Live set's track names…".into());
+    let existing = live_track_names(&mut s);
+    // `track` stays the BASE part name (it keys part_color); `track_name` is
+    // what this take is actually called in Live.
+    let track_name = free_take_track_name(&existing, track);
     nap();
     let ti = ableton_cmd(&mut s, json!({"type":"create_midi_track","params":{"index":-1}}))
         .ok().and_then(|v| v.get("result").and_then(|r| r.get("index")).and_then(|n| n.as_i64()))
-        .ok_or_else(|| anyhow!("could not create the {track} track"))?;
-    let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": track}}));
+        .ok_or_else(|| anyhow!("could not create the {track_name} track"))?;
+    let _ = ableton_cmd(&mut s, json!({"type":"set_track_name","params":{"track_index": ti, "name": track_name}}));
     nap();
 
-    let mut log = vec![format!("{track} track only — nothing else touched")];
+    let mut log = vec![format!("{track_name} — a NEW track; earlier takes and every other track untouched")];
     let (mut bar, mut ci) = (1i64, 0i64);
     for (i, (label, bars)) in sections.iter().enumerate() {
         let notes = section_notes.get(i).cloned().unwrap_or_default();
@@ -593,6 +601,41 @@ fn take_track_name(part: &str) -> Option<&'static str> {
         "chords" => Some("Chords"), "arp" => Some("Arp"),
         _ => None,
     }
+}
+
+/// Every track name currently in the Live set, read back via `get_session_info`
+/// (for the count) then `get_track_info` per index. Deliberately uses only
+/// commands the shipped remote script already has — adding a new one would
+/// force a Live restart before this could work.
+fn live_track_names(s: &mut TcpStream) -> Vec<String> {
+    let count = ableton_cmd(s, json!({"type":"get_session_info","params":{}}))
+        .ok()
+        .and_then(|v| v.pointer("/result/track_count").and_then(|n| n.as_i64()))
+        .unwrap_or(0);
+    (0..count)
+        .filter_map(|i| {
+            ableton_cmd(s, json!({"type":"get_track_info","params":{"track_index": i}}))
+                .ok()
+                .and_then(|v| v.pointer("/result/name").and_then(|n| n.as_str()).map(String::from))
+        })
+        .collect()
+}
+
+/// The first FREE take-track name: "Lead" if nothing is called that, else
+/// "Lead 2", "Lead 3", … Each push lands on its own track so a previous take —
+/// and any hand editing done to it in Live — survives, and takes can be A/B'd
+/// by soloing. Replaces the old delete-then-recreate, which destroyed the
+/// previous take every time (user-hit, 2026-08-03).
+fn free_take_track_name(existing: &[String], base: &str) -> String {
+    let taken = |n: &str| existing.iter().any(|e| e.trim().eq_ignore_ascii_case(n));
+    if !taken(base) {
+        return base.to_string();
+    }
+    // start at 2 — the unsuffixed name IS take 1
+    (2..)
+        .map(|i| format!("{base} {i}"))
+        .find(|n| !taken(n))
+        .unwrap_or_else(|| base.to_string())
 }
 
 /// Every stored take (Melodist lead + Arranger parts), converted from
@@ -669,6 +712,27 @@ mod tests {
     use super::*;
     use crate::models::StyleInput;
     use libsql::Builder;
+
+    /// A take push ADDS a track; it must never pick a name already in the set,
+    /// because the old behaviour (delete-then-recreate) threw away the previous
+    /// take and any hand edits made to it in Live.
+    #[test]
+    fn take_track_name_never_collides_with_an_existing_track() {
+        // nothing there yet → the plain part name
+        assert_eq!(free_take_track_name(&[], "Lead"), "Lead");
+        // the unsuffixed name IS take 1, so the next one is 2
+        assert_eq!(free_take_track_name(&["Lead".into()], "Lead"), "Lead 2");
+        assert_eq!(free_take_track_name(&["Lead".into(), "Lead 2".into()], "Lead"), "Lead 3");
+        // a gap is reused rather than skipped past
+        assert_eq!(free_take_track_name(&["Lead".into(), "Lead 3".into()], "Lead"), "Lead 2");
+        // other parts and unrelated tracks don't crowd the namespace
+        assert_eq!(free_take_track_name(&["Bass".into(), "Drums".into()], "Lead"), "Lead");
+        assert_eq!(free_take_track_name(&["Lead".into()], "Bass"), "Bass");
+        // Live's names are user-editable: match case-insensitively and ignore
+        // the padding Live leaves behind, or we'd hand back a duplicate
+        assert_eq!(free_take_track_name(&["lead".into()], "Lead"), "Lead 2");
+        assert_eq!(free_take_track_name(&["  Lead  ".into()], "Lead"), "Lead 2");
+    }
 
     async fn mem_conn() -> (libsql::Database, Connection) {
         let db = Builder::new_local(":memory:").build().await.unwrap();

@@ -1,5 +1,5 @@
 # Songsmith Studio — common tasks.
-.PHONY: install dev build dmg test types
+.PHONY: install dev build dmg test analyzertest types
 
 # Build and (re)install the app into /Applications, then launch it.
 install:
@@ -18,9 +18,14 @@ dmg:
 	cargo build -p mcp-shim --release
 	cd app/src-tauri && ../../frontend/node_modules/.bin/tauri build
 
-# Run the Rust test suite (unit + integration).
-test:
+# Run the test suites (Rust contracts + the analyzer's pure logic).
+test: analyzertest
 	cargo test -p song_core
+
+# The analyzer's pure-logic tests (stdlib unittest, no audio needed — the
+# render corpus it was calibrated on isn't checked in).
+analyzertest:
+	cd analysis && .venv/bin/python -m unittest discover -s . -q
 
 # Regenerate the TypeScript types from the Rust models.
 types:

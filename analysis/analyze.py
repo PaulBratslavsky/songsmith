@@ -129,6 +129,80 @@ def transcribe_notes(stems):
         print(f"(note transcription unavailable: {e})", file=sys.stderr)
         return [], []
 
+# How loose a beat-grid fit may be before the refined tempo is discarded, as a
+# FRACTION OF ONE BEAT. PROVISIONAL — calibrated on n=4 tracks with Ableton
+# ground truth (2026-08-03), which is far too few to tune a threshold properly:
+#
+#   track                 resid/beat   .als truth   coarse -> refined   verdict
+#   new-song-idea-343         1.05%       90          89.1 -> 90.00     win
+#   bells-and-drums-2         1.65%      121.0084    123.0 -> 121.00    win
+#   new-song-idea-432         1.78%      120         117.5 -> 120.00    win
+#   loki                     12.72%      108         107.7 -> 109.10    LOSS
+#
+# 5% sits in the empty gap between every confirmed win and the one confirmed
+# loss. Tracks between ~2% and ~12% are UNMEASURED — nobody knows whether
+# refinement helps there, and this constant is the first thing the T4 harness
+# (docs/IMPORT-ACCURACY-PLAN.md) should sweep once a golden set exists.
+#
+# Erring low is the safe direction: falling back returns the coarse value, which
+# is exactly the behaviour that shipped before refinement existed.
+RESID_GATE = 0.05
+
+
+def refine_tempo(beat_times, coarse_bpm):
+    """librosa reports the tempogram-LAG tempo, which is quantized to
+    60*(sr/hop)/k for integer k — with the default sr/hop that grid is 7.6 BPM
+    wide at ~144 BPM, so the reported BPM can be several BPM off and a 3-minute
+    track drifts SECONDS by the end (measured 2026-08-01: reported 143.6 vs a
+    true 140.4 put bar 121 4.6s late; five renders reported 89.1 for a true 90).
+
+    The beat TIMES are far more precise than the lag that produced them. Recover
+    each beat's index from the median inter-beat interval (so one dropped or
+    inserted beat shifts only itself, not the whole fit), then least-squares fit
+    index -> time and read the tempo off the slope.
+
+    The fit is only TRUSTED when a single tempo actually describes the beats —
+    see RESID_GATE. Refining a badly-tracked grid produced a real regression
+    (loki: coarse 107.7 vs a true 108, "refined" to 109.10 — worse), and the
+    residual separated that case cleanly from the wins.
+
+    Returns (bpm, resid_ms, refined). `resid_ms` is the fit's residual sigma — a
+    beat-grid QUALITY signal reported either way, so a caller can flag a track
+    whose grid is untrustworthy even when we fell back. `refined` says whether
+    `bpm` is the fitted value or the coarse one.
+    """
+    bt = np.asarray(beat_times, dtype=float)
+    if len(bt) < 8:
+        return coarse_bpm, None, False
+    ibis = np.diff(bt)
+    period = float(np.median(ibis))
+    if not np.isfinite(period) or period <= 0:
+        return coarse_bpm, None, False
+    # Index each beat by accumulating its OWN step, not by its distance from the
+    # first beat: if the median period is off by even 1%, distance-from-start
+    # drifts a whole beat within ~100 beats and the indices go wrong. Per-step
+    # rounding stays locally correct, and a genuinely skipped beat just scores a
+    # step of 2 instead of shifting everything after it.
+    steps = np.clip(np.round(ibis / period), 1, None)
+    idx = np.concatenate([[0.0], np.cumsum(steps)])
+    slope, intercept = np.polyfit(idx, bt, 1)
+    if slope <= 0:
+        return coarse_bpm, None, False
+    bpm = 60.0 / slope
+    resid = bt - np.polyval([slope, intercept], idx)
+    resid_ms = round(float(np.std(resid)) * 1000.0, 1)
+    # the lag quantization is at most ~3% off, so a large disagreement means the
+    # refinement (not the coarse estimate) is the one that went wrong
+    if coarse_bpm > 0 and abs(bpm - coarse_bpm) / coarse_bpm > 0.15:
+        return coarse_bpm, resid_ms, False
+    # THE GATE. Judge the residual against the beat PERIOD, not in absolute ms —
+    # 8ms is 1.2% of a beat at 90 BPM but 2.9% at 220, and the threshold should
+    # not drift with tempo.
+    if float(np.std(resid)) > RESID_GATE * period:
+        return coarse_bpm, resid_ms, False
+    return float(bpm), resid_ms, True
+
+
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 # Krumhansl-Schmuckler key profiles (major, minor)
@@ -158,12 +232,6 @@ def triad_templates():
     return np.array(tmpl), labels
 
 
-def chord_for(chroma_vec, tmpl, labels):
-    v = chroma_vec / (np.linalg.norm(chroma_vec) + 1e-9)
-    scores = tmpl @ v
-    return labels[int(np.argmax(scores))]
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audio")
@@ -183,6 +251,9 @@ def main():
     tempo, beats = librosa.beat.beat_track(y=y, sr=sr, units="frames")
     tempo = float(np.atleast_1d(tempo)[0])
     beat_times = librosa.frames_to_time(beats, sr=sr)
+    # librosa's tempo is lag-quantized; the beat times aren't (see refine_tempo)
+    coarse_tempo = tempo
+    tempo, tempo_resid_ms, tempo_refined = refine_tempo(beat_times, coarse_tempo)
 
     # --- chroma (beat-synced) — from the DRUM-FREE mix when stems exist:
     # kicks/hats smear the harmonic profile (analyzer v2) ---
@@ -267,10 +338,11 @@ def main():
                       librosa.util.normalize(beat_mfcc, axis=0)])
     nseg = max(2, min(args.sections, feat.shape[1] - 1))
     bounds = librosa.segment.agglomerative(feat, nseg)
-    # librosa.util.sync yields len(beats)+1 columns, so a boundary can land ON
-    # index len(beats) — indexing `beats` with it raises IndexError and the
-    # analyzer dies with no JSON at all (audit 2026-07-28). Clip to the last
-    # real beat.
+    # A boundary indexing past the last beat raises IndexError and the analyzer
+    # dies with no JSON at all (audit 2026-07-28, when `util.sync` still ran with
+    # pad=True and yielded len(beats)+1 columns). With pad=False it returns
+    # len(beats)-1 columns, so this clip no longer fires — kept as a cheap guard
+    # because the cost of being wrong is the whole analysis, not one bad bar.
     bounds = np.clip(np.asarray(bounds), 0, len(beats) - 1)
     bound_times = librosa.frames_to_time(beats[bounds], sr=sr)
     edges = list(bound_times) + [dur]
@@ -341,6 +413,15 @@ def main():
     out = {
         "duration_sec": round(dur, 2),
         "tempo_bpm": round(tempo, 1),
+        # what librosa's lag grid reported, how tightly a single tempo fits the
+        # measured beats, and whether the fit was trusted. `tempo_refined: false`
+        # with a large `tempo_resid_ms` is the honest "the beat grid itself is
+        # unreliable here" signal — tempo_bpm is then the coarse, lag-quantized
+        # value and everything derived from it (bar times, section start_sec)
+        # inherits that uncertainty.
+        "tempo_coarse_bpm": round(coarse_tempo, 1),
+        "tempo_resid_ms": tempo_resid_ms,
+        "tempo_refined": tempo_refined,
         "first_downbeat_sec": round(first_downbeat, 3),
         "key": key,
         "section_count": len(sections),

@@ -10,6 +10,11 @@ producers": a Suno-style AI render goes in, a human-produced song comes out.
 
 GitHub Issues on `PaulBratslavsky/songsmith`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
+### Triage labels
+
+The five canonical roles, each label string equal to its name (`needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
 ### Domain docs
 
 Single-context: `CONTEXT.md` + `docs/adr/` at the repo root (created lazily by
@@ -49,6 +54,8 @@ done. Say plainly when something failed or was skipped.
 
 - `docs/RENDER-ROUNDTRIP.md` — the AI-render → DAW pipeline, the take contract,
   analyzer accuracy, test nets.
+- `docs/IMPORT-ACCURACY-PLAN.md` — measured baseline for key/chord/structure
+  detection on real renders, how Chordify does it, and the tiered plan (T0–T4).
 - `docs/SONG-CREATION-AND-DATA.md` — how a song is created and where its data lives.
 - `docs/SECTION-SPINE-SPEC.md`, `docs/SONG-FACTS.md` — the ownership rules above.
 - `docs/BACKLOG.md` — what's open.
