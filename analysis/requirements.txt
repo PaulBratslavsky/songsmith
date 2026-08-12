@@ -1,2 +1,3 @@
 librosa>=0.11
 soundfile
+mir_eval>=0.8

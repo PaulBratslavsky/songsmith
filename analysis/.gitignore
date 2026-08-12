@@ -1,2 +1,8 @@
 .venv/
 _test*.wav
+
+# Benchmark corpus: the AUDIO stays local (large, and often not ours to
+# redistribute); the truth.json files ARE committed — they're the expensive
+# part and they're what makes a result reproducible.
+bench/tracks/*/audio.*
+bench/**/stems/

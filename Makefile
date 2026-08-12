@@ -1,5 +1,5 @@
 # Songsmith Studio — common tasks.
-.PHONY: install dev build dmg test analyzertest types
+.PHONY: install dev build dmg test analyzertest analyzercheck types
 
 # Build and (re)install the app into /Applications, then launch it.
 install:
@@ -26,6 +26,13 @@ test: analyzertest
 # render corpus it was calibrated on isn't checked in).
 analyzertest:
 	cd analysis && .venv/bin/python -m unittest discover -s . -q
+	analysis/.venv/bin/python analysis/eval.py --selftest
+
+# Score the analyzer against the ground-truth corpus in analysis/bench/tracks.
+# Deterministic and offline — no Claude. Run it on every analyze.py change.
+analyzercheck:
+	@test -f analysis/bench/tracks/_fixture-amfcg/audio.wav || analysis/.venv/bin/python analysis/make_fixture.py
+	analysis/.venv/bin/python analysis/eval.py $(ARGS)
 
 # Regenerate the TypeScript types from the Rust models.
 types:
