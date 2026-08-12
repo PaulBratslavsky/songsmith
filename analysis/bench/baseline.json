@@ -1,0 +1,23 @@
+{
+  "_fixture-amfcg": {
+    "chord_comparable": 1.0,
+    "chord_majmin": 1.0,
+    "chord_mirex": 1.0,
+    "chord_ref_transitions": 15,
+    "chord_root": 1.0,
+    "chord_seg": 0.990660440293529,
+    "chord_sevenths": 1.0,
+    "chord_thirds": 1.0,
+    "chord_transitions": 15,
+    "chord_triads": 1.0,
+    "downbeat_phase_err_ms": 20.000000000000018,
+    "downbeat_phase_ok": 1.0,
+    "key_weighted": 0.3,
+    "seg_count": 8,
+    "seg_f05": 0.5714285714285715,
+    "seg_f3": 0.5714285714285715,
+    "seg_ref_count": 2,
+    "tempo_err_pct": 0.0,
+    "tempo_octave": 1.0
+  }
+}

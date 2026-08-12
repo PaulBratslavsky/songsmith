@@ -529,7 +529,44 @@ from the chords.
 
 ---
 
-### T4 — Measurement harness (gates everything above)
+### T4 — Measurement harness — ⚙️ **PARTLY BUILT 2026-08-12**
+
+**Shipped:** `analysis/eval.py` (`make analyzercheck`), `analysis/als_truth.py`,
+`analysis/make_fixture.py`, and the corpus layout below. `mir_eval>=0.8` is now
+declared in `requirements.txt`; bench audio is gitignored while `truth.json` is
+committed (the truth is the expensive part).
+
+Every API trap the research flagged was confirmed by running it: beat continuity
+keys really are `'Correct Metric Level Total'` (`scores['CMLt']` raises), bare
+`'C'` validates as Harte major while `'F#m'` and `'Cadd9'` raise, and `majmin`
+scores ref `A:min` vs est `A:min7` as **1.0**. One trap the research *missed*:
+Harte writes a slash bass as a **scale degree**, so `F/A` must become
+`F:maj/3` — passing the note name makes `encode` reject the label and a naive
+fallback silently drops the inversion, which would zero out any `*_inv` metric.
+
+**`als_truth.py --survey` over 143 projects: 79 are usable as chord truth.**
+Sections come from clip names on the `Sections` track; chords from grouping
+simultaneous notes on the most polyphonic track (Ableton leaves ~0.003-beat
+jitter, so simultaneity needs a tolerance). Verified on `new-song-idea-343`:
+bpm 90 — matching the tempo regression's 90.00 — and every extracted chord
+(`C#:min`, `A`, `B`, `G#:min`, `E`, `A:maj7`, plus inversions) diatonic to
+C# minor. Note Live 12 renamed `MasterTrack` → `MainTrack`; both are handled or
+every pre-12 project silently reports no tempo.
+
+**First end-to-end run** (`_fixture-amfcg`, synthetic Am F C G, truth exact by
+construction): tempo error **0.000%**, chord `majmin`/`root`/`sevenths` **1.000**,
+downbeat phase **1.000** — so a correct answer scores as correct. But
+**`key_weighted` = 0.300**, i.e. the relative major, reproducing §3.5's
+confusion on the easiest possible input; and **`seg_f3` = 0.571** on a track
+with two blatant halves, the first evidence for §3.6's `nseg = 8` problem.
+Baseline committed at `analysis/bench/baseline.json`.
+
+**Read the fixture correctly:** clean tones on an exact grid are the floor, not
+evidence. A regression there is a real bug; a good score means "not broken",
+never "accurate". Still outstanding: real audio (see the corpus note in T1.0),
+the LLM arm, and T4.5's statistics.
+
+#### The original plan (for the parts not yet built)
 
 **T4.1 — The golden set: 12–16 tracks, three tiers**
 
