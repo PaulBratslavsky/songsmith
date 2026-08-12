@@ -2,6 +2,17 @@
 
 ## Open (2026-07-29)
 
+- **Import accuracy (key / chords / structure)** — the big one, planned in
+  `docs/IMPORT-ACCURACY-PLAN.md` (tiers T0–T4, with §7's ten open questions each
+  naming the measurement that would settle it). T1.0 (tempo regression), T1.4
+  (dead code), T1.5 (analyzer timeout + kill_on_drop) and T0.1 (`{name, beats}`
+  chord schema) shipped 2026-08-01. **The recommended next move is T4 — the
+  measurement harness** (`analysis/eval.py` + a golden set + `make analyzercheck`):
+  nothing about chord or key accuracy is measurable today, `analysis_summary`
+  drops the measured tempo/key/`bar_chords`, and `mir_eval` is installed but
+  imported nowhere. Do not swap in a bigger model before the harness exists —
+  that is exactly how the MCP-startup mismeasurement below happened.
+
 - ✅ RESOLVED (2026-07-30) — **"claude startup costs minutes per stage"** was a
   MISMEASUREMENT. A >300s spawn observed during a service-degradation window was
   blamed on MCP server boot; measured properly, ten global servers add 1.0-1.3s

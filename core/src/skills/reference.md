@@ -16,7 +16,9 @@ REASON IN THIS ORDER
 PRODUCE the artifact as a single fenced ```json block combining both stages (the importer splits it into the Structure and Chords artifacts):
 {
   "structure": { "key": {"root":"A","mode":"minor"}, "bpm": 96, "keyNote":"why", "tempoNote":"why / if halved-doubled", "sections":[ {"type":"verse","label":"Verse 1","bars":8,"start_sec":12.4,"role":"..."} ] },
-  "chords": { "sections":[ {"label":"Verse 1","romans":["i","VI","III","V"],"chords":["Am","F","C","E"],"feel":"..."} ] },
+  "chords": { "sections":[ {"label":"Verse 1","romans":["i","VI","III","V"],"chords":[{"name":"Am","beats":4},{"name":"F","beats":4},{"name":"C","beats":2},{"name":"E","beats":2}],"feel":"..."} ] },
   "uncertain": ["...", "..."]
 }
+Each chord is `{"name": "...", "beats": N}` — `beats` is how long it lasts in 4/4, so a bar's worth is 4 and TWO CHORDS IN ONE BAR are `beats: 2` each. Use it whenever the reference really changes chord mid-bar; don't stretch everything to 4 out of habit, and don't split a held chord into repeats. `romans` stays one entry per chord, in the same order.
+
 Every structure section MUST carry `start_sec` — where it begins in the AUDIO (derive it from the analyzer boundaries you merged; approximate is fine). The importer uses it to place the transcript's lines into the right sections. Do NOT copy transcript text into your output — the importer assigns the verbatim lines itself.

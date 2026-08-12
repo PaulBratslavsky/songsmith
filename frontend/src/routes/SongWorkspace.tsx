@@ -52,17 +52,19 @@ export function SongWorkspace() {
   const generateMelody = async () => {
     if (melodyBusy) return;
     setMelodyBusy(true);
-    setAbMsg("🎶 Writing the lead melody (Melodist, Claude — ~30s)…");
+    // A whole-song lead is one long generation — measured at ~5 min for an
+    // 11-section song. The old "~30s" made a working run look hung.
+    setAbMsg("🎶 Writing the lead melody (Melodist, Claude)…\nA whole song takes a few minutes — longer the more sections it has. The button stays disabled until it lands.");
     try {
       const r = await api.generateSongMelody(id);
-      setAbMsg(`🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ Lead → Live sends it as its OWN track (nothing else touched); the full ⚡ Build includes it too. Re-run 🎶 for a different take.`);
+      setAbMsg(`🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ Lead → Live adds it as a NEW track (earlier takes kept, nothing else touched); the full ⚡ Build includes it too. Re-run 🎶 for a different take.`);
     } catch (e: any) {
       setAbMsg(String(e?.message ?? e));
     }
     setMelodyBusy(false);
   };
-  // non-destructive push: ONLY the named track lands in Live — a previous
-  // full build (and any hand edits there) stays untouched
+  // additive push: the take lands on a NEW track ("Lead", then "Lead 2", …),
+  // so a previous take and any hand edits made to it in Live both survive
   const pushPart = async (part: string) => {
     setAbMsg(`⚡ Sending the ${part} track to Ableton…`);
     try {
@@ -81,16 +83,19 @@ export function SongWorkspace() {
     if (variantBusy) return;
     setVariantBusy(true);
     const what = variantPart === "lead" && variantSection ? `lead (${variantSection} only)` : variantPart;
-    setAbMsg(`🎶 Writing the ${what} (Claude — ~30s)…`);
+    // one section is quick; a whole song is minutes (see generateMelody)
+    setAbMsg(variantSection
+      ? `🎶 Writing the ${what} (Claude)…`
+      : `🎶 Writing the ${what} (Claude)…\nA whole song takes a few minutes — longer the more sections it has.`);
     try {
       if (variantPart === "lead") {
         const r = await api.generateSongMelody(id, variantSection || undefined);
         setAbMsg(r.rewrote
-          ? `🎶 ${r.rewrote} rewritten — ${r.note_count} notes (motif and the other sections kept).\n⚡ → Live swaps the Lead track; the Composer's melody lane shows it too.`
-          : `🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ → Live swaps just the Lead track; edit it by hand in the Composer's melody lane.`);
+          ? `🎶 ${r.rewrote} rewritten — ${r.note_count} notes (motif and the other sections kept).\n⚡ → Live adds a NEW Lead track; the Composer's melody lane shows it too.`
+          : `🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ → Live adds a NEW Lead track; edit it by hand in the Composer's melody lane.`);
       } else {
         const r = await api.generateSongPart(id, variantPart);
-        setAbMsg(`🎶 ${r.part} written — ${r.note_count} notes.\nIdea: ${r.idea}\n⚡ → Live swaps just the ${r.part} track; the full ⚡ Build uses it too. Re-run 🎶 for another variation.`);
+        setAbMsg(`🎶 ${r.part} written — ${r.note_count} notes.\nIdea: ${r.idea}\n⚡ → Live adds a NEW ${r.part} track (earlier takes kept); the full ⚡ Build uses it too. Re-run 🎶 for another variation.`);
       }
     } catch (e: any) {
       setAbMsg(String(e?.message ?? e));
@@ -260,7 +265,7 @@ export function SongWorkspace() {
           >
             🎹 Open in Composer
           </button>
-          <button onClick={() => void generateMelody()} disabled={!allStagesDone || melodyBusy} title={allStagesDone ? "Claude writes a motif-based lead melody (its own Lead track in Ableton) — re-run for a different take" : "Complete every song-spec stage first"}>{melodyBusy ? "🎶 writing…" : "🎶 Melody"}</button>
+          <button onClick={() => void generateMelody()} disabled={!allStagesDone || melodyBusy} title={allStagesDone ? "Claude writes a motif-based lead melody (lands on its own new track in Ableton) — takes a few minutes for a whole song; re-run for another take" : "Complete every song-spec stage first"}>{melodyBusy ? "🎶 writing…" : "🎶 Melody"}</button>
           <button onClick={() => void pushMelody()} disabled={!allStagesDone || melodyBusy} title="send ONLY the Lead track to Live — no rebuild, your existing tracks stay untouched (a previous Lead is replaced)">⚡ Lead → Live</button>
           <button onClick={buildAbleton} disabled={!allStagesDone} title={allStagesDone ? "Stub the whole song in Ableton — a named Sections clip track + Bass/Chords/Melody/Filler/Arp MIDI parts from your progression (direct, no chat)" : "Complete every song-spec stage first (Concept → Generation Prompt)"}>⚡ Build in Ableton</button>
           {v.status !== "done" ? (
@@ -292,7 +297,7 @@ export function SongWorkspace() {
           <button className="sm" disabled={variantBusy} onClick={() => void pushPart(variantPart)} title={`send ONLY the ${variantPart} track to Live — replaces that one track, touches nothing else`}>
             ⚡ → Live
           </button>
-          <span className="faint" style={{ fontSize: 11 }}>each part swaps just its own track in Live · the full ⚡ Build uses written takes too</span>
+          <span className="faint" style={{ fontSize: 11 }}>each part lands on a NEW track in Live (earlier takes kept) · the full ⚡ Build uses written takes too</span>
         </div>
       )}
       {abMsg && (

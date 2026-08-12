@@ -105,8 +105,26 @@ fn arg_opt<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
 
+/// Wall-clock limit for one analyzer run: 1800s, overridable via the
+/// `SONGSMITH_ANALYZER_TIMEOUT_SECS` env var. Generous on purpose — the deep
+/// path is demucs + whisper + basic-pitch on CPU (measured ~70s for a 3.5-minute
+/// render on an M-series Mac, but slow hardware and long tracks multiply that).
+/// This exists to stop a HUNG analyzer from hanging the import forever, not to
+/// police a slow one.
+fn analyzer_timeout() -> std::time::Duration {
+    let secs = std::env::var("SONGSMITH_ANALYZER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(1800);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Run the configured local analyzer CLI on an audio file and return its JSON.
 /// The audio path is appended as the final argument. Audio never leaves the machine.
+/// Hardened like `call_claude` (`engine.rs`): `kill_on_drop` so a cancelled or
+/// timed-out run can't orphan a Python process on a CPU core, plus a wall-clock
+/// timeout — this is the LONGER of the two subprocesses and used to have neither.
 async fn run_analyzer(settings: &Settings, audio_path: &str, lyrics: bool, stems: bool) -> Result<Value> {
     let cmd = settings.analyzer_cmd.trim();
     if cmd.is_empty() {
@@ -119,9 +137,23 @@ async fn run_analyzer(settings: &Settings, audio_path: &str, lyrics: bool, stems
     command.arg(audio_path);
     if lyrics { command.arg("--lyrics"); }
     if stems { command.arg("--stems"); }
-    let out = command.output().await.map_err(|e| anyhow!("could not run analyzer ({program}): {e}"))?;
+    command.kill_on_drop(true);
+    let started = std::time::Instant::now();
+    let limit = analyzer_timeout();
+    let out = tokio::time::timeout(limit, command.output())
+        .await
+        .map_err(|_| anyhow!(
+            "the analyzer did not finish within {}s — raise SONGSMITH_ANALYZER_TIMEOUT_SECS if this track is legitimately that long",
+            limit.as_secs()
+        ))?
+        .map_err(|e| anyhow!("could not run analyzer ({program}): {e}"))?;
     if !out.status.success() {
-        return Err(anyhow!("analyzer failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        // elapsed time is what lets the timeout be calibrated from real runs
+        return Err(anyhow!(
+            "analyzer failed after {:.1}s: {}",
+            started.elapsed().as_secs_f64(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     // A zero exit with non-JSON stdout used to become {"raw": …}, which the

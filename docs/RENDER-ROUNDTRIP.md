@@ -74,6 +74,61 @@ Measured on one render (Stay.wav, 146 bars): chord changes 92 → 54, distinct
 chords 12 → 9, key confidence 0.588 → 0.647, and after v3 the opening reads as a
 clean 8-bar `Eb Ab Ab Ab | Cm Cm Cm Cm` cycle with bar 1 on the downbeat.
 
+**Read those v2/v3 numbers narrowly (2026-08-01).** They are n=1 and they are
+*self-consistency*, not accuracy: fewer chord changes is the mechanical effect of
+any stay-put bonus, and "key confidence" is the KS correlation — how sure the
+estimator is, not whether it is right. Re-measured across 13 renders, the drum-free
+stems path does **not** uniformly win: on a 212 s full production the stems and
+no-stems paths agree on only **48% of bars** (58/121) and the stems path scores
+*lower* key confidence (0.48 vs 0.528). On a 35 s sparse loop both paths are
+identical and correct. Accuracy here is material-dependent and has never been
+measured against ground truth — see `docs/IMPORT-ACCURACY-PLAN.md`.
+
+### v4 (2026-08-01) — the tempo is measured, not read off a lag grid
+
+`librosa.beat.beat_track` returns the tempo of the winning **tempogram lag**, and
+lags are integers: with the default `sr`/`hop` the reportable BPMs are
+`60·(sr/hop)/k`, a grid **7.6 BPM wide at ~144 BPM**. Every tempo this analyzer
+ever emitted sat on that grid (89.1, 107.7, 117.5, 123.0, 143.6 = lags 29, 24, 22,
+21, 18).
+
+`refine_tempo()` fits a line through the measured beat times instead — indices
+recovered by accumulating each beat's own step, so a skipped beat shifts only
+itself — and reads the tempo off the slope. Measured across 13 renders: 89.1 →
+**90.00** (6 tracks), 107.7 → **108.00** (3), 123.0 → **121.00**, 117.5 →
+**120.00**, 86.1 → **86.00**, 143.6 → **140.40**. That last one was placing bar 121
+**4.6 seconds late** — over three bars — which every section `start_sec`, the
+Composer's auto-nudge, the note-event rebase and the Ableton session tempo
+inherited.
+
+Three fields ride along: `tempo_coarse_bpm` (what the lag grid said),
+`tempo_resid_ms` (the fit's residual σ) and `tempo_refined` (whether the fit was
+trusted) — a beat-grid **quality** signal the app never had.
+
+**The fit is gated (`RESID_GATE`, 2026-08-11).** Refining a badly-tracked grid is
+worse than not refining it: on `loki` the coarse 107.7 was 0.3 BPM off Ableton's
+ground-truth 108, and the "refinement" moved it to 109.10 — a real regression. The
+residual separates the cases cleanly, judged as a fraction of one beat (absolute ms
+would drift with tempo): every confirmed win sits at ≤1.8% of a beat, the confirmed
+loss at 12.8%. Above 5%, `refine_tempo` keeps the coarse value and sets
+`tempo_refined: false`.
+
+**What the gate costs, stated plainly:** `dopamine-v1-final` — the 4.6 s-of-drift
+track that motivated this whole change — has a residual of 24% of a beat and now
+falls back to 143.6. Its drift is no longer silently "corrected" to an unverifiable
+140.4; it is **flagged** instead. That is the honest outcome, because nobody ever
+had ground truth for that track and a 24% residual means no single tempo describes
+it. Actually fixing it needs better beat tracking (T2.1 / `beat_this`), not a better
+line fit.
+
+The 5% threshold is **provisional — calibrated on n=4** and the first thing the T4
+harness should sweep; tracks between ~2% and ~12% are unmeasured. Erring low is the
+safe direction, since falling back is exactly the pre-refinement behaviour.
+`analysis/test_analyze.py` covers the gate, the skipped-beat path and the
+degrade-never-sink cases (`make analyzertest`; no audio required). Nothing consumes
+`tempo_resid_ms`/`tempo_refined` yet — routing them into the Reference Analyst's
+`uncertain` list is the obvious next step.
+
 **Analyses are snapshots**: fixes do NOT retroactively apply to songs already
 imported. Re-run 🎼 Analyze → Composer on a render to restash a corrected one.
 
@@ -181,9 +236,19 @@ per-section bookkeeping while you rebuild. Unfocusing resets A/B so no mute ling
   arrangement profile → no track at all — empty clips read as a broken export), and
   notes are resolved BEFORE `create_clip` so a partially-covering take can't leave
   blank clips behind.
-- `build_take_track` is the non-destructive push: it clears and rewrites exactly ONE
-  named track (Lead/Bass/Pad/Chords/Arp) and touches nothing else — no tempo change,
-  no rebuild — so you can audition takes against a session you've already worked in.
+- `build_take_track` is the ADDITIVE push (2026-08-03): it creates a NEW track for
+  the take — `Lead`, then `Lead 2`, `Lead 3`, … — and touches nothing else: no tempo
+  change, no rebuild, and **no deletion**. Takes accumulate so you can A/B them by
+  soloing, and hand edits you made to an earlier take survive.
+  It used to send `clear_named_tracks`, which **deletes** every track of that name —
+  so each push silently threw away the previous take *and* any editing done to it in
+  Live (user-hit, 2026-08-03). The free name is chosen by reading the set's existing
+  track names back (`get_session_info` → `track_count`, then `get_track_info` per
+  index) — deliberately only commands the shipped remote script already has, so this
+  needs no Live restart. `free_take_track_name` matches case-insensitively and
+  ignores padding, and reuses a gap (`Lead`+`Lead 3` → `Lead 2`).
+  A full ⚡ Build still rebuilds its own `Lead`/`Bass`/… tracks; take tracks with a
+  numeric suffix are left alone.
 - Drums remain formula-only (GM pitches, not scale degrees — a different vocabulary
   from the take contract).
 - Remote-script patches live at BOTH
