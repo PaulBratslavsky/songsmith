@@ -1533,7 +1533,11 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
     let lyrics_data = json!({
         "sections": parsed.sections.iter().zip(&ids).map(|(s, id)| json!({ "section_id": id, "label": s.label, "lines": s.lines })).collect::<Vec<_>>()
     });
-    let content = json!({ "kind": "lyrics", "text": lyrics_text(&lyrics_data), "data": lyrics_data, "spine_snapshot": snapshot }).to_string();
+    // `verbatim`: these are the USER'S OWN WORDS, not generated output. It is
+    // what stops the staleness rule from ever flagging them "out of date" and
+    // offering to re-run the Lyricist over them — which would rewrite the paste
+    // (user-hit, 2026-08-12). See `staleStageIds`.
+    let content = json!({ "kind": "lyrics", "text": lyrics_text(&lyrics_data), "data": lyrics_data, "spine_snapshot": snapshot, "verbatim": true }).to_string();
     db::save_artifact(conn, &song.id, Some(&lyrics_stage.id), "lyrics", &content).await?;
     db::set_stage_status(conn, &lyrics_stage.id, "done").await?;
 
@@ -1545,7 +1549,9 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
         "tempoNote": prior_data.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
     });
     let rows = db::list_sections(conn, &song.id).await?;
-    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&structure_data, &rows), "data": structure_data, "spine_snapshot": snapshot }).to_string();
+    // also verbatim-derived: the sections came from the paste's own headers, so
+    // a later Concept doesn't make this "out of date" either
+    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&structure_data, &rows), "data": structure_data, "spine_snapshot": snapshot, "verbatim": true }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -2477,6 +2483,12 @@ mod tests {
         let structure_stage = stages.iter().find(|s| s.r#type == "structure").unwrap();
         let lyr = db::current_artifact(&conn, &lyrics_stage.id).await.unwrap().unwrap();
         let lv = serde_json::from_str::<Value>(&lyr.content).unwrap();
+        // Pasted words are the USER'S. `verbatim` is what keeps the staleness
+        // rule from ever offering to re-run the Lyricist over them — a refresh
+        // would rewrite the paste (user-hit, 2026-08-12).
+        assert_eq!(lv["verbatim"], json!(true), "pasted lyrics must be marked verbatim");
+        assert!(lyrics_stage.verbatim, "the flag must reach the Stage the UI reads");
+        assert!(structure_stage.verbatim, "structure back-filled from the paste's own headers is verbatim too");
         assert_eq!(lv["data"]["sections"][0]["label"], "Verse 1");
         assert_eq!(lv["data"]["sections"][0]["lines"], json!(["First line here", "Second line here"]));
         assert_eq!(lv["data"]["sections"][1]["lines"], json!(["Hook line"]));

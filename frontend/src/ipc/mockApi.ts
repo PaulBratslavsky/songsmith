@@ -198,9 +198,16 @@ const KINDS: Record<string, string> = {
 function currentArtifact(stageId: string) {
   return db.artifacts.filter((a: Any) => a.stage_id === stageId).sort((a: Any, b: Any) => b.version - a.version)[0] ?? null;
 }
-// mirror the SQL subquery: attach the current artifact's timestamp to each stage
+// mirror the SQL subqueries: the current artifact's timestamp, and whether it
+// holds the user's verbatim content (pasted lyrics) — a verbatim stage is never
+// flagged out of date, see staleStageIds
 function withArtifactAt(stage: Any) {
-  return { ...stage, artifact_at: currentArtifact(stage.id)?.created_at ?? null };
+  const a = currentArtifact(stage.id);
+  return {
+    ...stage,
+    artifact_at: a?.created_at ?? null,
+    verbatim: typeof a?.content === "string" && a.content.includes('"verbatim":true'),
+  };
 }
 function activeSkill(stageType: string) {
   return db.skills.find((s: Any) => s.stage_type === stageType && s.enabled) ?? null;
