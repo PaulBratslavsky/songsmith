@@ -110,12 +110,28 @@ export function addChord(
   return sortSpans([...spans, { id, degree, seventh, start, length }]);
 }
 
+/** Pick a new degree for a chord span.
+ *
+ *  This CLEARS any imported `name`. `name` wins over `degree` everywhere it is
+ *  set — the lane label, playback, and the export back to the song — so leaving
+ *  it in place made picking a degree on an imported chord do nothing the user
+ *  could see, hear, or export: the Composer was a read-only view of a wrong
+ *  analysis (audit 2026-08-13). Picking a degree is an explicit override, so
+ *  the printed name it replaces has to go.
+ *
+ *  To correct the SPELLING without dropping to a degree — keeping qualities the
+ *  degree model can't express (Cadd9, F/A) — use the Chords stage editor, which
+ *  edits `name` directly (`SectionChordsEditor`, name input + swap popover). */
 export function setChordDegree(
   spans: ChordSpan[],
   id: string,
   degree: Degree,
 ): ChordSpan[] {
-  return spans.map((s) => (s.id === id ? { ...s, degree } : s));
+  return spans.map((s) => {
+    if (s.id !== id) return s;
+    const { name: _dropped, ...rest } = s;
+    return { ...rest, degree };
+  });
 }
 
 export function setChordSeventh(
