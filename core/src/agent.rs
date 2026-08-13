@@ -588,6 +588,12 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     let parsed = extract_json(&out).ok_or_else(|| anyhow!("could not parse the Reference Analyst output"))?;
     let structure = parsed.get("structure").cloned().ok_or_else(|| anyhow!("analysis had no structure"))?;
     let chords = parsed.get("chords").cloned().unwrap_or_else(|| json!({ "sections": [] }));
+    // say the doubts out loud while the import is still on screen
+    for u in parsed.get("uncertain").and_then(|v| v.as_array()).into_iter().flatten() {
+        if let Some(t) = u.as_str().filter(|t| !t.trim().is_empty()) {
+            progress(format!("⚠ check: {t}"));
+        }
+    }
 
     // 3. a song to hold it (reuse the first preset, or a minimal one)
     let preset_id = match db::list_presets(conn).await?.into_iter().next() {
@@ -617,9 +623,15 @@ pub async fn import_reference_full(conn: &Connection, settings: &Settings, audio
     let rows = db::list_sections(conn, &song.id).await?;
     let snapshot = crate::spine::snapshot_of(&rows);
     if let Some(sid) = stage_id("structure") {
+        // Carry the analysis' OWN DOUBTS through to the artifact. The skill has
+        // always been asked for `uncertain` and the importer used to drop it on
+        // the floor, so the one part of the output a producer can act on fastest
+        // never reached them (audit 2026-08-13). structure_editor_text renders it
+        // as a "⚠ CHECK THESE" block.
         let s_data = json!({
             "keyNote": structure.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
             "tempoNote": structure.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+            "uncertain": parsed.get("uncertain").cloned().unwrap_or_else(|| json!([])),
         });
         let content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &rows), "data": s_data, "spine_snapshot": snapshot, "imported": true }).to_string();
         db::save_artifact(conn, &song.id, Some(&sid), "structure", &content).await?;
@@ -826,7 +838,9 @@ pub async fn resume_import(conn: &Connection, settings: &Settings, song_id: &str
                 if lyric_sections.iter().any(|s| s.get("lines").and_then(|l| l.as_array()).is_some_and(|l| !l.is_empty())) {
                     let snapshot = crate::spine::snapshot_of(&rows);
                     let l_data = json!({ "sections": lyric_sections });
-                    let content = json!({ "kind": "lyrics", "text": lyrics_text(&l_data), "data": l_data, "spine_snapshot": snapshot }).to_string();
+                    // recovered from the render's own transcript — imported, so the
+                    // resume can't re-flag the very lyrics it just rebuilt
+                    let content = json!({ "kind": "lyrics", "text": lyrics_text(&l_data), "data": l_data, "spine_snapshot": snapshot, "imported": true }).to_string();
                     db::save_artifact(conn, song_id, Some(&lid), "lyrics", &content).await?;
                     let _ = db::set_stage_status(conn, &lid, "done").await;
                     progress("Transcribed lyrics placed into sections.".into());
@@ -1574,7 +1588,8 @@ async fn apply_parsed_lyrics(conn: &Connection, song: &Song, parsed: &ParsedLyri
                     "chords": collapse_progression(tags).iter().map(|n| json!({ "name": n, "beats": 4 })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>()
             });
-            let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot }).to_string();
+            // from the paste's own [chord] tags — the user's, not generated
+            let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot, "imported": true }).to_string();
             db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
             db::set_stage_status(conn, &chords_stage.id, "done").await?;
         }
@@ -1688,6 +1703,23 @@ fn analysis_summary(structure: &Value, mut chords: Value, raw: &Value) -> Value 
         // the transcript rides along so a resumed import can rebuild Lyrics
         // without re-running whisper
         "transcript": raw.get("transcript").cloned().unwrap_or_else(|| json!([])),
+        // WHAT THE ANALYZER ACTUALLY MEASURED, kept beside what the LLM asserted
+        // above. Without it there is no record after an import of what the signal
+        // layer said, so analyzer-vs-LLM disagreement is invisible and no accuracy
+        // claim about either is checkable (audit 2026-08-13; T0.2 in
+        // docs/IMPORT-ACCURACY-PLAN.md). This is an immutable PERCEPTION SNAPSHOT,
+        // not a second home for song facts — the song owns key/BPM, the spine owns
+        // sections, and nothing should ever read these as current truth.
+        "measured": {
+            "duration_sec": raw.get("duration_sec").cloned().unwrap_or(Value::Null),
+            "tempo_bpm": raw.get("tempo_bpm").cloned().unwrap_or(Value::Null),
+            "tempo_coarse_bpm": raw.get("tempo_coarse_bpm").cloned().unwrap_or(Value::Null),
+            "tempo_resid_ms": raw.get("tempo_resid_ms").cloned().unwrap_or(Value::Null),
+            "tempo_refined": raw.get("tempo_refined").cloned().unwrap_or(Value::Null),
+            "key": raw.get("key").cloned().unwrap_or(Value::Null),
+            "section_count": raw.get("section_count").cloned().unwrap_or(Value::Null),
+            "bar_chords": raw.get("bar_chords").cloned().unwrap_or_else(|| json!([])),
+        },
     })
 }
 
@@ -1906,7 +1938,8 @@ pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sectio
     let prior_chords = current_stage_data(conn, &chords_stage.id).await?;
     let skipped = frozen_labels("chords", &prior_chords);
     let merged_chords = merge_frozen_sections("chords", &prior_chords, &chords_data_from_resolved(&sections));
-    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&merged_chords), "data": merged_chords, "spine_snapshot": snapshot }).to_string();
+    // exported from the user's Composer sketch — their work, not generated
+    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&merged_chords), "data": merged_chords, "spine_snapshot": snapshot, "imported": true }).to_string();
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
@@ -1916,7 +1949,7 @@ pub async fn export_composition_to_song(conn: &Connection, song_id: &str, sectio
         "keyNote": merged_structure.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
         "tempoNote": merged_structure.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
     });
-    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &fresh), "data": s_data, "spine_snapshot": snapshot }).to_string();
+    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &fresh), "data": s_data, "spine_snapshot": snapshot, "imported": true }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 
@@ -1961,14 +1994,15 @@ pub async fn create_song_from_composition(
     let snapshot = crate::spine::snapshot_of(&rows);
 
     let chords_data = chords_data_from_resolved(&sections);
-    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot }).to_string();
+    // built from the user's Composer sketch — imported, see staleStageIds
+    let c_content = json!({ "kind": "chords", "text": chords_editor_text(&chords_data), "data": chords_data, "spine_snapshot": snapshot, "imported": true }).to_string();
     db::save_artifact(conn, &song.id, Some(&chords_stage.id), "chords", &c_content).await?;
     db::set_stage_status(conn, &chords_stage.id, "done").await?;
 
     // Phase 4: the SPINE owns the sections — the structure artifact keeps the
     // prose notes only (empty on a fresh export); text renders from the spine.
     let s_data = json!({ "keyNote": "", "tempoNote": "" });
-    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &rows), "data": s_data, "spine_snapshot": snapshot }).to_string();
+    let s_content = json!({ "kind": "structure", "text": crate::render::structure_spine_text(&s_data, &rows), "data": s_data, "spine_snapshot": snapshot, "imported": true }).to_string();
     db::save_artifact(conn, &song.id, Some(&structure_stage.id), "structure", &s_content).await?;
     db::set_stage_status(conn, &structure_stage.id, "done").await?;
 

@@ -716,6 +716,18 @@ pub async fn set_song_current_stage(conn: &Connection, id: &str, stage_type: &st
     conn.execute("UPDATE song SET current_stage=?2, updated_at=?3 WHERE id=?1", params![id, stage_type, now()]).await?;
     Ok(())
 }
+/// Delete a song and everything it owns.
+///
+/// EVERY song-owned table must be listed here. `song_melody` and `song_part`
+/// were missing, so deleting a song that had a written Melodist lead or Arranger
+/// take left rows pointing at a song that no longer existed — and with the FK
+/// those tables declare, the delete could fail outright. It reproduced on the
+/// three songs in the user's library that had takes (user-hit, 2026-08-13).
+///
+/// `composition` is deliberately NOT deleted: its `song_id` is nullable with no
+/// FK because a Composer sketch is standalone work that merely LINKS to a song.
+/// Destroying the user's sketch because they deleted the song it was exported
+/// from would lose work; the link is cleared instead.
 pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
     // all-or-nothing — never leave orphaned stages/artifacts behind
     let tx = conn.transaction().await?;
@@ -724,6 +736,9 @@ pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
     tx.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM render WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM section WHERE song_id = ?1", params![id]).await?;
+    tx.execute("DELETE FROM song_melody WHERE song_id = ?1", params![id]).await?;
+    tx.execute("DELETE FROM song_part WHERE song_id = ?1", params![id]).await?;
+    tx.execute("UPDATE composition SET song_id = NULL WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM song WHERE id = ?1", params![id]).await?;
     tx.commit().await?;
     Ok(())
@@ -1279,6 +1294,53 @@ pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
 mod tests {
     use super::*;
     use libsql::Builder;
+
+    /// Deleting a song must clean EVERY table it owns. `song_melody`/`song_part`
+    /// were missed, so a song with a written take left dangling rows behind and
+    /// the delete could fail outright — it reproduced on exactly the three songs
+    /// in the user's library that had takes (user-hit, 2026-08-13).
+    ///
+    /// The composition assertion is the other half: a Composer sketch is
+    /// standalone work, so deleting the song it links to must CLEAR the link,
+    /// never destroy the sketch.
+    #[tokio::test]
+    async fn delete_song_clears_every_owned_table_but_keeps_the_sketch() {
+        let (_db, conn) = mem_conn().await;
+        let preset = create_preset(&conn, crate::models::StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = create_song(&conn, &preset.id, "Doomed").await.unwrap();
+        let keep = create_song(&conn, &preset.id, "Survivor").await.unwrap();
+
+        // give it one row in every table a song can own
+        let stage = list_stages(&conn, &song.id).await.unwrap()[0].id.clone();
+        save_artifact(&conn, &song.id, Some(&stage), "concept", "{}").await.unwrap();
+        create_section(&conn, &song.id, "Verse 1", "verse", 8, "", None).await.unwrap();
+        create_render(&conn, &song.id, "v1", "/tmp/x.wav", "import", "").await.unwrap();
+        set_song_melody(&conn, &song.id, "{\"sections\":[]}").await.unwrap();
+        set_song_part(&conn, &song.id, "bass", "{\"sections\":[]}").await.unwrap();
+        let comp = save_composition(&conn, None, "Sketch", Some(&song.id), "{}").await.unwrap();
+        // a second song's take must be untouched by the delete
+        set_song_melody(&conn, &keep.id, "{\"sections\":[]}").await.unwrap();
+
+        delete_song(&conn, &song.id).await.unwrap();
+
+        async fn count(conn: &Connection, t: &str, sid: &str) -> i64 {
+            let mut r = conn.query(&format!("SELECT COUNT(*) FROM {t} WHERE song_id = ?1"), params![sid.to_string()]).await.unwrap();
+            i(&r.next().await.unwrap().unwrap(), 0)
+        }
+        for t in ["stage", "artifact", "section", "render", "song_melody", "song_part", "stage_draft"] {
+            assert_eq!(count(&conn, t, &song.id).await, 0, "{t} still holds rows for the deleted song");
+        }
+        assert!(get_song(&conn, &song.id).await.unwrap().is_none());
+
+        // the sketch survives, with its dangling link cleared
+        let c = get_composition(&conn, &comp.id).await.unwrap().expect("the sketch must NOT be deleted");
+        assert_eq!(c.song_id, None, "the link to a deleted song must be cleared");
+        // and the other song is untouched
+        assert_eq!(count(&conn, "song_melody", &keep.id).await, 1, "another song's take was collateral damage");
+    }
 
     // libSQL `:memory:` gives each connection its OWN database, so return the
     // single connection migrated here and reuse it for the whole test.

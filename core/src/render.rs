@@ -65,6 +65,20 @@ pub(crate) fn structure_editor_text(d: &Value) -> String {
     } else if !tempo_note.is_empty() {
         lines.push(format!("**TEMPO NOTE:** {tempo_note}"));
     }
+    // What the Reference Analyst was unsure about. The skill has always been
+    // asked for this and the importer used to throw it away, so an import's own
+    // doubts never reached the producer (audit 2026-08-13). With human chord
+    // agreement well short of 1.0, telling them WHERE TO LOOK is worth more
+    // than a marginal accuracy point.
+    if let Some(u) = d.get("uncertain").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("**⚠ CHECK THESE** — the analysis was unsure:".into());
+        for item in u.iter().filter_map(|x| x.as_str()).filter(|x| !x.trim().is_empty()) {
+            lines.push(format!("- {item}"));
+        }
+    }
     // Phase 4 (docs/SECTION-SPINE-SPEC.md): structure data no longer carries
     // sections (the SPINE does) — bare notes-only data renders notes only.
     // Spine-aware callers use `structure_spine_text`; legacy data that still

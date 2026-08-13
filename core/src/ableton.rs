@@ -495,12 +495,15 @@ pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Val
     Ok(log.join("\n"))
 }
 
-/// Push ONE written take into Live as its own named track ("Lead", "Pad",
-/// "Bass", "Chords", "Arp") — the NON-DESTRUCTIVE path (user decision
-/// 2026-07-28): no tempo change, no clearing of any other track, no full
-/// rebuild. A previous track of the SAME name is replaced (that one is
-/// ours); everything else in the session — a prior full build, hand edits —
-/// stays untouched. Clips land at the right bars so it lines up.
+/// Push ONE written take into Live as its own NEW track — the ADDITIVE path
+/// (user decision 2026-08-03): no tempo change, no full rebuild, and nothing
+/// deleted. It takes the first free name ("Lead", then "Lead 2", "Lead 3", …),
+/// so earlier takes and any hand editing done to them survive and can be A/B'd
+/// by soloing. Everything else in the session stays untouched. Clips land at
+/// the right bars so it lines up.
+///
+/// It used to send `clear_named_tracks`, which DELETES every track of that
+/// name — silently throwing away the previous take (user-hit, 2026-08-03).
 pub fn build_take_track(track: &str, sections: &[(String, i64)], section_notes: &[Vec<Value>], progress: &dyn Fn(String)) -> Result<String> {
     if !section_notes.iter().any(|m| !m.is_empty()) {
         return Ok(format!("No {track} take to send — write one first (🎶)."));

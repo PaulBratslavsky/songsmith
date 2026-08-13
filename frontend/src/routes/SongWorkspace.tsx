@@ -294,7 +294,7 @@ export function SongWorkspace() {
             🎹 Open in Composer
           </button>
           <button onClick={() => void generateMelody()} disabled={!allStagesDone || melodyBusy} title={allStagesDone ? "Claude writes a motif-based lead melody (lands on its own new track in Ableton) — takes a few minutes for a whole song; re-run for another take" : "Complete every song-spec stage first"}>{melodyBusy ? "🎶 writing…" : "🎶 Melody"}</button>
-          <button onClick={() => void pushMelody()} disabled={!allStagesDone || melodyBusy} title="send ONLY the Lead track to Live — no rebuild, your existing tracks stay untouched (a previous Lead is replaced)">⚡ Lead → Live</button>
+          <button onClick={() => void pushMelody()} disabled={!allStagesDone || melodyBusy} title="send the Lead take to Live as a NEW track — no rebuild, nothing deleted; earlier takes stay so you can A/B them">⚡ Lead → Live</button>
           <button onClick={buildAbleton} disabled={!allStagesDone} title={allStagesDone ? "Stub the whole song in Ableton — a named Sections clip track + Bass/Chords/Melody/Filler/Arp MIDI parts from your progression (direct, no chat)" : "Complete every song-spec stage first (Concept → Generation Prompt)"}>⚡ Build in Ableton</button>
           {v.status !== "done" ? (
             <button className="primary" onClick={() => setStatus.mutate("done")}>Mark done</button>
