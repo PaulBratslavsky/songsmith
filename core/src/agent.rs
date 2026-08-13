@@ -1638,6 +1638,66 @@ pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, sty
     db::get_song(conn, &song.id).await?.ok_or_else(|| anyhow!("song not found after import"))
 }
 
+/// A USER-INITIATED key change: update the song AND transpose its written chord
+/// names to match.
+///
+/// Chord names are absolute; written takes (Melodist/Arranger) are degrees
+/// resolved against `song.key_root`. So changing the key used to move the takes
+/// and leave the chords behind, and `⚡ Build in Ableton` laid tracks in two
+/// different keys into Live (user-hit, 2026-08-13). The Structure editor has
+/// always promised "every stage follows it".
+///
+/// This is deliberately SEPARATE from `db::update_song_key`, which the import,
+/// the tag-key inference and the composition creators call to set the key TO
+/// MATCH content they just derived — transposing there would corrupt a correct
+/// analysis. Only the Tauri command (i.e. a human moving the KEY control) routes
+/// through here.
+///
+/// The rewrite lands as a NEW artifact revision, so it shows in History and can
+/// be reverted like any other edit.
+pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode: &str, bpm: i64) -> Result<crate::models::Song> {
+    let before = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let song = db::update_song_key(conn, song_id, root, mode, bpm).await?;
+
+    let (Some(from), Some(to)) = (crate::midi::note_pitch_class(&before.key_root), crate::midi::note_pitch_class(root)) else {
+        return Ok(song);
+    };
+    let delta = (to - from).rem_euclid(12);
+    if delta == 0 {
+        return Ok(song);
+    }
+    let flats = root.contains('b');
+
+    let Some(stage) = db::list_stages(conn, song_id).await?.into_iter().find(|s| s.r#type == "chords") else {
+        return Ok(song);
+    };
+    let Some(art) = db::current_artifact(conn, &stage.id).await? else { return Ok(song) };
+    let Ok(mut v) = serde_json::from_str::<Value>(&art.content) else { return Ok(song) };
+    let mut moved = 0usize;
+    if let Some(secs) = v.pointer_mut("/data/sections").and_then(|x| x.as_array_mut()) {
+        for sec in secs.iter_mut() {
+            let Some(chords) = sec.get_mut("chords").and_then(|c| c.as_array_mut()) else { continue };
+            for c in chords.iter_mut() {
+                // both shapes: a bare string, or {name, beats}
+                if let Some(name) = c.as_str().map(String::from) {
+                    *c = json!(crate::midi::transpose_chord_name(&name, delta, flats));
+                    moved += 1;
+                } else if let Some(name) = c.get("name").and_then(|n| n.as_str()).map(String::from) {
+                    c["name"] = json!(crate::midi::transpose_chord_name(&name, delta, flats));
+                    moved += 1;
+                }
+            }
+        }
+    }
+    if moved == 0 {
+        return Ok(song);
+    }
+    let data = v.get("data").cloned().unwrap_or_else(|| json!({}));
+    v["text"] = json!(chords_editor_text(&data));
+    db::save_artifact(conn, song_id, Some(&stage.id), "chords", &v.to_string()).await?;
+    Ok(song)
+}
+
 /// Phase 1 render round-trip ("Analyze → Composer"): analyze an audio file (a
 /// Suno render) into a Composer-ready summary — REAL tempo/key + section map
 /// with per-section chords — without creating or touching any song. Same
@@ -2110,6 +2170,61 @@ mod tests {
         db::migrate(&conn).await.unwrap();
         db::seed_skills(&conn).await.unwrap();
         (db, conn)
+    }
+
+    /// Changing the key must move the WRITTEN CHORDS too. Takes are degrees
+    /// resolved against song.key_root, chord names are absolute — so a key
+    /// change used to transpose the takes and leave the chords behind, and the
+    /// Ableton build laid tracks in two keys into Live (user-hit, 2026-08-13).
+    #[tokio::test]
+    async fn changing_the_key_transposes_the_written_chords() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "S").await.unwrap();
+        db::update_song_key(&conn, &song.id, "A", "minor", 120).await.unwrap();
+        let cid = db::list_stages(&conn, &song.id).await.unwrap()
+            .into_iter().find(|s| s.r#type == "chords").unwrap().id;
+        // both stored shapes: {name,beats} objects and a bare string
+        let data = json!({ "sections": [ { "label": "Verse 1", "chords": [
+            {"name": "Am", "beats": 4}, {"name": "F", "beats": 4},
+            {"name": "G/B", "beats": 2}, "C"
+        ] } ] });
+        db::save_artifact(&conn, &song.id, Some(&cid), "chords",
+            &json!({ "kind": "chords", "text": "", "data": data }).to_string()).await.unwrap();
+
+        // A minor -> C minor is +3 semitones
+        let after = change_song_key(&conn, &song.id, "C", "minor", 120).await.unwrap();
+        assert_eq!(after.key_root, "C");
+        let art = db::current_artifact(&conn, &cid).await.unwrap().unwrap();
+        let v: Value = serde_json::from_str(&art.content).unwrap();
+        let ch = &v["data"]["sections"][0]["chords"];
+        assert_eq!(ch[0]["name"], json!("Cm"), "Am +3 -> Cm: the root moves, the quality is kept");
+        assert_eq!(ch[1]["name"], json!("G#"), "F +3 -> G#");
+        assert_eq!(ch[2]["name"], json!("A#/D"), "slash bass moves too");
+        assert_eq!(ch[3], json!("D#"), "a bare-string chord transposes as well");
+        // it lands as a NEW revision, so History can undo it
+        assert!(db::list_artifact_revisions(&conn, &cid).await.unwrap().len() >= 2);
+    }
+
+    /// The transposer is pure — these are the cases that bite: negative
+    /// intervals, slash chords, flat spelling, and symbols we can't read.
+    #[test]
+    fn transpose_chord_name_keeps_quality_and_bass() {
+        use crate::midi::transpose_chord_name as t;
+        assert_eq!(t("Am7", 2, false), "Bm7");
+        assert_eq!(t("F/A", 2, false), "G/B");
+        assert_eq!(t("Cmaj7", -1, false), "Bmaj7");
+        assert_eq!(t("B", 1, false), "C");
+        assert_eq!(t("Bb", 2, false), "C");
+        assert_eq!(t("C", 1, true), "Db", "a flat destination key spells flats");
+        assert_eq!(t("Cadd9", 5, false), "Fadd9", "an unknown quality is preserved verbatim");
+        assert_eq!(t("C", 0, false), "C", "a no-op interval changes nothing");
+        assert_eq!(t("C", 12, false), "C", "a full octave is a no-op");
+        assert_eq!(t("N.C.", 2, false), "N.C.", "unreadable symbols are left alone");
+        assert_eq!(t("", 3, false), "");
     }
 
     /// The `imported` flag has to survive the trip from artifact JSON to the

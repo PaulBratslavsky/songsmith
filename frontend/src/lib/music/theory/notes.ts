@@ -152,3 +152,36 @@ export function buildDisplayMap(
   }
   return out;
 }
+
+/**
+ * Transpose a written chord SYMBOL by `semitones`, keeping its quality and any
+ * slash bass: `transposeChordName("Am7", 2) === "Bm7"`, `"F/A" -> "G/B"`.
+ *
+ * Named chord spans are ABSOLUTE — unlike degree-based melody/bass, they don't
+ * follow `comp.key`. So changing a composition's key used to move melody and
+ * bass while leaving imported chords behind, and the Ableton export laid those
+ * disagreeing tracks into Live (user-hit, 2026-08-13). The UI has always
+ * promised "change the key and everything transposes"; this makes it true.
+ *
+ * Spelling follows the DESTINATION key: a flat key gets flats, so a transposed
+ * progression doesn't mix `A#` and `Bb` (the Reference Analyst is held to the
+ * same rule). Anything unparseable is returned untouched — a chord we can't
+ * read is better left alone than mangled.
+ */
+export function transposeChordName(name: string, semitones: number, preferFlats = false): string {
+  const raw = (name ?? '').trim();
+  if (!raw || !(semitones % 12)) return raw;
+  const shift = (part: string): string => {
+    const m = part.match(/^([A-G](?:#|b)?)(.*)$/);
+    if (!m) return part;
+    const pc = normalizePitchClass(m[1]);
+    if (!pc) return part;
+    const idx = PITCH_CLASSES.indexOf(pc);
+    if (idx < 0) return part;
+    const moved = PITCH_CLASSES[(idx + ((semitones % 12) + 12)) % 12];
+    return spelledRoot(moved, preferFlats) + m[2];
+  };
+  const [head, bass] = raw.split('/');
+  const out = shift(head);
+  return bass !== undefined ? `${out}/${shift(bass)}` : out;
+}
