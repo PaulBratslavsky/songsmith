@@ -59,7 +59,9 @@ export function SongWorkspace() {
       const r = await api.generateSongMelody(id);
       setAbMsg(`🎶 Melody written — ${r.note_count} notes over ${r.sections} sections.\nMotif: ${r.motif}\n⚡ Lead → Live adds it as a NEW track (earlier takes kept, nothing else touched); the full ⚡ Build includes it too. Re-run 🎶 for a different take.`);
     } catch (e: any) {
-      setAbMsg(String(e?.message ?? e));
+      // mark it unmistakably as a FAILURE — a bare error string next to the
+      // progress row read as "maybe it's still going" (user-hit, 2026-08-13)
+      setAbMsg(`⚠ The lead melody FAILED — nothing was saved, your previous take is untouched.\n${String(e?.message ?? e)}`);
     }
     setMelodyBusy(false);
   };
@@ -98,7 +100,7 @@ export function SongWorkspace() {
         setAbMsg(`🎶 ${r.part} written — ${r.note_count} notes.\nIdea: ${r.idea}\n⚡ → Live adds a NEW ${r.part} track (earlier takes kept); the full ⚡ Build uses it too. Re-run 🎶 for another variation.`);
       }
     } catch (e: any) {
-      setAbMsg(String(e?.message ?? e));
+      setAbMsg(`⚠ The ${what} FAILED — nothing was saved, your previous take is untouched.\n${String(e?.message ?? e)}`);
     }
     setVariantBusy(false);
   };
@@ -120,7 +122,21 @@ export function SongWorkspace() {
   // whichever write is in flight — "lead" covers both the 🎶 Melody button and
   // the variations row's lead, matching the backend's cancel key
   const writingPart = melodyBusy ? "lead" : variantBusy ? variantPart : null;
-  useEffect(() => { if (!writingPart) setWriteProg(null); }, [writingPart]);
+  // A TICKING CLOCK is the part that actually answers "did it freeze?". Claude
+  // can be silent for a while before its first token (thinking, CLI startup),
+  // and a static "waiting…" during that gap is indistinguishable from a hang
+  // (user-hit, 2026-08-13). A number that moves every second proves it's alive.
+  const [writeStartedAt, setWriteStartedAt] = useState<number | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!writingPart) { setWriteStartedAt(null); setWriteProg(null); return; }
+    setWriteStartedAt(Date.now());
+    const h = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(h);
+  }, [writingPart]);
+  const elapsed = writeStartedAt ? Math.floor((Date.now() - writeStartedAt) / 1000) : 0;
+  const clock = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
+  void tick; // the interval re-renders; `elapsed` is read from the clock itself
   const cancelWrite = async () => {
     if (!writingPart) return;
     try {
@@ -341,8 +357,8 @@ export function SongWorkspace() {
         <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 12 }}>
           <span className="faint" style={{ fontSize: 12 }}>
             {writeProg
-              ? `🎶 ${writingPart} — ${writeProg.sections} section${writeProg.sections === 1 ? "" : "s"} written · ${(writeProg.chars / 1000).toFixed(1)}k chars streamed`
-              : `🎶 ${writingPart} — waiting for Claude's first tokens…`}
+              ? `🎶 ${writingPart} — ${clock} elapsed · ${writeProg.sections} section${writeProg.sections === 1 ? "" : "s"} written · ${(writeProg.chars / 1000).toFixed(1)}k streamed`
+              : `🎶 ${writingPart} — ${clock} elapsed · Claude hasn't sent its first token yet${elapsed >= 90 ? " (still normal for a long song — it thinks before it writes; ✋ cancel is safe)" : "…"}`}
           </span>
           <button className="sm ghost" onClick={() => void cancelWrite()} title="Stop the generation — nothing is saved and the previous take stays as it is">✋ cancel</button>
         </div>

@@ -73,6 +73,24 @@ impl FakeClaude {
         FakeClaude { dir, canned, settings }
     }
 
+    /// Script the next reply as a STREAM: `chunks` arrive as text_deltas before
+    /// the final result. The plain `reply` above emits only a `result` line, so
+    /// nothing ever exercised the token path — and the token path is what tells
+    /// a user a minutes-long write is alive rather than hung.
+    fn reply_streamed(&self, chunks: &[&str], mock: &str) {
+        let mut out = String::new();
+        for c in chunks {
+            out.push_str(&json!({
+                "type": "stream_event",
+                "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": c } }
+            }).to_string());
+            out.push('\n');
+        }
+        out.push_str(&json!({ "type": "result", "result": mock, "is_error": false, "subtype": "success" }).to_string());
+        out.push('\n');
+        std::fs::write(&self.canned, out).unwrap();
+    }
+
     /// Script the NEXT Claude reply verbatim.
     fn reply(&self, mock: &str) {
         let line = json!({ "type": "result", "result": mock, "is_error": false, "subtype": "success" }).to_string();
@@ -864,4 +882,51 @@ async fn flow_resume_bar_cumsum_timing_fallback() {
     assert_eq!(lyric_lines(&a, "Verse 1"), vec!["verse words"]);
     assert_eq!(lyric_lines(&a, "Chorus"), vec!["chorus words"]);
     assert_eq!(lyric_lines(&a, "Outro"), vec!["outro words"]);
+}
+
+/// The Melodist/Arranger write must STREAM. A whole-song lead is a minutes-long
+/// generation and the UI shows a static "writing…" until tokens arrive, so a
+/// working run was indistinguishable from a hang (user-hit, 2026-08-03/13).
+/// This is the only test that exercises the token path at all: the fake CLI
+/// normally emits just a `result` line.
+#[tokio::test]
+async fn part_write_streams_tokens_and_honours_cancel() {
+    let (_db, conn) = mem_conn().await;
+    let fake = FakeClaude::new();
+    let song = make_song(&conn, "Streamer").await;
+    db::create_section(&conn, &song.id, "Verse 1", "verse", 4, "", None).await.unwrap();
+    let cid = stage_of(&conn, &song.id, "chords").await.id;
+    db::save_artifact(&conn, &song.id, Some(&cid), "chords", &json!({
+        "kind": "chords", "text": "",
+        "data": { "sections": [ { "label": "Verse 1", "chords": [{"name":"Am","beats":4}] } ] }
+    }).to_string()).await.unwrap();
+
+    let take = json!({
+        "idea": "walking eighths",
+        "sections": [ { "label": "Verse 1", "notes": [ {"degree":1,"octave":0,"start":0,"length":4} ] } ]
+    }).to_string();
+    // the reply arrives in pieces, exactly as a real stream does
+    fake.reply_streamed(&["{\"idea\":", "\"walking", " eighths\",", "\"sections\":[…]}"], &take);
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = seen.clone();
+    let out = agent::generate_song_part(
+        &conn, &fake.settings, &song.id, "bass",
+        move |tok: String| sink.lock().unwrap().push(tok),
+        None,
+    ).await.unwrap();
+
+    let toks = seen.lock().unwrap().clone();
+    assert!(toks.len() >= 4, "every text_delta must reach the caller, got {toks:?}");
+    assert!(toks.concat().contains("walking"), "the streamed text must arrive intact: {toks:?}");
+    assert_eq!(out["part"], json!("bass"));
+    assert!(out["note_count"].as_i64().unwrap() >= 1, "the take must still parse from the result line");
+
+    // and a cancel fired BEFORE the call must stop it rather than run to completion
+    let token = agent::CancelToken::new();
+    token.cancel();
+    let cancelled = agent::generate_song_part(
+        &conn, &fake.settings, &song.id, "bass", |_| {}, Some(token),
+    ).await;
+    assert!(cancelled.is_err(), "a cancelled write must not silently succeed");
 }
