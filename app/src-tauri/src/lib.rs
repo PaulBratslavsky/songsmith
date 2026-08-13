@@ -105,7 +105,11 @@ async fn update_song_intent(state: State<'_, AppState>, id: String, intent: Stri
 }
 #[tauri::command]
 async fn update_song_key(state: State<'_, AppState>, id: String, root: String, mode: String, bpm: i64) -> R<Song> {
-    db::update_song_key(&state.conn, &id, &root, &mode, bpm).await.map_err(e2s)
+    // A human moved the KEY control, so the written chords transpose with it —
+    // see agent::change_song_key. Internal callers that set the key TO MATCH
+    // content they just derived (import, tag inference, composition creators)
+    // keep using db::update_song_key directly and must NOT transpose.
+    agent::change_song_key(&state.conn, &id, &root, &mode, bpm).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_voicings(state: State<'_, AppState>, id: String, voicings: String) -> R<Song> {

@@ -780,3 +780,60 @@ mod tests {
         assert!(!section_parts("Verse 2").contains(&"Filler"));
     }
 }
+
+/// Sharp spellings, index = pitch class. Matches the analyzer's NOTE_NAMES.
+const PC_SHARP: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const PC_FLAT: [&str; 12] = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+
+/// The pitch class of a note name ("F#" -> 6, "Bb" -> 10), or None.
+pub fn note_pitch_class(name: &str) -> Option<i64> {
+    let b = name.trim().as_bytes();
+    if b.is_empty() { return None; }
+    let mut pc: i64 = match b[0].to_ascii_uppercase() {
+        b'C' => 0, b'D' => 2, b'E' => 4, b'F' => 5, b'G' => 7, b'A' => 9, b'B' => 11, _ => return None,
+    };
+    for &c in &b[1..] {
+        match c {
+            b'#' => pc = (pc + 1) % 12,
+            b'b' => pc = (pc + 11) % 12,
+            _ => return None,
+        }
+    }
+    Some(pc)
+}
+
+/// Transpose a written chord SYMBOL by `semitones`, keeping its quality and any
+/// slash bass: `("Am7", 2) -> "Bm7"`, `("F/A", 2) -> "G/B"`.
+///
+/// Chord names are ABSOLUTE while written takes are degree-based against the
+/// song's key, so changing a song's key moved the takes and left the chords
+/// behind — and `⚡ Build in Ableton` then laid tracks in two different keys
+/// into Live (user-hit, 2026-08-13). `flats` spells the result with flats so a
+/// transposed progression doesn't mix `A#` and `Bb`.
+///
+/// Anything unparseable comes back untouched: a chord we can't read is better
+/// left alone than mangled.
+pub fn transpose_chord_name(name: &str, semitones: i64, flats: bool) -> String {
+    let raw = name.trim();
+    if raw.is_empty() || semitones.rem_euclid(12) == 0 {
+        return raw.to_string();
+    }
+    let shift = |part: &str| -> String {
+        let b = part.as_bytes();
+        if b.is_empty() { return part.to_string(); }
+        let mut i = 1;
+        while i < b.len() && (b[i] == b'#' || b[i] == b'b') { i += 1; }
+        let (root, rest) = part.split_at(i);
+        match note_pitch_class(root) {
+            Some(pc) => {
+                let moved = (pc + semitones).rem_euclid(12) as usize;
+                format!("{}{}", if flats { PC_FLAT[moved] } else { PC_SHARP[moved] }, rest)
+            }
+            None => part.to_string(),
+        }
+    };
+    match raw.split_once('/') {
+        Some((head, bass)) => format!("{}/{}", shift(head), shift(bass)),
+        None => shift(raw),
+    }
+}

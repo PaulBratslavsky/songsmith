@@ -29,6 +29,16 @@ import {
   type NoteSpan,
 } from './types';
 import { reidentify } from './schema';
+import { transposeChordName, normalizePitchClass } from '../theory/notes';
+import { PITCH_CLASSES } from '../types';
+
+/** Semitones from `from` to `to`, or 0 when either is unreadable. */
+function semitoneDelta(from: string, to: string): number {
+  const a = normalizePitchClass(from);
+  const b = normalizePitchClass(to);
+  if (!a || !b) return 0;
+  return (PITCH_CLASSES.indexOf(b) - PITCH_CLASSES.indexOf(a) + 12) % 12;
+}
 
 export type Lane = 'melody' | 'bass';
 
@@ -71,8 +81,19 @@ function reducer(s: EditorState, a: Action): EditorState {
   const { comp } = s;
   const tt = comp.totalTicks;
   switch (a.type) {
-    case 'setKeyRoot':
-      return { ...s, comp: { ...comp, key: { ...comp.key, root: a.root } } };
+    case 'setKeyRoot': {
+      // Degree-based melody/bass follow comp.key for free, but NAMED chords are
+      // absolute — so changing the key used to transpose two lanes out of three
+      // and the Ableton export laid tracks in two different keys into Live
+      // (user-hit, 2026-08-13). Move the written names by the same interval so
+      // the UI's "change the key and everything transposes" is actually true.
+      const delta = semitoneDelta(comp.key.root, a.root);
+      const flats = a.root.includes('b');
+      const chords = delta
+        ? comp.chords.map((c) => (c.name ? { ...c, name: transposeChordName(c.name, delta, flats) } : c))
+        : comp.chords;
+      return { ...s, comp: { ...comp, key: { ...comp.key, root: a.root }, chords } };
+    }
     case 'setKeyMode':
       return { ...s, comp: { ...comp, key: { ...comp.key, mode: a.mode } } };
     case 'setBpm':
