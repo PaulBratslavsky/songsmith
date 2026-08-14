@@ -221,13 +221,39 @@ export function applyTakesToComposition(
   };
   const m = mk(melody);
   const b = mk(bass);
-  if (!m.length && !b.length) return comp;
+  // A written Arranger bass WINS. Without one, root the bass on each chord
+  // rather than leaving the lane empty — a song opened in the Composer showed
+  // chords and melody over a blank bass lane, which reads as broken and gives
+  // the producer nothing to edit against (user decision, 2026-08-13).
+  const rooted = b.length || comp.bass.length ? [] : bassFromChordRoots(comp);
+  if (!m.length && !b.length && !rooted.length) return comp;
   const next: Composition = {
     ...comp,
     melody: m.length ? m : comp.melody,
-    bass: b.length ? b : comp.bass,
+    bass: b.length ? b : rooted.length ? rooted : comp.bass,
   };
   return parseStoredComposition(next) ?? next;
+}
+
+/**
+ * One bass note per chord span, on that chord's own root degree, in the bass
+ * octave band. The same idea the Ableton build's formula bass already uses —
+ * a starting line the producer edits, not a composition.
+ *
+ * `degree` is used rather than the printed `name` because it is always present
+ * and already key-relative, so the line transposes with the song for free.
+ */
+function bassFromChordRoots(comp: Composition): NoteSpan[] {
+  return comp.chords
+    .filter((c) => c.length > 0)
+    .map((c) => ({
+      id: uid('bassroot'),
+      degree: Math.min(7, Math.max(1, Math.round(c.degree))) as Degree,
+      octave: 0 as const,
+      start: c.start,
+      length: c.length,
+    }))
+    .sort((a, b) => a.start - b.start);
 }
 
 /**
