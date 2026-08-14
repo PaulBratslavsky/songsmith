@@ -230,10 +230,28 @@ export function Sketchpad({
   // playback falls back to the oscillators until it lands.
   const [soundSet, setSoundSet] = useState<'synth' | 'sampled'>('synth');
   const voices: LaneVoices = soundSet === 'sampled' ? SAMPLED_VOICES : SYNTH_VOICES;
+  // Sampled voices fall back to the oscillators until the soundfont lands, and
+  // FOREVER if the decode fails — the only trace being a console.warn. So the
+  // button read "Sampled" while you were still hearing the synth, which is
+  // indistinguishable from the toggle doing nothing (user-hit, 2026-08-13).
+  // Track the load and say which one you are actually hearing.
+  const [sampledLoad, setSampledLoad] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle');
   const pickSoundSet = (s: 'synth' | 'sampled') => {
-    if (s === 'sampled') void synth.preloadSampled();
     setSoundSet(s);
+    if (s === 'sampled' && (sampledLoad === 'idle' || sampledLoad === 'failed')) {
+      setSampledLoad('loading');
+      void synth.preloadSampled().then(
+        (ok) => setSampledLoad(ok ? 'ready' : 'failed'),
+        () => setSampledLoad('failed'),
+      );
+    }
   };
+  /** What is actually sounding right now, regardless of what's selected. */
+  const sampledNote =
+    soundSet !== 'sampled' ? null
+      : sampledLoad === 'loading' ? '⟳ loading samples — you are hearing the synth until they land'
+      : sampledLoad === 'failed' ? '✕ samples failed to load — still hearing the synth'
+      : null;
 
   const { isPlaying, currentStep, activeChordId, activeLineTick, toggle, stop } =
     useCompositionPlayback(comp, {
@@ -645,11 +663,20 @@ export function Sketchpad({
             type="button"
             className={'sm' + (soundSet === 'sampled' ? ' primary' : '')}
             onClick={() => pickSoundSet('sampled')}
-            title="Sampled piano / strings / bass (FluidR3 soundfont — loads on first pick, oscillators sound until then)"
+            title={
+              sampledLoad === 'ready' ? 'Sampled piano / strings / bass (FluidR3 soundfont) — loaded'
+                : sampledLoad === 'loading' ? 'Decoding the soundfont — oscillators sound until it lands'
+                : sampledLoad === 'failed' ? 'The soundfont failed to decode — click to retry; oscillators are sounding'
+                : 'Sampled piano / strings / bass (FluidR3 soundfont — loads on first pick, oscillators sound until then)'
+            }
           >
-            Sampled
+            Sampled{soundSet === 'sampled' && sampledLoad === 'loading' ? ' ⟳' : ''}
+            {soundSet === 'sampled' && sampledLoad === 'failed' ? ' ✕' : ''}
           </button>
         </div>
+        {sampledNote && (
+          <span className="faint" style={{ fontSize: 11 }}>{sampledNote}</span>
+        )}
 
         <button
           type="button"
