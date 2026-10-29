@@ -1680,22 +1680,37 @@ pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode:
     static KEY_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_at_a_time = KEY_CHANGE.lock().await;
     let before = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
-    let song = db::update_song_key(conn, song_id, root, mode, bpm).await?;
-
-    let (Some(from), Some(to)) = (crate::midi::note_pitch_class(&before.key_root), crate::midi::note_pitch_class(root)) else {
-        return Ok(song);
-    };
-    let delta = (to - from).rem_euclid(12);
-    if delta == 0 {
-        return Ok(song);
+    // Work out the transposed chords FIRST, then write the key and the chord
+    // revision in ONE transaction: a failed chord save used to leave the new
+    // key stored over the old chords (PR review, 2026-10-29).
+    let rewrite = transposed_chords(conn, song_id, &before.key_root, root).await?;
+    let tx = conn.transaction().await?;
+    let song = db::update_song_key(&tx, song_id, root, mode, bpm).await?;
+    if let Some((stage_id, content)) = rewrite {
+        db::save_artifact(&tx, song_id, Some(&stage_id), "chords", &content).await?;
     }
-    let flats = root.contains('b');
+    tx.commit().await?;
+    Ok(song)
+}
+
+/// The Chords stage's current artifact with every chord name moved from `from`
+/// to `to`, as (stage id, new content) — or None when there is nothing to move
+/// (same key, unreadable root, no chords stage, artifact or chord names).
+async fn transposed_chords(conn: &Connection, song_id: &str, from: &str, to: &str) -> Result<Option<(String, String)>> {
+    let (Some(from), Some(to_pc)) = (crate::midi::note_pitch_class(from), crate::midi::note_pitch_class(to)) else {
+        return Ok(None);
+    };
+    let delta = (to_pc - from).rem_euclid(12);
+    if delta == 0 {
+        return Ok(None);
+    }
+    let flats = to.contains('b');
 
     let Some(stage) = db::list_stages(conn, song_id).await?.into_iter().find(|s| s.r#type == "chords") else {
-        return Ok(song);
+        return Ok(None);
     };
-    let Some(art) = db::current_artifact(conn, &stage.id).await? else { return Ok(song) };
-    let Ok(mut v) = serde_json::from_str::<Value>(&art.content) else { return Ok(song) };
+    let Some(art) = db::current_artifact(conn, &stage.id).await? else { return Ok(None) };
+    let Ok(mut v) = serde_json::from_str::<Value>(&art.content) else { return Ok(None) };
     let mut moved = 0usize;
     if let Some(secs) = v.pointer_mut("/data/sections").and_then(|x| x.as_array_mut()) {
         for sec in secs.iter_mut() {
@@ -1713,12 +1728,11 @@ pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode:
         }
     }
     if moved == 0 {
-        return Ok(song);
+        return Ok(None);
     }
     let data = v.get("data").cloned().unwrap_or_else(|| json!({}));
     v["text"] = json!(chords_editor_text(&data));
-    db::save_artifact(conn, song_id, Some(&stage.id), "chords", &v.to_string()).await?;
-    Ok(song)
+    Ok(Some((stage.id, v.to_string())))
 }
 
 /// Phase 1 render round-trip ("Analyze → Composer"): analyze an audio file (a
@@ -2265,6 +2279,35 @@ mod tests {
             assert_eq!(v["data"]["sections"][0]["chords"][0]["name"], json!(key),
                 "round {round}: the tonic chord must sit on the song's final key ({key}), not a stacked shift");
         }
+    }
+
+    /// The key and the chord rewrite land together or not at all: if the chord
+    /// save fails, the song keeps its old key (no new key over old chords).
+    #[tokio::test]
+    async fn a_failed_chord_save_leaves_the_key_unchanged() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "S").await.unwrap();
+        db::update_song_key(&conn, &song.id, "C", "major", 120).await.unwrap();
+        let cid = db::list_stages(&conn, &song.id).await.unwrap()
+            .into_iter().find(|s| s.r#type == "chords").unwrap().id;
+        let data = json!({ "sections": [ { "label": "Verse 1", "chords": [ {"name": "C", "beats": 4} ] } ] });
+        db::save_artifact(&conn, &song.id, Some(&cid), "chords",
+            &json!({ "kind": "chords", "text": "", "data": data }).to_string()).await.unwrap();
+        let revs_before = db::list_artifact_revisions(&conn, &cid).await.unwrap().len();
+
+        conn.execute("CREATE TRIGGER fail_chord_save BEFORE INSERT ON artifact BEGIN SELECT RAISE(ABORT, 'forced'); END", ()).await.unwrap();
+        assert!(change_song_key(&conn, &song.id, "D", "major", 120).await.is_err(), "the forced chord-save failure must surface");
+        conn.execute("DROP TRIGGER fail_chord_save", ()).await.unwrap();
+
+        let after = db::get_song(&conn, &song.id).await.unwrap().unwrap();
+        assert_eq!(after.key_root, "C", "the key must roll back with the failed chord save");
+        assert_eq!(db::list_artifact_revisions(&conn, &cid).await.unwrap().len(), revs_before);
+        // and the connection is usable again afterwards (no dangling transaction)
+        assert_eq!(change_song_key(&conn, &song.id, "D", "major", 120).await.unwrap().key_root, "D");
     }
 
     /// The transposer is pure — these are the cases that bite: negative
