@@ -552,6 +552,10 @@ bpm 90 — matching the tempo regression's 90.00 — and every extracted chord
 (`C#:min`, `A`, `B`, `G#:min`, `E`, `A:maj7`, plus inversions) diatonic to
 C# minor. Note Live 12 renamed `MasterTrack` → `MainTrack`; both are handled or
 every pre-12 project silently reports no tempo.
+Only ARRANGEMENT clips count (2026-10-29): `.//MidiClip` also matched session-view
+clips, whose clip-local start is 0.0, so the first `truth.json` stacked 8 duplicate
+sections and mashed extra notes into the intro's chords. `write_truth` now refuses
+overlapping sections, and the fixture was regenerated (12 sections, end to end).
 
 **First end-to-end run** (`_fixture-amfcg`, synthetic Am F C G, truth exact by
 construction): tempo error **0.000%**, chord `majmin`/`root`/`sevenths` **1.000**,

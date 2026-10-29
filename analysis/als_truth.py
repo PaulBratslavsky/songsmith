@@ -110,7 +110,10 @@ def read_als(path):
     for t in root.findall(".//Tracks/MidiTrack"):
         name = _v(t, "./Name/EffectiveName") or _v(t, "./Name/UserName") or ""
         clips = []
-        for c in t.findall(".//MidiClip"):
+        # ARRANGEMENT clips only. `.//MidiClip` also matched session-view
+        # clips, whose CurrentStart is clip-local (0.0), so they stacked
+        # duplicate sections and chords at the top of the song.
+        for c in t.findall(_ARRANGEMENT_CLIPS):
             try:
                 start = float(c.find("./CurrentStart").get("Value"))
                 end = float(c.find("./CurrentEnd").get("Value"))
@@ -133,6 +136,18 @@ def read_als(path):
     return {"path": path, "bpm": bpm, "tempo_automated": tempo_automated,
             "meter": f"{num}/{den}", "tracks": tracks,
             "creator": root.get("Creator", "")}
+
+
+_ARRANGEMENT_CLIPS = "./DeviceChain/MainSequencer/ClipTimeable/ArrangerAutomation/Events/MidiClip"
+
+
+def _overlaps(secs):
+    """Pairs of section intervals that overlap — never valid section truth."""
+    out = []
+    for (a0, a1, an), (b0, b1, bn) in zip(secs, secs[1:]):
+        if b0 < a1 - 1e-6:
+            out.append((an, a0, a1, bn, b0, b1))
+    return out
 
 
 def _b2s(beats, bpm):
@@ -232,6 +247,10 @@ def write_truth(path, slug, key=None, track_hint=None):
         sys.exit("no tempo found — cannot convert beats to seconds")
     bpm = pr["bpm"]
     secs = [(_b2s(a, bpm), _b2s(b, bpm), n) for a, b, n in sections_from(pr)]
+    bad = _overlaps(secs)
+    if bad:
+        lines = "\n".join(f"  {an} {a0:.2f}-{a1:.2f}s overlaps {bn} {b0:.2f}-{b1:.2f}s" for an, a0, a1, bn, b0, b1 in bad)
+        sys.exit(f"overlapping sections — refusing to write truth:\n{lines}")
     chords, ctrack = chords_from(pr, track_hint)
     truth = {
         "bpm": bpm,

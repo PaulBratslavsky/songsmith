@@ -81,9 +81,15 @@ export function SongWorkspace() {
   const [variantPart, setVariantPart] = useState("lead");
   const [variantSection, setVariantSection] = useState("");
   const [variantBusy, setVariantBusy] = useState(false);
+  // the part the RUNNING write is for — fixed at start. `variantPart` is the
+  // dropdown, which the user can change mid-write; cancelling with that sent
+  // the wrong part to cancel_write and reported "already finished" while the
+  // write carried on (PR review, 2026-10-29).
+  const [variantWriting, setVariantWriting] = useState<string | null>(null);
   const generatePart = async () => {
     if (variantBusy) return;
     setVariantBusy(true);
+    setVariantWriting(variantPart);
     const what = variantPart === "lead" && variantSection ? `lead (${variantSection} only)` : variantPart;
     // one section is quick; a whole song is minutes (see generateMelody)
     setAbMsg(variantSection
@@ -103,6 +109,7 @@ export function SongWorkspace() {
       setAbMsg(`⚠ The ${what} FAILED — nothing was saved, your previous take is untouched.\n${String(e?.message ?? e)}`);
     }
     setVariantBusy(false);
+    setVariantWriting(null);
   };
   // Live progress for the Melodist/Arranger writes. These are MINUTES-long
   // generations; without this the UI showed a static "writing…" and a working
@@ -121,7 +128,7 @@ export function SongWorkspace() {
   }, [id]);
   // whichever write is in flight — "lead" covers both the 🎶 Melody button and
   // the variations row's lead, matching the backend's cancel key
-  const writingPart = melodyBusy ? "lead" : variantBusy ? variantPart : null;
+  const writingPart = melodyBusy ? "lead" : variantWriting;
   // A TICKING CLOCK is the part that actually answers "did it freeze?". Claude
   // can be silent for a while before its first token (thinking, CLI startup),
   // and a static "waiting…" during that gap is indistinguishable from a hang

@@ -46,6 +46,7 @@ export function ExportDialog({
   const [presetId, setPresetId] = useState('');
   const [songTitle, setSongTitle] = useState<string | null>(null);
   const [songKey, setSongKey] = useState<{ root: string; mode: string; bpm: number } | null>(null);
+  const [songLoadError, setSongLoadError] = useState<string | null>(null);
   const [frozen, setFrozen] = useState<string[]>([]);
   const [spineRows, setSpineRows] = useState<SpineSection[]>([]);
   const [busy, setBusy] = useState(false);
@@ -60,9 +61,19 @@ export function ExportDialog({
     if (!songId) return () => { alive = false; };
     api.listSections(songId).then((r) => alive && setSpineRows(r)).catch(() => {});
     (async () => {
+      let detail;
       try {
-        const detail = await api.getSong(songId);
-        if (!alive || !detail) return;
+        detail = await api.getSong(songId);
+      } catch (e: any) {
+        if (alive) setSongLoadError(String(e?.message ?? e));
+        return;
+      }
+      if (!alive) return;
+      if (!detail) {
+        setSongLoadError('the linked song was not found');
+        return;
+      }
+      try {
         setSongTitle(detail.song.title || 'Untitled song');
         setSongKey({ root: detail.song.key_root, mode: detail.song.key_mode, bpm: Number(detail.song.bpm) });
         const locked = new Set<string>();
@@ -110,6 +121,11 @@ export function ExportDialog({
     return same ? null : songKey;
   }, [songId, mode, songKey, comp.key.root, comp.key.mode, comp.bpm]);
 
+  // Updating needs the song's key first: without it `keyChange` reads as "no
+  // change" and the chords — resolved in the sketch's key — would land in a
+  // song that may be in another key. So the update waits for the song to load.
+  const updateBlocked = mode === 'update' && !!songId && !songKey;
+
   const goToSong = (id: string) => {
     // the export just rewrote stage artifacts + the section spine — drop the
     // cached queries so the workspace (and any composer rebuild) reads fresh
@@ -127,6 +143,7 @@ export function ExportDialog({
     try {
       const json = JSON.stringify(sections);
       if (mode === 'update' && songId) {
+        if (!songKey) throw new Error("the linked song hasn't loaded yet");
         if (keyChange) await api.updateSongKey(songId, comp.key.root, comp.key.mode, comp.bpm);
         await api.exportCompositionToSong(songId, json);
         goToSong(songId);
@@ -237,11 +254,16 @@ export function ExportDialog({
           </p>
         )}
 
+        {mode === 'update' && songLoadError && (
+          <div className="banner warn" style={{ marginTop: 10 }}>
+            Couldn't load the linked song ({songLoadError}) — updating it is off. Create a new song instead, or close and retry.
+          </div>
+        )}
         {error && <div className="banner warn" style={{ marginTop: 10 }}>Export failed: {error}</div>}
         <div className="row" style={{ marginTop: 16, justifyContent: 'flex-end', gap: 8 }}>
           <button className="ghost" onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={() => void doExport()} disabled={busy || createDisabled}>
-            {busy ? 'Exporting…' : mode === 'update' ? 'Update song' : 'Create song'}
+          <button className="primary" onClick={() => void doExport()} disabled={busy || createDisabled || updateBlocked}>
+            {busy ? 'Exporting…' : mode === 'update' ? (updateBlocked && !songLoadError ? 'Loading song…' : 'Update song') : 'Create song'}
           </button>
         </div>
       </div>

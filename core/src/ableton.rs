@@ -497,7 +497,7 @@ pub fn build_midi_tracks(bpm: i64, length_beats: f64, tracks: &[(String, Vec<Val
 
 /// Push ONE written take into Live as its own NEW track — the ADDITIVE path
 /// (user decision 2026-08-03): no tempo change, no full rebuild, and nothing
-/// deleted. It takes the first free name ("Lead", then "Lead 2", "Lead 3", …),
+/// deleted. It takes the first free numbered name ("Lead 2", "Lead 3", …),
 /// so earlier takes and any hand editing done to them survive and can be A/B'd
 /// by soloing. Everything else in the session stays untouched. Clips land at
 /// the right bars so it lines up.
@@ -521,7 +521,7 @@ pub fn build_take_track(track: &str, sections: &[(String, i64)], section_notes: 
     // tracks, so the old path threw away the previous take and any hand edits
     // made to it in Live (user-hit, 2026-08-03).
     progress("Reading the Live set's track names…".into());
-    let existing = live_track_names(&mut s);
+    let existing = live_track_names(&mut s)?;
     // `track` stays the BASE part name (it keys part_color); `track_name` is
     // what this take is actually called in Live.
     let track_name = free_take_track_name(&existing, track);
@@ -610,35 +610,41 @@ fn take_track_name(part: &str) -> Option<&'static str> {
 /// (for the count) then `get_track_info` per index. Deliberately uses only
 /// commands the shipped remote script already has — adding a new one would
 /// force a Live restart before this could work.
-fn live_track_names(s: &mut TcpStream) -> Vec<String> {
+///
+/// All or nothing: a partial list would let the name picker hand back a name
+/// that is already taken, so any failed read is an error, not a gap.
+fn live_track_names(s: &mut TcpStream) -> Result<Vec<String>> {
     let count = ableton_cmd(s, json!({"type":"get_session_info","params":{}}))
         .ok()
         .and_then(|v| v.pointer("/result/track_count").and_then(|n| n.as_i64()))
-        .unwrap_or(0);
+        .ok_or_else(|| anyhow!("couldn't read the Live set's track count — nothing was sent"))?;
     (0..count)
-        .filter_map(|i| {
+        .map(|i| {
             ableton_cmd(s, json!({"type":"get_track_info","params":{"track_index": i}}))
                 .ok()
                 .and_then(|v| v.pointer("/result/name").and_then(|n| n.as_str()).map(String::from))
+                .ok_or_else(|| anyhow!("couldn't read the name of track {} in Live — nothing was sent", i + 1))
         })
         .collect()
 }
 
-/// The first FREE take-track name: "Lead" if nothing is called that, else
-/// "Lead 2", "Lead 3", … Each push lands on its own track so a previous take —
-/// and any hand editing done to it in Live — survives, and takes can be A/B'd
-/// by soloing. Replaces the old delete-then-recreate, which destroyed the
-/// previous take every time (user-hit, 2026-08-03).
+/// The first FREE take-track name: "Lead 2", "Lead 3", … Each push lands on
+/// its own track so a previous take — and any hand editing done to it in
+/// Live — survives, and takes can be A/B'd by soloing. Replaces the old
+/// delete-then-recreate, which destroyed the previous take every time
+/// (user-hit, 2026-08-03).
+///
+/// Never the bare part name, even when nothing is called that yet: the full
+/// ⚡ Build owns "Lead", "Bass", … and DELETES every track with those names
+/// before rebuilding, so a pushed take called "Lead" would be thrown away by
+/// the next build (PR review, 2026-10-29).
 fn free_take_track_name(existing: &[String], base: &str) -> String {
     let taken = |n: &str| existing.iter().any(|e| e.trim().eq_ignore_ascii_case(n));
-    if !taken(base) {
-        return base.to_string();
-    }
-    // start at 2 — the unsuffixed name IS take 1
+    // start at 2 — the unsuffixed name is the full build's track
     (2..)
         .map(|i| format!("{base} {i}"))
         .find(|n| !taken(n))
-        .unwrap_or_else(|| base.to_string())
+        .expect("an unbounded range always has a free name")
 }
 
 /// Every stored take (Melodist lead + Arranger parts), converted from
@@ -732,7 +738,7 @@ mod tests {
                 &"127.0.0.1:9877".parse().unwrap(), Duration::from_millis(1500),
             ).expect("Ableton must be open with AbletonMCP on 9877");
             s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
-            live_track_names(&mut s)
+            live_track_names(&mut s).expect("read Live's track names")
         };
         let expected = free_take_track_name(&before, "Lead");
         assert!(!before.contains(&expected), "{expected} already exists — the name picker is wrong");
@@ -748,7 +754,7 @@ mod tests {
                 &"127.0.0.1:9877".parse().unwrap(), Duration::from_millis(1500),
             ).unwrap();
             s.set_read_timeout(Some(Duration::from_millis(4000))).ok();
-            live_track_names(&mut s)
+            live_track_names(&mut s).expect("read Live's track names")
         };
         assert!(after.contains(&expected), "'{expected}' should exist in Live now; got {after:?}");
         for old in &before {
@@ -761,16 +767,20 @@ mod tests {
     /// take and any hand edits made to it in Live.
     #[test]
     fn take_track_name_never_collides_with_an_existing_track() {
-        // nothing there yet → the plain part name
-        assert_eq!(free_take_track_name(&[], "Lead"), "Lead");
-        // the unsuffixed name IS take 1, so the next one is 2
+        // never the bare part name, even in an empty set: the full ⚡ Build
+        // deletes every "Lead" track before rebuilding, so a take called
+        // "Lead" would be thrown away by the next build
+        assert_eq!(free_take_track_name(&[], "Lead"), "Lead 2");
+        for t in ["Lead", "Bass", "Pad", "Chords", "Arp"] {
+            assert_ne!(free_take_track_name(&[], t), t, "{t}: a pushed take must not use a full-build name");
+        }
         assert_eq!(free_take_track_name(&["Lead".into()], "Lead"), "Lead 2");
         assert_eq!(free_take_track_name(&["Lead".into(), "Lead 2".into()], "Lead"), "Lead 3");
         // a gap is reused rather than skipped past
         assert_eq!(free_take_track_name(&["Lead".into(), "Lead 3".into()], "Lead"), "Lead 2");
         // other parts and unrelated tracks don't crowd the namespace
-        assert_eq!(free_take_track_name(&["Bass".into(), "Drums".into()], "Lead"), "Lead");
-        assert_eq!(free_take_track_name(&["Lead".into()], "Bass"), "Bass");
+        assert_eq!(free_take_track_name(&["Bass".into(), "Drums".into()], "Lead"), "Lead 2");
+        assert_eq!(free_take_track_name(&["Lead".into(), "Lead 2".into()], "Bass"), "Bass 2");
         // Live's names are user-editable: match case-insensitively and ignore
         // the padding Live leaves behind, or we'd hand back a duplicate
         assert_eq!(free_take_track_name(&["lead".into()], "Lead"), "Lead 2");
