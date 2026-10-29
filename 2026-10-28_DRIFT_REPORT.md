@@ -54,7 +54,12 @@ docs or `CLAUDE.md` set, and each was re-checked directly in the source:
    with no lock or content check (`core/src/tools.rs:283-299`,
    `core/src/db.rs:819-838`). The `destructive: true` flag is never sent to MCP
    clients (`mcp-shim/src/main.rs:68-72`).
-6. **The structure skill still asks the model for key/BPM.**
+6. ✅ **Fixed 2026-10-29** — `structure.md` no longer asks for `key`/`bpm`
+   (notes only), and the legacy path now DROPS them
+   (`strip_structure_key_tempo`, was `enforce_song_key_tempo`) instead of
+   storing a copy of the song's values. Test
+   `structure_output_never_stores_key_tempo`. Original finding:
+   **The structure skill still asks the model for key/BPM.**
    `core/src/skills/structure.md:16,24` says "ECHO them exactly in the `key`/`bpm`
    fields". The spine path throws them away, but the legacy fallback
    (`spine.rs:359-376`) stores them via `enforce_song_key_tempo`.

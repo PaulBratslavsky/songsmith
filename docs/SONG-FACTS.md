@@ -22,8 +22,9 @@ regen used to reset the user's key pickers; the enforce splice patched it; this 
    from artifact data.
 5. READERS of old artifacts ignore embedded `key`/`bpm` (legacy rows keep them harmlessly).
 6. Skills that previously "chose" facts (structure) justify/serve them instead; suggestions are
-   prose in notes. The `enforce_song_key_tempo` splice remains as a transitional guard for models
-   that still emit key/bpm, but the schema no longer expects them.
+   prose in notes. The structure skill no longer asks for `key`/`bpm` fields, and
+   `strip_structure_key_tempo` drops them if a model still sends them (2026-10-29 — it used to
+   splice the song's values in, which kept a second copy alive).
 
 ## Explicitly deferred → since completed
 - **The section spine** (labels/order/bars) was the deferred item here — DONE, see

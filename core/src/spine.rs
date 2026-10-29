@@ -26,11 +26,11 @@
 //!   startup migration's union step.
 //!
 //! Songs with NO spine rows keep every legacy path byte-identical: stage runs
-//! fall back to `freeze::build_merged_content` + `enforce_song_key_tempo`
+//! fall back to `freeze::build_merged_content` + `strip_structure_key_tempo`
 //! exactly as before (only a structure run may BIRTH a spine — proposing
 //! sections is its job).
 
-use crate::agent::{enforce_song_key_tempo, kind_for_stage};
+use crate::agent::{kind_for_stage, strip_structure_key_tempo};
 use crate::db;
 use crate::engine::extract_json;
 use crate::freeze::{
@@ -385,7 +385,7 @@ async fn reconcile_structure_run(conn: &Connection, song_id: &str, data: &mut Va
 /// Build a stage run's artifact content (run_stage + self_check share it) —
 /// the Phase-3 write pipeline. Songs with no spine rows (and non-structure
 /// stages on them) take the LEGACY path byte-identically: frozen merge via
-/// `build_merged_content`, then `enforce_song_key_tempo`. With a spine (or on
+/// `build_merged_content`, then `strip_structure_key_tempo`. With a spine (or on
 /// any structure run, which may birth one):
 ///   1. non-structure: map output labels → section ids, drop invented ones (D3);
 ///   2. splice frozen sections back verbatim (id-first — rename-proof);
@@ -411,7 +411,7 @@ pub(crate) async fn build_run_content(
 ) -> Result<String> {
     let legacy = |raw: &str| -> Result<String> {
         let c = build_merged_content(stage_type, raw, prior_content)?;
-        Ok(enforce_song_key_tempo(song, stage_type, &c))
+        Ok(strip_structure_key_tempo(stage_type, &c))
     };
     if !is_section_stage(stage_type) {
         return legacy(raw_text);
