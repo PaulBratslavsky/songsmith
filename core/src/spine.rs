@@ -770,6 +770,37 @@ mod tests {
         assert_eq!(secs[0], frozen_entry, "frozen content survives the rename byte-identical");
     }
 
+    /// A 🔒 locked Lyric Spec beat — the shape the editor saves, `frozen: true`
+    /// beside `section_id` — survives a regeneration byte-identical, while an
+    /// unlocked beat takes the model's rewrite.
+    #[tokio::test]
+    async fn locked_lyric_spec_beat_survives_regeneration() {
+        let (_db, conn) = mem_conn().await;
+        let song = make_song(&conn).await;
+        let verse = db::create_section(&conn, &song.id, "Verse 1", "", 8, "", None).await.unwrap();
+        let chorus = db::create_section(&conn, &song.id, "Chorus", "", 8, "", None).await.unwrap();
+
+        let st = stage_id(&conn, &song.id, "lyric_spec").await;
+        let prior_data = json!({ "hook": "h", "beats": [
+            { "section_id": verse.id, "section": "Verse 1", "beat": "my own verse beat", "frozen": true },
+            { "section_id": chorus.id, "section": "Chorus", "beat": "old chorus beat" }
+        ]});
+        let prior = json!({ "kind": "lyric_spec", "text": "…", "data": prior_data }).to_string();
+        db::save_artifact(&conn, &song.id, Some(&st), "lyric_spec", &prior).await.unwrap();
+
+        let raw = fenced(&json!({ "hook": "h2", "beats": [
+            { "section": "Verse 1", "beat": "model rewrote the verse" },
+            { "section": "Chorus", "beat": "model rewrote the chorus" }
+        ]}));
+        let content = build_run_content(&conn, &song, "lyric_spec", &raw, Some(&prior), SpineWrite::Propose).await.unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
+        let beats = v["data"]["beats"].as_array().unwrap();
+        assert_eq!(beats.len(), 2);
+        assert_eq!(beats[0], prior_data["beats"][0], "the locked beat is kept verbatim");
+        assert_eq!(beats[1]["beat"], json!("model rewrote the chorus"), "the unlocked beat takes the rewrite");
+        assert_eq!(beats[1]["section_id"], json!(chorus.id));
+    }
+
     /// Imports are user-authority spine writers: pasting lyrics REPLACES the
     /// spine to the pasted labels/order (a row matched by norm-label keeps its
     /// id + bars/role) and every saved artifact entry carries its section_id.
