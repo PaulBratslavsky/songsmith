@@ -18,9 +18,9 @@ The issue tracker should have been provided to you — run `/setup-matt-pocock-s
 
 Whatever the user said is the fixed point — a commit SHA, branch name, tag, `main`, `HEAD~5`, etc. If they didn't specify one, ask for it.
 
-Capture the diff command once: `git diff <fixed-point>...HEAD` (three-dot, so the comparison is against the merge-base). Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
+Capture the diff command once: `git diff $(git merge-base <fixed-point> HEAD)` — against the merge-base, like three-dot, but compared to the WORKING TREE, so staged and unstaged changes are reviewed too (`/implement` runs this review before it commits). Untracked files aren't in any diff: list them with `git ls-files --others --exclude-standard` and hand them to both sub-agents as new files. Also note the list of commits via `git log <fixed-point>..HEAD --oneline`.
 
-Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and the diff is non-empty. A bad ref or empty diff should fail here — not inside two parallel sub-agents.
+Before going further, confirm the fixed point resolves (`git rev-parse <fixed-point>`) and that the diff plus untracked files is non-empty. A bad ref or empty change set should fail here — not inside two parallel sub-agents.
 
 ### 2. Identify the spec source
 

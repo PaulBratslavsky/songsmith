@@ -242,10 +242,22 @@ export function applyTakesToComposition(
  *
  * `degree` is used rather than the printed `name` because it is always present
  * and already key-relative, so the line transposes with the song for free.
+ *
+ * A chord whose named root is OUTSIDE the key (C# in C major) gets no bass
+ * note: a NoteSpan can only hold a scale degree, and `degreeForChordName`
+ * snaps a chromatic root to the nearest one — so the bass would sound a wrong
+ * note under the chord (PR review, 2026-10-29). Silence is honest there.
  */
 function bassFromChordRoots(comp: Composition): NoteSpan[] {
+  const scalePcs = getScalePitchClasses({ root: comp.key.root, type: modeToScaleType(comp.key.mode) });
+  const rootIsDiatonic = (c: ChordSpan) => {
+    if (!c.name) return true; // degree-native chord: its root IS the degree
+    const named = parseChordSymbol(c.name)?.root ?? normalizePitchClass(c.name);
+    if (!named) return true;
+    return scalePcs[Math.min(7, Math.max(1, Math.round(c.degree))) - 1] === named;
+  };
   return comp.chords
-    .filter((c) => c.length > 0)
+    .filter((c) => c.length > 0 && rootIsDiatonic(c))
     .map((c) => ({
       id: uid('bassroot'),
       degree: Math.min(7, Math.max(1, Math.round(c.degree))) as Degree,

@@ -1670,7 +1670,15 @@ pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, sty
 ///
 /// The rewrite lands as a NEW artifact revision, so it shows in History and can
 /// be reverted like any other edit.
+///
+/// Key changes run ONE AT A TIME. The Composer's pickers fire one per click, so
+/// two can overlap: both read the same old key, then both transpose the same
+/// chords — C→D and C→E stacked to +6 while the song said E (PR review,
+/// 2026-10-29). Holding the lock across read-key → write-key → rewrite-chords
+/// makes the second change start from the first one's result.
 pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode: &str, bpm: i64) -> Result<crate::models::Song> {
+    static KEY_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = KEY_CHANGE.lock().await;
     let before = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let song = db::update_song_key(conn, song_id, root, mode, bpm).await?;
 
@@ -2222,6 +2230,41 @@ mod tests {
         assert_eq!(ch[3], json!("D#"), "a bare-string chord transposes as well");
         // it lands as a NEW revision, so History can undo it
         assert!(db::list_artifact_revisions(&conn, &cid).await.unwrap().len() >= 2);
+    }
+
+    /// Two key changes in flight at once (fast picker clicks) must not both
+    /// transpose from the same old key: the chords must end in the song's
+    /// final key, whichever change lands last.
+    // multi-thread, spawned: the app's commands run on worker threads, and a
+    // single-threaded join! never interleaves these calls, so it can't fail
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overlapping_key_changes_leave_chords_in_the_final_key() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "S").await.unwrap();
+        let cid = db::list_stages(&conn, &song.id).await.unwrap()
+            .into_iter().find(|s| s.r#type == "chords").unwrap().id;
+        for round in 0..40 {
+            db::update_song_key(&conn, &song.id, "C", "major", 120).await.unwrap();
+            let data = json!({ "sections": [ { "label": "Verse 1", "chords": [ {"name": "C", "beats": 4} ] } ] });
+            db::save_artifact(&conn, &song.id, Some(&cid), "chords",
+                &json!({ "kind": "chords", "text": "", "data": data }).to_string()).await.unwrap();
+
+            let (c1, c2, id1, id2) = (conn.clone(), conn.clone(), song.id.clone(), song.id.clone());
+            let a = tokio::spawn(async move { change_song_key(&c1, &id1, "D", "major", 120).await });
+            let b = tokio::spawn(async move { change_song_key(&c2, &id2, "E", "major", 120).await });
+            a.await.unwrap().unwrap();
+            b.await.unwrap().unwrap();
+
+            let key = db::get_song(&conn, &song.id).await.unwrap().unwrap().key_root;
+            let art = db::current_artifact(&conn, &cid).await.unwrap().unwrap();
+            let v: Value = serde_json::from_str(&art.content).unwrap();
+            assert_eq!(v["data"]["sections"][0]["chords"][0]["name"], json!(key),
+                "round {round}: the tonic chord must sit on the song's final key ({key}), not a stacked shift");
+        }
     }
 
     /// The transposer is pure — these are the cases that bite: negative
