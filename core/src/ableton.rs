@@ -623,7 +623,11 @@ fn live_track_names(s: &mut TcpStream) -> Result<Vec<String>> {
             ableton_cmd(s, json!({"type":"get_track_info","params":{"track_index": i}}))
                 .ok()
                 .and_then(|v| v.pointer("/result/name").and_then(|n| n.as_str()).map(String::from))
-                .ok_or_else(|| anyhow!("couldn't read the name of track {} in Live — nothing was sent", i + 1))
+                .ok_or_else(|| anyhow!(
+                    "couldn't read the name of track {} in Live — nothing was sent. If it's a group track, \
+                     the installed AbletonMCP script is outdated: Settings → Setup doctor → Install, then restart Live.",
+                    i + 1
+                ))
         })
         .collect()
 }

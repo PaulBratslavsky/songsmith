@@ -474,7 +474,10 @@ class AbletonMCP(ControlSurface):
                 "is_midi_track": track.has_midi_input,
                 "mute": track.mute,
                 "solo": track.solo,
-                "arm": track.arm,
+                # songsmith patch v4: group (and other non-armable) tracks
+                # RAISE on `arm`, which failed this whole call — and with it
+                # the take push's track-name read in any set with a group.
+                "arm": track.arm if track.can_be_armed else False,
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
                 "clip_slots": clip_slots,
