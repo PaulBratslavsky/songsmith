@@ -137,6 +137,61 @@ pub async fn union_artifact_sections(conn: &Connection, song_id: &str) -> Result
     db::list_sections(conn, song_id).await
 }
 
+/// Does a non-structure stage entry carry content — chords with chords,
+/// lyrics with words, a beat with text?
+fn entry_has_content(stage_type: &str, e: &Value) -> bool {
+    match stage_type {
+        "chords" => e.get("chords").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()),
+        "lyrics" => e
+            .get("lines")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| a.iter().any(|l| l.as_str().is_some_and(|s| !s.trim().is_empty()))),
+        _ => e.get("beat").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty()),
+    }
+}
+
+/// Which stages hold content for one spine section, and which have it 🔒
+/// locked — the guard behind Claude's section tools (`tools::dispatch`).
+pub(crate) struct SectionUse {
+    pub content_in: Vec<&'static str>,
+    pub locked_in: Vec<&'static str>,
+}
+
+/// Scan the Chords / Lyric Spec / Lyrics current artifacts for `sec`. An
+/// entry matches by `section_id`; a legacy entry without one matches by
+/// normalized label.
+pub(crate) async fn section_use(conn: &Connection, sec: &Section) -> Result<SectionUse> {
+    let mut out = SectionUse { content_in: Vec::new(), locked_in: Vec::new() };
+    let label = norm_label(&sec.label);
+    for st in db::list_stages(conn, &sec.song_id).await? {
+        let name = match st.r#type.as_str() {
+            "chords" => "Chords",
+            "lyric_spec" => "Lyric Spec",
+            "lyrics" => "Lyrics",
+            _ => continue,
+        };
+        let Some(a) = db::current_artifact(conn, &st.id).await? else { continue };
+        let Some(data) = serde_json::from_str::<Value>(&a.content).ok().and_then(|v| v.get("data").cloned()) else {
+            continue;
+        };
+        let (arr_key, _) = section_keys(&st.r#type);
+        let Some(arr) = data.get(arr_key).and_then(|v| v.as_array()) else { continue };
+        let mine = |e: &&Value| match entry_id(e) {
+            Some(id) => id == sec.id,
+            None => norm_label(&section_label(&st.r#type, e)) == label,
+        };
+        for e in arr.iter().filter(mine) {
+            if entry_has_content(&st.r#type, e) && !out.content_in.contains(&name) {
+                out.content_in.push(name);
+            }
+            if entry_frozen(e) && !out.locked_in.contains(&name) {
+                out.locked_in.push(name);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Spine section ids (and normalized labels, for legacy entries without ids)
 /// that still CARRY CONTENT in a non-structure stage artifact — chords with
 /// chords, lyrics with words, beats with text. Drives the D2 keep-vs-delete
@@ -153,15 +208,7 @@ async fn content_bearing(conn: &Connection, song_id: &str) -> Result<(HashSet<St
         let (arr_key, _) = section_keys(&st.r#type);
         let Some(arr) = data.get(arr_key).and_then(|v| v.as_array()) else { continue };
         for e in arr {
-            let has = match st.r#type.as_str() {
-                "chords" => e.get("chords").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()),
-                "lyrics" => e
-                    .get("lines")
-                    .and_then(|v| v.as_array())
-                    .is_some_and(|a| a.iter().any(|l| l.as_str().is_some_and(|s| !s.trim().is_empty()))),
-                _ => e.get("beat").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty()),
-            };
-            if !has {
+            if !entry_has_content(&st.r#type, e) {
                 continue;
             }
             if let Some(id) = entry_id(e) {
