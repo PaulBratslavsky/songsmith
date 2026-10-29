@@ -45,8 +45,8 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "delete_song", description: "Delete a song and all its stages/artifacts.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "list_sections", description: "List a song's section spine (the single source of truth for section identity/order/label/type/bars/role), ordered by position.", destructive: false, input_schema: obj(json!({"song_id": s("")}), &["song_id"]) },
         ToolSpec { name: "create_section", description: "Add a section to a song's spine. Appends at the end unless `position` (0-based insert index) is given.", destructive: false, input_schema: obj(json!({"song_id": s(""),"label": s("e.g. \"Verse 1\""),"type": s("optional section type, e.g. verse/chorus/bridge"),"bars": {"type":"integer","description":"bar count (default 8)"},"role": s("optional arc role, e.g. \"opens the story\""),"position": {"type":"integer","description":"0-based insert index (omit to append)"}}), &["song_id","label"]) },
-        ToolSpec { name: "update_section", description: "Update a spine section's form (label/type/bars/role) — omitted fields keep their current value. Order changes go through reorder_sections.", destructive: false, input_schema: obj(json!({"id": s("section id"),"label": s(""),"type": s(""),"bars": {"type":"integer"},"role": s("")}), &["id"]) },
-        ToolSpec { name: "delete_section", description: "Delete a section from a song's spine (stage content keyed to it is orphaned — deletion of a content-bearing section is a user decision).", destructive: true, input_schema: obj(json!({"id": s("section id")}), &["id"]) },
+        ToolSpec { name: "update_section", description: "Update a spine section's form (label/type/bars/role) — omitted fields keep their current value. Order changes go through reorder_sections. Refused for a section the producer 🔒 locked in any stage.", destructive: false, input_schema: obj(json!({"id": s("section id"),"label": s(""),"type": s(""),"bars": {"type":"integer"},"role": s("")}), &["id"]) },
+        ToolSpec { name: "delete_section", description: "Delete a content-free section from a song's spine. Refused when Chords, Lyric Spec or Lyrics still has content or a 🔒 lock for it — deleting a section with content is the producer's call, in the Structure editor.", destructive: true, input_schema: obj(json!({"id": s("section id")}), &["id"]) },
         ToolSpec { name: "reorder_sections", description: "Reorder a song's spine: pass EVERY section id of the song, each exactly once, in the new order.", destructive: false, input_schema: obj(json!({"song_id": s(""),"section_ids": {"type":"array","items":{"type":"string"},"description":"all of the song's section ids in the new order"}}), &["song_id","section_ids"]) },
         ToolSpec { name: "get_stage", description: "Get a stage with its current artifact and active skill.", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "run_stage", description: "Run a stage: load skill + style preset + prior approved artifacts, call Claude. FIRST run saves the artifact directly; a RE-run lands as a PENDING DRAFT (the current artifact is untouched) — review it with get_stage, then accept_stage_draft or discard_stage_draft.", destructive: false, input_schema: obj(json!({"stage_id": s(""),"user_input": s("optional seed (your own chords/lyrics/title)")}), &["stage_id"]) },
@@ -284,6 +284,14 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             // partial update: omitted fields keep the row's current value
             let id = arg(args, "id")?;
             let cur = db::get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found"))?;
+            // Claude may not change the form of a section the producer locked
+            let used = crate::spine::section_use(conn, &cur).await?;
+            if !used.locked_in.is_empty() {
+                return Err(anyhow!(
+                    "\"{}\" is 🔒 locked in {} — not changed. Ask the producer to unlock it there, or to change it themselves in the Structure editor.",
+                    cur.label, used.locked_in.join(", ")
+                ));
+            }
             v(db::update_section(
                 conn,
                 id,
@@ -293,7 +301,26 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
                 arg_opt(args, "role").unwrap_or(&cur.role),
             ).await?)
         }
-        "delete_section" => { db::delete_section(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
+        "delete_section" => {
+            // spec D2: deleting a section that carries content is the producer's call
+            let id = arg(args, "id")?;
+            let cur = db::get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found"))?;
+            let used = crate::spine::section_use(conn, &cur).await?;
+            let mut held: Vec<&str> = used.content_in.clone();
+            for s in &used.locked_in {
+                if !held.contains(s) {
+                    held.push(s);
+                }
+            }
+            if !held.is_empty() {
+                return Err(anyhow!(
+                    "\"{}\" still has content or a 🔒 lock in {} — not deleted. Deleting a section with content is the producer's call: ask them to delete it in the Structure editor.",
+                    cur.label, held.join(", ")
+                ));
+            }
+            db::delete_section(conn, id).await?;
+            Ok(json!({ "ok": true }))
+        }
         "reorder_sections" => {
             let ids: Vec<String> = args.get("section_ids").and_then(|c| c.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
@@ -522,6 +549,66 @@ mod tests {
 
         // an unknown id is an error, not a silent no-op
         assert!(dispatch(&conn, &settings, "update_progression", &json!({ "id": "nope", "name": "x" })).await.is_err());
+    }
+
+    /// REGRESSION (2026-10-28 drift report, bug 5): Claude's section tools
+    /// ignored locks and content. Over MCP (`dispatch` — the user's editor
+    /// calls the db directly and keeps full authority):
+    ///   - delete_section refuses a section any stage has content for or 🔒
+    ///     locks (deleting content is the producer's call, spec D2); an empty
+    ///     section still deletes;
+    ///   - update_section refuses a section 🔒 locked in any stage; an
+    ///     unlocked section with content still updates.
+    #[tokio::test]
+    async fn section_tools_respect_locks_and_content() {
+        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        let settings = Settings::default();
+        let preset = dispatch(&conn, &settings, "create_style_preset", &json!({ "name": "P" })).await.unwrap();
+        let song = dispatch(&conn, &settings, "create_song", &json!({ "style_preset_id": preset["id"], "title": "S" })).await.unwrap();
+        let song_id = song["id"].as_str().unwrap().to_string();
+        let mk = |label: &'static str| json!({ "song_id": song_id, "label": label });
+        let verse = dispatch(&conn, &settings, "create_section", &mk("Verse 1")).await.unwrap();
+        let chorus = dispatch(&conn, &settings, "create_section", &mk("Chorus")).await.unwrap();
+        let outro = dispatch(&conn, &settings, "create_section", &mk("Outro")).await.unwrap();
+
+        let stage = |t: &str| {
+            let conn = conn.clone();
+            let (song_id, t) = (song_id.clone(), t.to_string());
+            async move { db::list_stages(&conn, &song_id).await.unwrap().into_iter().find(|s| s.r#type == t).unwrap().id }
+        };
+        // the verse has (unlocked) lyrics; the chorus has 🔒 locked chords
+        let ly = json!({ "kind": "lyrics", "text": "…", "data": { "sections": [
+            { "section_id": verse["id"], "label": "Verse 1", "lines": ["streetlights drown"] }
+        ]}}).to_string();
+        db::save_artifact(&conn, &song_id, Some(&stage("lyrics").await), "lyrics", &ly).await.unwrap();
+        let ch = json!({ "kind": "chords", "text": "…", "data": { "sections": [
+            { "section_id": chorus["id"], "label": "Chorus", "chords": [{"name": "C", "beats": 4}], "frozen": true }
+        ]}}).to_string();
+        db::save_artifact(&conn, &song_id, Some(&stage("chords").await), "chords", &ch).await.unwrap();
+
+        let labels = || async {
+            db::list_sections(&conn, &song_id).await.unwrap().into_iter().map(|r| r.label).collect::<Vec<_>>()
+        };
+
+        // delete: content-bearing and locked sections are refused, with a reason
+        let e = dispatch(&conn, &settings, "delete_section", &json!({ "id": verse["id"] })).await.unwrap_err().to_string();
+        assert!(e.contains("Verse 1") && e.contains("Lyrics"), "names the section and the stage, got: {e}");
+        let e = dispatch(&conn, &settings, "delete_section", &json!({ "id": chorus["id"] })).await.unwrap_err().to_string();
+        assert!(e.contains("Chorus") && e.contains("Chords"), "got: {e}");
+        assert_eq!(labels().await, ["Verse 1", "Chorus", "Outro"], "refused deletes change nothing");
+
+        // update: a locked section is refused; an unlocked one with content is fine
+        let e = dispatch(&conn, &settings, "update_section", &json!({ "id": chorus["id"], "label": "Big Chorus" })).await.unwrap_err().to_string();
+        assert!(e.contains("locked") && e.contains("Chords"), "got: {e}");
+        assert_eq!(labels().await, ["Verse 1", "Chorus", "Outro"]);
+        let up = dispatch(&conn, &settings, "update_section", &json!({ "id": verse["id"], "bars": 12 })).await.unwrap();
+        assert_eq!(up["bars"], json!(12), "unlocked sections with content still take form edits");
+
+        // an empty section still deletes
+        dispatch(&conn, &settings, "delete_section", &json!({ "id": outro["id"] })).await.unwrap();
+        assert_eq!(labels().await, ["Verse 1", "Chorus"]);
     }
 
     /// The five spine tools round-trip through `dispatch` (the UI/agent/MCP

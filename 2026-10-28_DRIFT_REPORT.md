@@ -41,7 +41,15 @@ docs or `CLAUDE.md` set, and each was re-checked directly in the source:
    and nothing in `components/compose/` or `ComposerRoute.tsx` calls
    `updateSongKey`. "Update linked song" then writes chords resolved in the
    Composer's key without changing `song.key_root`.
-5. **Claude can rename or delete a locked or content-bearing section.** MCP
+5. ✅ **Fixed 2026-10-29** — over MCP, `delete_section` refuses a section
+   that Chords / Lyric Spec / Lyrics has content or a 🔒 lock for, and
+   `update_section` refuses a locked section (`spine::section_use`). The
+   user's own editor is unaffected (Tauri calls the db directly).
+   `reorder_sections` is left as-is: it already requires the full id list
+   and loses nothing. The `destructive` flag is still not sent to MCP
+   clients. Verified through the real mcp-shim; test
+   `section_tools_respect_locks_and_content`. Original finding:
+   **Claude can rename or delete a locked or content-bearing section.** MCP
    `update_section` / `delete_section` / `reorder_sections` call the db functions
    with no lock or content check (`core/src/tools.rs:283-299`,
    `core/src/db.rs:819-838`). The `destructive: true` flag is never sent to MCP
