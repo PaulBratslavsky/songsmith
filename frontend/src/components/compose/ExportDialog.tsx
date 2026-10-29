@@ -45,6 +45,7 @@ export function ExportDialog({
   const [presets, setPresets] = useState<StylePreset[]>([]);
   const [presetId, setPresetId] = useState('');
   const [songTitle, setSongTitle] = useState<string | null>(null);
+  const [songKey, setSongKey] = useState<{ root: string; mode: string; bpm: number } | null>(null);
   const [frozen, setFrozen] = useState<string[]>([]);
   const [spineRows, setSpineRows] = useState<SpineSection[]>([]);
   const [busy, setBusy] = useState(false);
@@ -63,6 +64,7 @@ export function ExportDialog({
         const detail = await api.getSong(songId);
         if (!alive || !detail) return;
         setSongTitle(detail.song.title || 'Untitled song');
+        setSongKey({ root: detail.song.key_root, mode: detail.song.key_mode, bpm: Number(detail.song.bpm) });
         const locked = new Set<string>();
         for (const t of ['chords', 'structure'] as const) {
           const stage = detail.stages.find((s) => s.type === t);
@@ -98,6 +100,16 @@ export function ExportDialog({
     return out;
   }, [songId, mode, sections, spineRows]);
 
+  // ONE HOME for key/BPM: the export writes chords resolved in the sketch's
+  // key, so a sketch whose key/tempo still differs from the song's moves the
+  // SONG first (same command as the header key control — the song's existing
+  // chords, locked ones included, transpose with it). Shown before confirm.
+  const keyChange = useMemo(() => {
+    if (!songId || mode !== 'update' || !songKey) return null;
+    const same = songKey.root === comp.key.root && songKey.mode === comp.key.mode && songKey.bpm === comp.bpm;
+    return same ? null : songKey;
+  }, [songId, mode, songKey, comp.key.root, comp.key.mode, comp.bpm]);
+
   const goToSong = (id: string) => {
     // the export just rewrote stage artifacts + the section spine — drop the
     // cached queries so the workspace (and any composer rebuild) reads fresh
@@ -115,6 +127,7 @@ export function ExportDialog({
     try {
       const json = JSON.stringify(sections);
       if (mode === 'update' && songId) {
+        if (keyChange) await api.updateSongKey(songId, comp.key.root, comp.key.mode, comp.bpm);
         await api.exportCompositionToSong(songId, json);
         goToSong(songId);
       } else {
@@ -176,6 +189,12 @@ export function ExportDialog({
               <div className="banner warn" style={{ marginLeft: 22 }}>
                 🔒 Locked sections are kept as they are (skipped, never overwritten):{' '}
                 <b>{frozen.join(', ')}</b>. Unlock them in the song to export over them.
+              </div>
+            )}
+            {mode === 'update' && keyChange && (
+              <div className="banner" style={{ marginLeft: 22 }}>
+                The song's key/tempo will change to match: <b>{keyChange.root} {keyChange.mode} · {keyChange.bpm} BPM</b> →{' '}
+                <b>{comp.key.root} {comp.key.mode} · {comp.bpm} BPM</b>
               </div>
             )}
             {mode === 'update' && barChanges.length > 0 && (
