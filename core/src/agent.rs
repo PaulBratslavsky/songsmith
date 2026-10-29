@@ -104,8 +104,10 @@ where
         // (id-first) + spine reconciliation (structure creates/renames/deletes;
         // other stages map labels → section ids, dropping invented ones) +
         // key/tempo enforcement. Byte-identical to the legacy path for songs
-        // without spine rows.
-        let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str())).await?;
+        // without spine rows. A run that will park as a draft only PROPOSES
+        // structure sections — the spine changes on accept, never on discard.
+        let spine_write = if prior_artifact.is_some() { crate::spine::SpineWrite::Propose } else { crate::spine::SpineWrite::Apply };
+        let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, prior_artifact.as_ref().map(|a| a.content.as_str()), spine_write).await?;
 
         // Regenerate-as-draft (user decision 2026-07-15): a stage that already
         // has an artifact keeps it — the run's output lands as THE pending
@@ -134,16 +136,26 @@ where
 /// Accept a stage's pending draft: the draft content is RE-GUARDED against the
 /// stage's CURRENT state (the spine or frozen sections may have changed since
 /// the run) and saved as a new revision; the draft is cleared. The freeze
-/// splice therefore still protects locked sections at accept time.
+/// splice therefore still protects locked sections at accept time. A
+/// structure draft's proposed sections land on the spine HERE (reconciled
+/// against the spine as it is now) — never at run time.
 pub async fn accept_stage_draft(conn: &Connection, stage_id: &str) -> Result<Artifact> {
     let draft = db::get_stage_draft(conn, stage_id).await?
         .ok_or_else(|| anyhow!("no pending draft on this stage — run it first"))?;
-    let artifact = save_artifact_guarded(conn, &draft.song_id, Some(stage_id), &draft.kind, &draft.content).await?;
+    let artifact = match crate::spine::structure_proposal(&draft.content) {
+        Some(proposed) => {
+            let current = db::current_artifact(conn, stage_id).await?;
+            let content = crate::spine::apply_structure_proposal(conn, &draft.song_id, &proposed, current.as_ref().map(|a| a.content.as_str())).await?;
+            db::save_artifact(conn, &draft.song_id, Some(stage_id), &draft.kind, &content).await?
+        }
+        None => save_artifact_guarded(conn, &draft.song_id, Some(stage_id), &draft.kind, &draft.content).await?,
+    };
     db::delete_stage_draft(conn, stage_id).await?;
     Ok(artifact)
 }
 
-/// Throw a stage's pending draft away — the current artifact was never touched.
+/// Throw a stage's pending draft away — the current artifact and the section
+/// spine were never touched (a structure draft only proposes sections).
 pub async fn discard_stage_draft(conn: &Connection, stage_id: &str) -> Result<()> {
     db::delete_stage_draft(conn, stage_id).await
 }
@@ -205,8 +217,9 @@ Return ONLY the revised result as the single fenced ```json block your skill spe
         }
 
         let text = call_claude(settings, &system, &user, &|_| {}, None).await?;
-        // same Phase-3 write pipeline as run_stage (spine reconciliation + frozen merge)
-        let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, Some(current.content.as_str())).await?;
+        // same Phase-3 write pipeline as run_stage; a self-check always parks
+        // as a draft, so structure sections are only proposed (applied on accept)
+        let content = crate::spine::build_run_content(conn, &song, &stage.r#type, &text, Some(current.content.as_str()), crate::spine::SpineWrite::Propose).await?;
         // regenerate-as-draft: a self-check ALWAYS revises existing content, so
         // it always parks as the pending draft — the last write path that used
         // to replace content without an accept
