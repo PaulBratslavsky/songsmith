@@ -22,7 +22,11 @@ docs or `CLAUDE.md` set, and each was re-checked directly in the source:
    rows (`core/src/spine.rs:399-406`) *before* the output is parked as a draft
    (`agent.rs:114-117`). `discard_stage_draft` only deletes the draft row
    (`agent.rs:146-148`). Self-check has the same path (`agent.rs:208-213`).
-2. **Saving the Lyric Spec editor unlocks every beat.** `parseSpec` maps beats to
+2. ✅ **Fixed 2026-10-29** — the editor keeps `frozen` through load/save and
+   has a 🔒/🔓 toggle per beat (verified in the browser mock: lock → save →
+   reload → save → reload stays locked). Core test:
+   `locked_lyric_spec_beat_survives_regeneration`. Original finding:
+   **Saving the Lyric Spec editor unlocks every beat.** `parseSpec` maps beats to
    `{section_id, section, beat}` and drops `frozen`
    (`frontend/src/components/LyricSpecEditor.tsx:26-32`), and the save writes those
    beats back (`:97-105`). There is also no lock toggle in this editor.

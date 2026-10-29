@@ -29,6 +29,8 @@ export function parseSpec(content: string): SpecData {
           ...(typeof b.section_id === "string" && b.section_id ? { section_id: b.section_id } : {}),
           section: b.section ?? b.label ?? "",
           beat: b.beat ?? b.text ?? "",
+          // 🔒 lock — kept through load/save so saving the editor never unlocks a beat
+          ...(b.frozen === true ? { frozen: true } : {}),
         }))
       : [],
     imageBank: Array.isArray(data?.imageBank) ? data.imageBank : [],
@@ -94,10 +96,12 @@ export function LyricSpecEditor({
       // section_id through the save — parsed ids are kept, and a beat typed
       // against a known section label picks its row's id up here.
       const rows = spineSections ?? [];
-      const beats = d.beats.map((b) => {
-        if (b.section_id) return b;
+      const beats = d.beats.map(({ frozen, ...b }) => {
+        // persist `frozen` only when set, so unlocked beats stay byte-identical
+        const lock = frozen ? { frozen: true } : {};
+        if (b.section_id) return { ...b, ...lock };
         const row = rows.find((r) => normLabel(r.label) === normLabel(b.section));
-        return row ? { ...b, section_id: row.id } : b;
+        return row ? { ...b, section_id: row.id, ...lock } : { ...b, ...lock };
       });
       // spine songs embed the snapshot beside data (§Snapshots — parity with core writes)
       return api.saveArtifact(songId, stageId, kind, JSON.stringify({
@@ -144,11 +148,13 @@ export function LyricSpecEditor({
 
       <div>
         <label>Song map <span className="faint">(one beat per section — what it says, how it moves)</span></label>
+        <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>🔒 Locked beats are kept as-is when you regenerate this stage.</p>
         <div className="col" style={{ gap: 6 }}>
           {d.beats.map((b, i) => (
             <div key={i} className="row" style={{ gap: 6, alignItems: "flex-start" }}>
               <input value={b.section} onChange={(e) => setBeat(i, { section: e.target.value })} placeholder="Verse 1" style={{ width: 130, fontWeight: 600 }} />
               <textarea value={b.beat} onChange={(e) => setBeat(i, { beat: e.target.value })} placeholder="what this section says…" style={{ flex: 1, minHeight: 38 }} />
+              <button className={"sm ghost" + (b.frozen ? " primary" : "")} title={b.frozen ? "unlock — let regeneration rewrite this beat" : "lock — keep this beat as-is when you regenerate"} onClick={() => setBeat(i, { frozen: !b.frozen })}>{b.frozen ? "🔒" : "🔓"}</button>
               <button className="sm ghost" title="remove" onClick={() => rmBeat(i)}>×</button>
             </div>
           ))}
