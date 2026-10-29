@@ -15,6 +15,7 @@
 // reidentifies spans).
 
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { api, listen } from '../../ipc/api';
 import type { CompositionMeta } from '../../ipc/generated';
 import { PITCH_CLASSES, type PitchClass } from '../../lib/music/types';
@@ -174,6 +175,32 @@ export function Sketchpad({
       setSaveMsg(null);
     }
   }, [initial, songId, actions]);
+
+  // ONE HOME for key/BPM (CLAUDE.md): on a song-linked sketch the Key/Tempo
+  // pickers change the SONG, through the same command as the song header's
+  // key control — so the song's written chords transpose with it, just as the
+  // sketch's named chords do in the reducer. A blank sketch keeps them local.
+  // The tempo slider fires on every step of a drag, hence the delay.
+  const qc = useQueryClient();
+  const songKeyTimer = useRef<number | null>(null);
+  const pushSongKey = (root: string, mode: string, bpm: number, delayMs = 0) => {
+    if (!linkedSongId) return;
+    const id = linkedSongId;
+    if (songKeyTimer.current != null) window.clearTimeout(songKeyTimer.current);
+    songKeyTimer.current = window.setTimeout(async () => {
+      songKeyTimer.current = null;
+      try {
+        await api.updateSongKey(id, root, mode, bpm);
+        qc.invalidateQueries({ queryKey: ['song', id] });
+        qc.invalidateQueries({ queryKey: ['songs'] });
+      } catch (e) {
+        setSaveMsg(`Couldn't change the song's key/tempo: ${String((e as Error)?.message ?? e)}`);
+      }
+    }, delayMs);
+  };
+  const pickRoot = (root: PitchClass) => { actions.setKeyRoot(root); pushSongKey(root, comp.key.mode, comp.bpm); };
+  const pickMode = (mode: KeyMode) => { actions.setKeyMode(mode); pushSongKey(comp.key.root, mode, comp.bpm); };
+  const pickBpm = (bpm: number) => { actions.setBpm(bpm); pushSongKey(comp.key.root, comp.key.mode, bpm, 400); };
 
   const [muted, setMuted] = useState(false);
   const [durTicks, setDurTicks] = useState(4); // default 1/4 note
@@ -546,15 +573,15 @@ export function Sketchpad({
           {isPlaying ? '■ Stop' : '▶ Play'}
         </button>
 
-        <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <span className="cmp-cap">Key</span>
+        <div className="row" style={{ alignItems: 'center', gap: 6 }} title={linkedSongId ? "these are the linked song's key and tempo — changing them here changes the song" : undefined}>
+          <span className="cmp-cap">Key{linkedSongId ? ' · song' : ''}</span>
           <div className="row" style={{ flexWrap: 'wrap', gap: 3 }}>
             {PITCH_CLASSES.map((pc) => (
               <button
                 key={pc}
                 type="button"
                 className={'sm' + (comp.key.root === pc ? ' primary' : '')}
-                onClick={() => actions.setKeyRoot(pc)}
+                onClick={() => pickRoot(pc)}
               >
                 {pc}
               </button>
@@ -568,7 +595,7 @@ export function Sketchpad({
               key={m}
               type="button"
               className={'sm' + (comp.key.mode === m ? ' primary' : '')}
-              onClick={() => actions.setKeyMode(m)}
+              onClick={() => pickMode(m)}
               style={{ textTransform: 'capitalize' }}
             >
               {m}
@@ -583,7 +610,7 @@ export function Sketchpad({
             min={60}
             max={180}
             value={comp.bpm}
-            onChange={(e) => actions.setBpm(Number(e.target.value))}
+            onChange={(e) => pickBpm(Number(e.target.value))}
             style={{ width: 96, padding: 0 }}
           />
           <span style={{ width: 56, fontVariantNumeric: 'tabular-nums', color: 'var(--ink-dim)' }}>

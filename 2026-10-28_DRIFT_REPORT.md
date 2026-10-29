@@ -36,7 +36,13 @@ docs or `CLAUDE.md` set, and each was re-checked directly in the source:
    finding: **`update_progression` (MCP) is a full replace.** Omitting `picks` writes `""`
    and wipes saved picks (`core/src/tools.rs:360-365`, `core/src/db.rs:1179-1183`).
    Breaks the "`update_*` tools are PARTIAL" house rule.
-4. **The Composer keeps its own key/BPM for a song-linked sketch.** Its Key/Tempo
+4. ✅ **Fixed 2026-10-29** — on a song-linked sketch the Composer's Key/Tempo
+   pickers now change the SONG (via `updateSongKey`, the same command as the
+   song header, so the song's written chords transpose too); "Update linked
+   song" shows and applies any remaining key/tempo difference before writing
+   chords. Verified in the browser mock (picker → song header; saved F#
+   sketch exported over a G minor song → song becomes F# minor). Original
+   finding: **The Composer keeps its own key/BPM for a song-linked sketch.** Its Key/Tempo
    pickers only change local state (`frontend/src/lib/music/compose/useCompositionState.ts:84-99`)
    and nothing in `components/compose/` or `ComposerRoute.tsx` calls
    `updateSongKey`. "Update linked song" then writes chords resolved in the
