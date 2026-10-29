@@ -69,7 +69,7 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec { name: "delete_outline", description: "Delete a saved song outline.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "list_progressions", description: "List saved chord progressions (reusable across songs).", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "save_progression", description: "Save a reusable chord progression by name (optionally with per-chord shape picks JSON).", destructive: false, input_schema: obj(json!({"name": s(""),"chords": {"type":"array","items":{"type":"string"}},"picks": s("optional per-chord picks JSON: [{\"g\":0,\"p\":2,\"a\":0}, …]")}), &["name","chords"]) },
-        ToolSpec { name: "update_progression", description: "Update a saved chord progression in place (name, chords, optional picks JSON).", destructive: false, input_schema: obj(json!({"id": s(""),"name": s(""),"chords": {"type":"array","items":{"type":"string"}},"picks": s("optional per-chord picks JSON")}), &["id","name","chords"]) },
+        ToolSpec { name: "update_progression", description: "Update a saved chord progression in place — PARTIAL: pass only the fields you want to change (name, chords, picks JSON); omitted fields keep their current value. Pass picks as \"\" to clear them.", destructive: false, input_schema: obj(json!({"id": s(""),"name": s(""),"chords": {"type":"array","items":{"type":"string"}},"picks": s("per-chord picks JSON")}), &["id"]) },
         ToolSpec { name: "delete_progression", description: "Delete a saved chord progression.", destructive: true, input_schema: obj(json!({"id": s("")}), &["id"]) },
         ToolSpec { name: "list_compositions", description: "List saved Composer compositions (visual melody/chords/bass sketches): name, linked song, timestamps — no data blobs.", destructive: false, input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_composition", description: "Get a saved composition by id, including its full Composition JSON blob (`data`).", destructive: false, input_schema: obj(json!({"id": s("")}), &["id"]) },
@@ -358,10 +358,16 @@ pub async fn dispatch(conn: &Connection, settings: &Settings, name: &str, args: 
             v(db::create_progression(conn, arg(args, "name")?, &chords, arg_opt(args, "picks").unwrap_or("")).await?)
         }
         "update_progression" => {
-            let chords: Vec<String> = args.get("chords").and_then(|c| c.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            v(db::update_progression(conn, arg(args, "id")?, arg(args, "name")?, &chords, arg_opt(args, "picks").unwrap_or("")).await?)
+            // PARTIAL update — omitting `picks` used to write "" and wipe them
+            let id = arg(args, "id")?;
+            let cur = db::get_progression(conn, id).await?.ok_or_else(|| anyhow!("progression not found"))?;
+            let chords: Vec<String> = match args.get("chords").and_then(|c| c.as_array()) {
+                Some(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                None => cur.chords.clone(),
+            };
+            let name = arg_opt(args, "name").unwrap_or(&cur.name);
+            let picks = arg_opt(args, "picks").unwrap_or(&cur.picks);
+            v(db::update_progression(conn, id, name, &chords, picks).await?)
         }
         "delete_progression" => { db::delete_progression(conn, arg(args, "id")?).await?; Ok(json!({ "ok": true })) }
         "list_compositions" => v(db::list_compositions(conn).await?),
@@ -476,6 +482,46 @@ mod tests {
             "renaming a skill must not blank its instructions");
         assert_eq!(renamed["stage_type"], json!("lyrics"));
         assert_eq!(renamed["key"], json!("user-hymn"));
+    }
+
+    /// REGRESSION (2026-10-28 drift report, bug 3): `update_progression` was
+    /// a full replace — omitting `picks` wrote "" and wiped the saved picks,
+    /// and `name`/`chords` were required. Omitted fields now keep their value;
+    /// an explicit "" still clears `picks`.
+    #[tokio::test]
+    async fn update_progression_is_partial() {
+        let db = libsql::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        crate::db::migrate(&conn).await.unwrap();
+        let settings = Settings::default();
+
+        let picks = r#"[{"voicing":"open"},{"voicing":"barre"}]"#;
+        let p = dispatch(&conn, &settings, "save_progression",
+            &json!({ "name": "Night Drive", "chords": ["Am", "F"], "picks": picks })).await.unwrap();
+        let id = p["id"].as_str().unwrap().to_string();
+
+        // rename only: chords and picks survive
+        let renamed = dispatch(&conn, &settings, "update_progression",
+            &json!({ "id": id, "name": "Night Drive II" })).await.unwrap();
+        assert_eq!(renamed["name"], json!("Night Drive II"));
+        assert_eq!(renamed["chords"], json!(["Am", "F"]), "omitted chords keep their value");
+        assert_eq!(renamed["picks"], json!(picks), "omitted picks keep their value");
+
+        // chords only: name and picks survive
+        let rechorded = dispatch(&conn, &settings, "update_progression",
+            &json!({ "id": id, "chords": ["Am", "F", "C", "G"] })).await.unwrap();
+        assert_eq!(rechorded["chords"], json!(["Am", "F", "C", "G"]));
+        assert_eq!(rechorded["name"], json!("Night Drive II"));
+        assert_eq!(rechorded["picks"], json!(picks));
+
+        // an EXPLICIT "" clears picks, without touching the rest
+        let cleared = dispatch(&conn, &settings, "update_progression",
+            &json!({ "id": id, "picks": "" })).await.unwrap();
+        assert_eq!(cleared["picks"], json!(""));
+        assert_eq!(cleared["chords"], json!(["Am", "F", "C", "G"]));
+
+        // an unknown id is an error, not a silent no-op
+        assert!(dispatch(&conn, &settings, "update_progression", &json!({ "id": "nope", "name": "x" })).await.is_err());
     }
 
     /// The five spine tools round-trip through `dispatch` (the UI/agent/MCP

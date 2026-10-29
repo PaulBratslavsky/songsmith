@@ -1170,6 +1170,13 @@ pub async fn create_progression(conn: &Connection, name: &str, chords: &[String]
     ).await?;
     Ok(Progression { id, name: name.to_string(), chords: chords.to_vec(), picks: picks.to_string(), created_at: ts })
 }
+pub async fn get_progression(conn: &Connection, id: &str) -> Result<Option<Progression>> {
+    let mut rows = conn.query("SELECT id, name, chords, picks, created_at FROM progression WHERE id = ?1", params![id]).await?;
+    Ok(match rows.next().await? {
+        Some(r) => Some(Progression { id: s(&r, 0), name: s(&r, 1), chords: serde_json::from_str(&s(&r, 2)).unwrap_or_default(), picks: s(&r, 3), created_at: s(&r, 4) }),
+        None => None,
+    })
+}
 pub async fn update_progression(conn: &Connection, id: &str, name: &str, chords: &[String], picks: &str) -> Result<Progression> {
     // renaming onto ANOTHER row's name is the same silent-duplicate trap
     let mut dup = conn.query("SELECT id FROM progression WHERE lower(name) = lower(?1) AND id != ?2", params![name, id]).await?;

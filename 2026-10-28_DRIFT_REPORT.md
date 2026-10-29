@@ -30,7 +30,10 @@ docs or `CLAUDE.md` set, and each was re-checked directly in the source:
    `{section_id, section, beat}` and drops `frozen`
    (`frontend/src/components/LyricSpecEditor.tsx:26-32`), and the save writes those
    beats back (`:97-105`). There is also no lock toggle in this editor.
-3. **`update_progression` (MCP) is a full replace.** Omitting `picks` writes `""`
+3. ✅ **Fixed 2026-10-29** — `update_progression` is now PARTIAL (only `id`
+   required; omitted fields keep their value, `picks: ""` clears). Verified
+   through the real mcp-shim; test `update_progression_is_partial`. Original
+   finding: **`update_progression` (MCP) is a full replace.** Omitting `picks` writes `""`
    and wipes saved picks (`core/src/tools.rs:360-365`, `core/src/db.rs:1179-1183`).
    Breaks the "`update_*` tools are PARTIAL" house rule.
 4. **The Composer keeps its own key/BPM for a song-linked sketch.** Its Key/Tempo
