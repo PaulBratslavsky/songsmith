@@ -198,6 +198,7 @@ async fn run_doctor(state: State<'_, AppState>) -> R<Vec<DoctorCheck>> {
             let status = match std::fs::read_to_string(&p) {
                 Err(_) => ("fail", "AbletonMCP script missing — click Install below".to_string()),
                 Ok(src) if !src.contains("create_audio_track") => ("warn", "script outdated (no audio-track support) — click Install below".to_string()),
+                Ok(src) if !src.contains("can_be_armed") => ("warn", "script outdated (a group track blocks ⚡ take pushes) — click Install below".to_string()),
                 Ok(_) => ("ok", "patched script installed (enable it as a Control Surface in Live)".to_string()),
             };
             out.push(check(&format!("Ableton Remote Script ({live})"), status.0, status.1));
