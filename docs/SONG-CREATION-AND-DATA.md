@@ -148,7 +148,8 @@ copy in the lyrics artifact.
   current version stays live until you click **Accept draft** — which re-guards
   the content (frozen sections, spine) and journals it as a new revision — or
   **Discard**, which deletes it without a trace. A newer re-run replaces an
-  unreviewed draft. (Built 2026-07-16; closes the "it updated without approve"
+  unreviewed draft. A Structure draft only *proposes* section changes; the
+  section list (spine) changes when you accept, never on discard. (Built 2026-07-16; closes the "it updated without approve"
   gap noted below.)
 - **Approve & advance** does NOT accept content — content is already saved. It marks
   the stage done and moves the song to the next stage (it's the advancement gate,

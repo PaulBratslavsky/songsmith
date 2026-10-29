@@ -930,3 +930,70 @@ async fn part_write_streams_tokens_and_honours_cancel() {
     ).await;
     assert!(cancelled.is_err(), "a cancelled write must not silently succeed");
 }
+
+/// Scenario — A STRUCTURE DRAFT IS ONLY A PROPOSAL: re-running Structure parks
+/// its output as a draft, and the draft must not touch the section spine.
+/// Discard leaves the spine exactly as it was; Accept is the moment the
+/// renames / new sections / deletions land (reconciled against the spine as
+/// it is at accept time). Regression for the 2026-10-28 drift report, bug 1:
+/// the reconcile used to run before the draft was parked, so Discard left the
+/// spine changed.
+#[tokio::test]
+async fn flow_structure_draft_touches_spine_only_on_accept() {
+    let (_db, conn) = mem_conn().await;
+    let fake = FakeClaude::new();
+    let song = make_song(&conn, "Proposal").await;
+    let structure = stage_of(&conn, &song.id, "structure").await;
+
+    // first run births the spine directly (no draft)
+    let first = fenced(&json!({ "keyNote": "low", "tempoNote": "", "sections": [
+        { "type": "verse",  "label": "Verse 1", "bars": 8, "role": "open" },
+        { "type": "chorus", "label": "Chorus",  "bars": 8, "role": "lift" },
+        { "type": "bridge", "label": "Bridge",  "bars": 4, "role": "turn" }
+    ]}));
+    let v1 = run_mock_landed(&conn, &fake, &structure.id, &first).await;
+    let before = spine_fp(&conn, &song.id).await;
+    let chorus_id = before[1].0.clone();
+    assert_eq!(before.len(), 3);
+
+    // the re-run renames the chorus in place, drops the bridge, adds an outro
+    let rerun = fenced(&json!({ "keyNote": "lower", "tempoNote": "", "sections": [
+        { "type": "verse",  "label": "Verse 1",   "bars": 8, "role": "open" },
+        { "type": "chorus", "label": "Big Chorus", "bars": 8, "role": "lift" },
+        { "type": "outro",  "label": "Outro",      "bars": 4, "role": "fade" }
+    ]}));
+    let out = run_mock(&conn, &fake, &structure.id, &rerun).await;
+    let draft = out.draft.expect("a structure re-run lands as a pending draft");
+    assert!(out.artifact.is_none());
+    assert_eq!(spine_fp(&conn, &song.id).await, before, "a pending structure draft must not touch the spine");
+    let preview = content_str(&draft.content);
+    assert!(preview.contains("Big Chorus") && preview.contains("Outro"), "the draft previews the proposed sections, got: {preview}");
+
+    // DISCARD: spine and current revision exactly as before
+    agent::discard_stage_draft(&conn, &structure.id).await.unwrap();
+    assert_eq!(spine_fp(&conn, &song.id).await, before, "discarding a structure draft leaves the spine alone");
+    let cur = db::current_artifact(&conn, &structure.id).await.unwrap().unwrap();
+    assert_eq!((cur.id.as_str(), cur.version), (v1.id.as_str(), 1));
+
+    // re-run and ACCEPT: now the proposal lands on the spine
+    let out = run_mock(&conn, &fake, &structure.id, &rerun).await;
+    assert!(out.draft.is_some());
+    assert_eq!(spine_fp(&conn, &song.id).await, before, "still untouched while pending");
+    let v2 = agent::accept_stage_draft(&conn, &structure.id).await.unwrap();
+    assert_eq!(v2.version, 2);
+    let rows = db::list_sections(&conn, &song.id).await.unwrap();
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, ["Verse 1", "Big Chorus", "Outro"], "accept applies the proposal");
+    assert_eq!(rows[1].id, chorus_id, "the in-place rename keeps the section's identity");
+    let v = content(&v2);
+    assert_eq!(v["data"], json!({ "keyNote": "lower", "tempoNote": "" }), "the accepted revision is notes-only");
+    assert_eq!(v["text"].as_str().unwrap(), structure_spine_text(&v["data"], &rows), "text renders from the updated spine");
+    assert_eq!(v["spine_snapshot"].as_array().unwrap().len(), 3);
+    assert!(db::get_stage_draft(&conn, &structure.id).await.unwrap().is_none(), "accept clears the draft");
+}
+
+fn content_str(c: &str) -> String {
+    serde_json::from_str::<Value>(c).ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| c.to_string())
+}

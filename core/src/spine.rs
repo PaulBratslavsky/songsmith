@@ -349,12 +349,18 @@ async fn reconcile_structure_run(conn: &Connection, song_id: &str, data: &mut Va
 ///   4. render `text` from the final data (structure: section map from the
 ///      SPINE) + append the ⚠ warn lines;
 ///   5. embed the spine snapshot beside `data`.
+///
+/// With `SpineWrite::Propose` (a re-run or self-check that parks as a draft)
+/// a structure run stops after step 2: nothing is written to the spine, and
+/// the content carries the proposed sections for `apply_structure_proposal`
+/// to land when the draft is accepted.
 pub(crate) async fn build_run_content(
     conn: &Connection,
     song: &Song,
     stage_type: &str,
     raw_text: &str,
     prior_content: Option<&str>,
+    spine_write: SpineWrite,
 ) -> Result<String> {
     let legacy = |raw: &str| -> Result<String> {
         let c = build_merged_content(stage_type, raw, prior_content)?;
@@ -391,39 +397,108 @@ pub(crate) async fn build_run_content(
     let prior_data = prior_content
         .and_then(|pc| serde_json::from_str::<Value>(pc).ok())
         .and_then(|v| v.get("data").cloned());
-    let mut merged = match &prior_data {
+    let merged = match &prior_data {
         Some(pd) => merge_frozen_sections(stage_type, pd, &nd),
         None => nd,
     };
 
     if stage_type == "structure" {
-        let birthing = spine.is_empty();
-        reconcile_structure_run(conn, &song.id, &mut merged, &mut warns).await?;
-        if birthing {
-            // this run just BIRTHED the spine for a legacy/new song — union in
-            // sections that exist only in other stages' artifacts, exactly
-            // like the startup migration (spec §Migration step 2)
-            union_artifact_sections(conn, &song.id).await?;
-        }
-        // Phase 4: the spine IS the sections (and the SONG owns key/tempo) —
-        // the structure artifact keeps only the prose notes
-        merged = json!({
-            "keyNote": merged.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
-            "tempoNote": merged.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
-        });
+        return match spine_write {
+            SpineWrite::Apply => apply_structure_sections(conn, &song.id, merged, warns).await,
+            SpineWrite::Propose => Ok(structure_proposal_content(&merged, &spine)),
+        };
     }
 
     let rows = db::list_sections(conn, &song.id).await?;
-    let mut text = if stage_type == "structure" {
-        crate::render::structure_spine_text(&merged, &rows)
-    } else {
-        render_stage_text(stage_type, &merged).unwrap_or_else(|| raw_text.to_string())
-    };
+    let mut text = render_stage_text(stage_type, &merged).unwrap_or_else(|| raw_text.to_string());
     for w in &warns {
         text.push_str("\n\n");
         text.push_str(w);
     }
     Ok(json!({ "kind": kind_for_stage(stage_type), "text": text, "data": merged, "spine_snapshot": snapshot_of(&rows) }).to_string())
+}
+
+/// Whether a stage run writes a structure run's sections to the spine now
+/// (`Apply`: a first run, which saves directly) or only proposes them
+/// (`Propose`: a run that parks as a draft — the spine changes on accept,
+/// and a discarded draft leaves it untouched). Non-structure stages never
+/// write the spine, so the mode only matters for structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpineWrite {
+    Apply,
+    Propose,
+}
+
+/// Land a structure run's frozen-merged sections on the spine and build the
+/// artifact content: reconcile (create / rename / delete-or-keep, D2), union
+/// in artifact-only sections when this birthed the spine, keep only
+/// `{keyNote,tempoNote}` in `data` (Phase 4), render the map from the spine
+/// and append the ⚠ warn lines.
+async fn apply_structure_sections(conn: &Connection, song_id: &str, mut merged: Value, mut warns: Vec<String>) -> Result<String> {
+    let birthing = db::list_sections(conn, song_id).await?.is_empty();
+    reconcile_structure_run(conn, song_id, &mut merged, &mut warns).await?;
+    if birthing {
+        // this run just BIRTHED the spine for a legacy/new song — union in
+        // sections that exist only in other stages' artifacts, exactly
+        // like the startup migration (spec §Migration step 2)
+        union_artifact_sections(conn, song_id).await?;
+    }
+    // Phase 4: the spine IS the sections (and the SONG owns key/tempo) —
+    // the structure artifact keeps only the prose notes
+    let notes = json!({
+        "keyNote": merged.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "tempoNote": merged.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+    let rows = db::list_sections(conn, song_id).await?;
+    let mut text = crate::render::structure_spine_text(&notes, &rows);
+    for w in &warns {
+        text.push_str("\n\n");
+        text.push_str(w);
+    }
+    Ok(json!({ "kind": "structure", "text": text, "data": notes, "spine_snapshot": snapshot_of(&rows) }).to_string())
+}
+
+/// A structure DRAFT's content: the proposed sections ride in `data` (with
+/// `spine_proposal: true`) and the preview text lists them; the spine is not
+/// touched. Model-sent key/bpm are dropped here too — the song owns them.
+fn structure_proposal_content(merged: &Value, spine: &[Section]) -> String {
+    let data = json!({
+        "keyNote": merged.get("keyNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "tempoNote": merged.get("tempoNote").and_then(|v| v.as_str()).unwrap_or(""),
+        "sections": merged.get("sections").cloned().unwrap_or_else(|| json!([])),
+    });
+    let text = crate::render::structure_editor_text(&data);
+    json!({ "kind": "structure", "text": text, "data": data, "spine_proposal": true, "spine_snapshot": snapshot_of(spine) }).to_string()
+}
+
+/// The proposed structure data a draft carries, if it is a spine proposal
+/// (see `structure_proposal_content`); `None` for every other draft.
+pub(crate) fn structure_proposal(content: &str) -> Option<Value> {
+    let v = serde_json::from_str::<Value>(content).ok()?;
+    if v.get("spine_proposal").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    v.get("data").cloned()
+}
+
+/// ACCEPT a structure draft's proposal: re-splice frozen sections against the
+/// stage's CURRENT artifact (a lock set since the run still wins), then land
+/// the sections on the spine as it is NOW — the same reconcile a first run
+/// does. Returns the content to save as the new revision.
+pub(crate) async fn apply_structure_proposal(
+    conn: &Connection,
+    song_id: &str,
+    proposed: &Value,
+    current_content: Option<&str>,
+) -> Result<String> {
+    let current_data = current_content
+        .and_then(|c| serde_json::from_str::<Value>(c).ok())
+        .and_then(|v| v.get("data").cloned());
+    let merged = match &current_data {
+        Some(cd) => merge_frozen_sections("structure", cd, proposed),
+        None => proposed.clone(),
+    };
+    apply_structure_sections(conn, song_id, merged, Vec::new()).await
 }
 
 /// USER-AUTHORITY spine replace (paste-lyrics import, Composer export): the
@@ -543,7 +618,7 @@ mod tests {
             { "type": "chorus", "label": "Huge Chorus", "bars": 8, "role": "lift" },
             { "type": "", "label": "Bridge", "bars": 4, "role": "the turn" }
         ]}));
-        let content = build_run_content(&conn, &song, "structure", &raw, None).await.unwrap();
+        let content = build_run_content(&conn, &song, "structure", &raw, None, SpineWrite::Apply).await.unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
 
         let rows = db::list_sections(&conn, &song.id).await.unwrap();
@@ -586,7 +661,7 @@ mod tests {
         db::save_artifact(&conn, &song.id, Some(&ch_stage), "chords", &ch).await.unwrap();
 
         let raw = fenced(&json!({ "sections": [ { "type": "", "label": "Verse 1", "bars": 8, "role": "" } ] }));
-        let content = build_run_content(&conn, &song, "structure", &raw, None).await.unwrap();
+        let content = build_run_content(&conn, &song, "structure", &raw, None, SpineWrite::Apply).await.unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
 
         let rows = db::list_sections(&conn, &song.id).await.unwrap();
@@ -624,7 +699,7 @@ mod tests {
 
         // the model rewrites the locked section's form entirely
         let raw = fenced(&json!({ "sections": [ { "type": "intro", "label": "Intro", "bars": 16, "role": "massive wall of sound" } ] }));
-        let content = build_run_content(&conn, &song, "structure", &raw, Some(&prior)).await.unwrap();
+        let content = build_run_content(&conn, &song, "structure", &raw, Some(&prior), SpineWrite::Apply).await.unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
 
         let rows = db::list_sections(&conn, &song.id).await.unwrap();
@@ -650,7 +725,7 @@ mod tests {
             { "label": "Chorus", "chords": [{"name": "F", "beats": 4}] },
             { "label": "Outro", "chords": [{"name": "C", "beats": 4}] }
         ]}));
-        let content = build_run_content(&conn, &song, "chords", &raw, None).await.unwrap();
+        let content = build_run_content(&conn, &song, "chords", &raw, None, SpineWrite::Apply).await.unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
 
         let secs = v["data"]["sections"].as_array().unwrap();
@@ -687,7 +762,7 @@ mod tests {
 
         // …and the model regenerates using the canonical (new) label
         let raw = fenced(&json!({ "sections": [ { "label": "Verso Uno", "chords": [{"name": "Dm", "beats": 4}] } ] }));
-        let content = build_run_content(&conn, &song, "chords", &raw, Some(&prior)).await.unwrap();
+        let content = build_run_content(&conn, &song, "chords", &raw, Some(&prior), SpineWrite::Apply).await.unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
 
         let secs = v["data"]["sections"].as_array().unwrap();
@@ -905,7 +980,7 @@ mod tests {
             { "type": "verse", "label": "Verse 1", "bars": 8, "role": "open" },
             { "type": "chorus", "label": "Chorus", "bars": 8, "role": "lift" }
         ]}));
-        let content = build_run_content(&conn, &song, "structure", &raw, None).await.unwrap();
+        let content = build_run_content(&conn, &song, "structure", &raw, None, SpineWrite::Apply).await.unwrap();
 
         let rows = db::list_sections(&conn, &song.id).await.unwrap();
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();

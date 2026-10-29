@@ -40,7 +40,10 @@ section { id TEXT PK, song_id TEXT, position INTEGER, label TEXT, type TEXT DEFA
 - The **user**: anywhere sections are edited today (StructureEditor add/remove/reorder/rename/bars;
   SectionChordsEditor's add/remove/reorder become spine ops on the same commands).
 - The **Structure stage AI run**: proposing sections IS its job — its output reconciles into the
-  spine (see Reconciliation). Other stages' runs may NOT create/rename/reorder sections; unmatched
+  spine (see Reconciliation). A FIRST run reconciles immediately; a re-run or self-check parks
+  as a draft that only PROPOSES its sections — reconciliation runs on **Accept draft**
+  (`spine::apply_structure_proposal`, against the spine as it is then), and **Discard** leaves the
+  spine untouched. Other stages' runs may NOT create/rename/reorder sections; unmatched
   labels in their output are attached by fuzzy label match or dropped with a visible warning in the
   artifact text (never silently invented).
 - **Imports** (paste-lyrics, Composer export): create/update spine rows the way they back-fill
