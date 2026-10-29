@@ -514,23 +514,25 @@ fn build_system_prompt(skill: &Skill, preset: &StylePreset, song: &Song) -> Stri
     p
 }
 
-/// The SONG owns key/tempo (header pickers, preset-seeded) — stages never do.
-/// A structure regeneration used to overwrite the user's picked key/BPM with the
-/// skill's own choice (user-reported: pickers said F# minor / 100, the regen
-/// reset them to A minor / 138). Deterministic guarantee, freeze-style: splice
-/// the song's current key/bpm into any structure artifact before save and
-/// re-render its text. Skills may only SUGGEST changes in prose notes.
-/// (Called by `spine::build_run_content`'s legacy path; the spine path splices
-/// the same values directly into the reconciled data.)
-pub(crate) fn enforce_song_key_tempo(song: &Song, stage_type: &str, content: &str) -> String {
+/// The SONG owns key/tempo (header pickers, preset-seeded) — stages never do,
+/// and nothing keeps a copy (docs/SONG-FACTS.md). A structure regeneration
+/// once overwrote the producer's picked key/BPM with the skill's own choice
+/// (F# minor / 100 reset to A minor / 138); a later fix spliced the song's
+/// values INTO the artifact, which was still a second copy that went stale on
+/// the next key change. Now any `key`/`bpm` in structure output is DROPPED
+/// and the text re-rendered — skills may only SUGGEST changes in prose notes.
+/// (Called by `spine::build_run_content`'s legacy path; the spine path keeps
+/// only `{keyNote,tempoNote}` already.)
+pub(crate) fn strip_structure_key_tempo(stage_type: &str, content: &str) -> String {
     if stage_type != "structure" {
         return content.to_string();
     }
     let Ok(mut v) = serde_json::from_str::<Value>(content) else { return content.to_string() };
-    let Some(data) = v.get_mut("data").filter(|d| d.is_object()) else { return content.to_string() };
-    data["key"] = json!({ "root": song.key_root, "mode": song.key_mode });
-    data["bpm"] = json!(song.bpm);
-    let data_owned = data.clone();
+    let Some(data) = v.get_mut("data").and_then(|d| d.as_object_mut()) else { return content.to_string() };
+    if data.remove("key").is_none() & data.remove("bpm").is_none() {
+        return content.to_string(); // nothing to drop — leave the save byte-identical
+    }
+    let data_owned = Value::Object(data.clone());
     if let Some(text) = render_stage_text(stage_type, &data_owned) {
         v["text"] = json!(text);
     }
@@ -3128,11 +3130,14 @@ mod tests {
         assert!(cprompt.contains(LATER_STAGES_BANNER), "empty stage keeps the derive banner");
     }
 
-    /// The SONG owns key/tempo: a structure regeneration whose model output
-    /// carries a different key/BPM gets the song's current values spliced back
-    /// (user-reported: pickers said F# minor / 100, regen reset to A minor / 138).
+    /// The SONG owns key/tempo (one home per fact): structure output that
+    /// still carries a key/BPM — the legacy save path, for output that isn't
+    /// section-shaped — has them DROPPED, not overwritten with a copy of the
+    /// song's values (a copy goes stale the moment the producer changes key).
+    /// User-reported origin: pickers said F# minor / 100, regen reset to
+    /// A minor / 138. Drift report 2026-10-28, bug 6.
     #[tokio::test]
-    async fn structure_regen_cannot_override_song_key_tempo() {
+    async fn structure_output_never_stores_key_tempo() {
         let (_db, conn) = mem_conn().await;
         let preset = db::create_preset(&conn, StyleInput {
             name: "Test".into(), genre: "rock".into(), mood: "".into(), influences: "".into(),
@@ -3151,17 +3156,25 @@ mod tests {
                        "sections": [{"type": "verse", "label": "Verse 1", "bars": 8, "role": "open"}] }
         }).to_string();
 
-        let enforced = enforce_song_key_tempo(&song, "structure", &model_out);
-        let v: Value = serde_json::from_str(&enforced).unwrap();
-        assert_eq!(v["data"]["key"]["root"], "F#", "song key root wins");
-        assert_eq!(v["data"]["key"]["mode"], "minor");
-        assert_eq!(v["data"]["bpm"], 100, "song bpm wins");
+        let stripped = strip_structure_key_tempo("structure", &model_out);
+        let v: Value = serde_json::from_str(&stripped).unwrap();
+        assert!(v["data"].get("key").is_none(), "structure data must not store a key");
+        assert!(v["data"].get("bpm").is_none(), "structure data must not store a bpm");
         let text = v["text"].as_str().unwrap();
-        assert!(text.contains("F#") && text.contains("100"), "re-rendered text reflects the song's key/tempo, got: {text}");
+        assert!(!text.contains("**KEY:**") && !text.contains("**TEMPO:**"), "no key/tempo fact line from the model, got: {text}");
         // notes stay as prose (suggestions allowed there)
         assert_eq!(v["data"]["keyNote"], "A minor carries...");
+        assert!(text.contains("**KEY NOTE:** A minor carries..."), "the note still renders, got: {text}");
         // non-structure stages pass through untouched
-        assert_eq!(enforce_song_key_tempo(&song, "lyrics", &model_out), model_out);
+        assert_eq!(strip_structure_key_tempo("lyrics", &model_out), model_out);
+        let _ = song;
+
+        // and the structure skill no longer asks the model for key/bpm fields
+        db::seed_skills(&conn).await.unwrap();
+        let skill = db::get_active_skill_for_stage(&conn, "structure").await.unwrap().unwrap();
+        assert!(!skill.instructions.contains("\"bpm\""), "structure skill must not ask for a bpm field");
+        assert!(!skill.instructions.contains("\"key\": {"), "structure skill must not ask for a key field");
+        assert!(!skill.instructions.contains("ECHO"), "no 'echo the key/bpm' instruction");
     }
 
     /// Paste-parser header gate (user-hit): Suno ARRANGEMENT tags must not

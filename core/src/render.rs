@@ -47,8 +47,8 @@ pub(crate) fn chords_editor_text(c: &Value) -> String {
 /// Mirror of `StructureEditor.structureToMarkdown`. The SONG owns key/tempo
 /// (docs/SONG-FACTS.md): new editor/back-fill saves don't carry `key`/`bpm` in
 /// the data, so the KEY/TEMPO fact lines render only when the data still has
-/// them — legacy rows, and generation saves (where `enforce_song_key_tempo`
-/// re-injects the song's current values). Without the facts, the prose notes
+/// them — legacy rows only (new saves drop any model-sent key/bpm, see
+/// `strip_structure_key_tempo`). Without the facts, the prose notes
 /// render on their own as KEY NOTE / TEMPO NOTE lines.
 pub(crate) fn structure_editor_text(d: &Value) -> String {
     let key_note = d.get("keyNote").and_then(|v| v.as_str()).unwrap_or("");
