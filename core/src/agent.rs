@@ -1679,12 +1679,14 @@ pub async fn create_song_from_lyrics(conn: &Connection, settings: &Settings, sty
 pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode: &str, bpm: i64) -> Result<crate::models::Song> {
     static KEY_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_at_a_time = KEY_CHANGE.lock().await;
-    let before = db::get_song(conn, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
-    // Work out the transposed chords FIRST, then write the key and the chord
-    // revision in ONE transaction: a failed chord save used to leave the new
-    // key stored over the old chords (PR review, 2026-10-29).
-    let rewrites = transposed_stages(conn, song_id, &before.key_root, root).await?;
+    // Read the old key and chords, then write the key and the chord/lyric
+    // revisions, all in ONE transaction: a failed save used to leave the new
+    // key over the old chords, and reading before BEGIN let an edit that
+    // committed in between be overwritten by a rewrite of stale content
+    // (PR review, 2026-10-29).
     let tx = conn.transaction().await?;
+    let before = db::get_song(&tx, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
+    let rewrites = transposed_stages(&tx, song_id, &before.key_root, root).await?;
     let song = db::update_song_key(&tx, song_id, root, mode, bpm).await?;
     for (stage_id, kind, content) in &rewrites {
         db::save_artifact(&tx, song_id, Some(stage_id), kind, content).await?;
