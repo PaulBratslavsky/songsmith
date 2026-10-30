@@ -238,7 +238,7 @@ async fn generate_song_melody(app: tauri::AppHandle, state: State<'_, AppState>,
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     let key = write_key("lead", &song_id);
     let cancel = agent::CancelToken::new();
-    state.running.lock().unwrap().insert(key.clone(), cancel.clone());
+    claim_write(&state.running, &key, "lead", &cancel)?;
     let result = song_core::agent::generate_song_melody(
         &state.conn, &settings, &song_id, section.as_deref(),
         write_progress(&app, &song_id, "lead"), Some(cancel),
@@ -252,6 +252,22 @@ async fn generate_song_melody(app: tauri::AppHandle, state: State<'_, AppState>,
 /// the namespaces can't collide because stage keys are bare stage ids.
 fn write_key(kind: &str, song_id: &str) -> String {
     format!("{kind}:{song_id}")
+}
+
+/// Register a write's cancel token, or refuse when the same song + part is
+/// already being written. The 🎶 Melody button and the variations row's lead
+/// share the `lead:` key but not a busy state, so both could run: the second
+/// replaced the first's token (✋ cancel then couldn't stop it) and whichever
+/// finished last overwrote the other's take (PR review, 2026-10-29).
+fn claim_write(running: &Mutex<HashMap<String, agent::CancelToken>>, key: &str, part: &str, cancel: &agent::CancelToken) -> R<()> {
+    use std::collections::hash_map::Entry;
+    match running.lock().unwrap().entry(key.to_string()) {
+        Entry::Occupied(_) => Err(format!("A {part} write is already running for this song — wait for it, or ✋ cancel it first.")),
+        Entry::Vacant(v) => {
+            v.insert(cancel.clone());
+            Ok(())
+        }
+    }
 }
 
 /// Token sink for a part/melody write. The Melodist streams a big JSON blob for
@@ -1213,7 +1229,7 @@ async fn generate_song_part(app: tauri::AppHandle, state: State<'_, AppState>, s
     let settings = db::get_settings(&state.conn).await.map_err(e2s)?;
     let key = write_key(&part, &song_id);
     let cancel = agent::CancelToken::new();
-    state.running.lock().unwrap().insert(key.clone(), cancel.clone());
+    claim_write(&state.running, &key, &part, &cancel)?;
     let result = song_core::agent::generate_song_part(
         &state.conn, &settings, &song_id, &part,
         write_progress(&app, &song_id, &part), Some(cancel),
@@ -1516,5 +1532,27 @@ mod tests {
         assert_eq!(extract_url("go to https://x.test/auth now").as_deref(), Some("https://x.test/auth"));
         // The "Paste code here if prompted > " prompt carries no URL.
         assert_eq!(extract_url("Paste code here if prompted > "), None);
+    }
+}
+
+#[cfg(test)]
+mod write_claim_tests {
+    use super::*;
+
+    /// A second write for the same song + part is refused, so it can't steal
+    /// the first one's cancel token or overwrite its take; another part, or
+    /// the same part on another song, still runs.
+    #[test]
+    fn a_second_write_for_the_same_song_and_part_is_refused() {
+        let running = Mutex::new(HashMap::new());
+        let first = agent::CancelToken::new();
+        assert!(claim_write(&running, &write_key("lead", "s1"), "lead", &first).is_ok());
+        let err = claim_write(&running, &write_key("lead", "s1"), "lead", &agent::CancelToken::new()).unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        assert!(claim_write(&running, &write_key("bass", "s1"), "bass", &agent::CancelToken::new()).is_ok());
+        assert!(claim_write(&running, &write_key("lead", "s2"), "lead", &agent::CancelToken::new()).is_ok());
+        // once the first write is done (its key removed), the part is free again
+        running.lock().unwrap().remove(&write_key("lead", "s1"));
+        assert!(claim_write(&running, &write_key("lead", "s1"), "lead", &agent::CancelToken::new()).is_ok());
     }
 }
