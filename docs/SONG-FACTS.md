@@ -25,6 +25,11 @@ regen used to reset the user's key pickers; the enforce splice patched it; this 
    prose in notes. The structure skill no longer asks for `key`/`bpm` fields, and
    `strip_structure_key_tempo` drops them if a model still sends them (2026-10-29 — it used to
    splice the song's values in, which kept a second copy alive).
+7. Chord NAMES are absolute, so a human key change (`update_song_key` → `agent::change_song_key`)
+   moves every name the song stores: the Chords stage's `sections[].chords` AND the inline
+   `[C]word` tags in the Lyrics stage's `sections[].lines` (the Composer lays its chords from those
+   tags). Both rewrites and the new key commit in ONE transaction, one key change at a time
+   (2026-10-29). Annotations like `[x2]` are not chords and stay as written.
 
 ## Explicitly deferred → since completed
 - **The section spine** (labels/order/bars) was the deferred item here — DONE, see

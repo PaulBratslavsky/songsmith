@@ -1683,56 +1683,105 @@ pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode:
     // Work out the transposed chords FIRST, then write the key and the chord
     // revision in ONE transaction: a failed chord save used to leave the new
     // key stored over the old chords (PR review, 2026-10-29).
-    let rewrite = transposed_chords(conn, song_id, &before.key_root, root).await?;
+    let rewrites = transposed_stages(conn, song_id, &before.key_root, root).await?;
     let tx = conn.transaction().await?;
     let song = db::update_song_key(&tx, song_id, root, mode, bpm).await?;
-    if let Some((stage_id, content)) = rewrite {
-        db::save_artifact(&tx, song_id, Some(&stage_id), "chords", &content).await?;
+    for (stage_id, kind, content) in &rewrites {
+        db::save_artifact(&tx, song_id, Some(stage_id), kind, content).await?;
     }
     tx.commit().await?;
     Ok(song)
 }
 
-/// The Chords stage's current artifact with every chord name moved from `from`
-/// to `to`, as (stage id, new content) — or None when there is nothing to move
-/// (same key, unreadable root, no chords stage, artifact or chord names).
-async fn transposed_chords(conn: &Connection, song_id: &str, from: &str, to: &str) -> Result<Option<(String, String)>> {
+/// Every stage artifact that names absolute chords, with each name moved from
+/// `from` to `to`, as (stage id, kind, new content). Two stages hold chord
+/// names: Chords (`sections[].chords`) and Lyrics (inline `[C]word` tags in
+/// `sections[].lines`, which the Composer lays its chords from). Empty when
+/// there is nothing to move (same key, unreadable root, no names).
+async fn transposed_stages(conn: &Connection, song_id: &str, from: &str, to: &str) -> Result<Vec<(String, String, String)>> {
     let (Some(from), Some(to_pc)) = (crate::midi::note_pitch_class(from), crate::midi::note_pitch_class(to)) else {
-        return Ok(None);
+        return Ok(vec![]);
     };
     let delta = (to_pc - from).rem_euclid(12);
     if delta == 0 {
-        return Ok(None);
+        return Ok(vec![]);
     }
     let flats = to.contains('b');
+    let mv = |name: &str| crate::midi::transpose_chord_name(name, delta, flats);
 
-    let Some(stage) = db::list_stages(conn, song_id).await?.into_iter().find(|s| s.r#type == "chords") else {
-        return Ok(None);
-    };
-    let Some(art) = db::current_artifact(conn, &stage.id).await? else { return Ok(None) };
-    let Ok(mut v) = serde_json::from_str::<Value>(&art.content) else { return Ok(None) };
-    let mut moved = 0usize;
-    if let Some(secs) = v.pointer_mut("/data/sections").and_then(|x| x.as_array_mut()) {
-        for sec in secs.iter_mut() {
-            let Some(chords) = sec.get_mut("chords").and_then(|c| c.as_array_mut()) else { continue };
-            for c in chords.iter_mut() {
-                // both shapes: a bare string, or {name, beats}
-                if let Some(name) = c.as_str().map(String::from) {
-                    *c = json!(crate::midi::transpose_chord_name(&name, delta, flats));
-                    moved += 1;
-                } else if let Some(name) = c.get("name").and_then(|n| n.as_str()).map(String::from) {
-                    c["name"] = json!(crate::midi::transpose_chord_name(&name, delta, flats));
-                    moved += 1;
+    let mut out = vec![];
+    for stage in db::list_stages(conn, song_id).await? {
+        if stage.r#type != "chords" && stage.r#type != "lyrics" {
+            continue;
+        }
+        let Some(art) = db::current_artifact(conn, &stage.id).await? else { continue };
+        let Ok(mut v) = serde_json::from_str::<Value>(&art.content) else { continue };
+        let mut moved = 0usize;
+        if let Some(secs) = v.pointer_mut("/data/sections").and_then(|x| x.as_array_mut()) {
+            for sec in secs.iter_mut() {
+                if stage.r#type == "chords" {
+                    let Some(chords) = sec.get_mut("chords").and_then(|c| c.as_array_mut()) else { continue };
+                    for c in chords.iter_mut() {
+                        // both shapes: a bare string, or {name, beats}
+                        if let Some(name) = c.as_str().map(String::from) {
+                            *c = json!(mv(&name));
+                            moved += 1;
+                        } else if let Some(name) = c.get("name").and_then(|n| n.as_str()).map(String::from) {
+                            c["name"] = json!(mv(&name));
+                            moved += 1;
+                        }
+                    }
+                } else {
+                    let Some(lines) = sec.get_mut("lines").and_then(|l| l.as_array_mut()) else { continue };
+                    for l in lines.iter_mut() {
+                        let Some(line) = l.as_str() else { continue };
+                        let (new, n) = transpose_line_chord_tags(line, &mv);
+                        if n > 0 {
+                            *l = json!(new);
+                            moved += n;
+                        }
+                    }
                 }
             }
         }
+        if moved == 0 {
+            continue;
+        }
+        let data = v.get("data").cloned().unwrap_or_else(|| json!({}));
+        v["text"] = json!(if stage.r#type == "chords" {
+            chords_editor_text(&data)
+        } else {
+            crate::render::render_stage_text("lyrics", &data).unwrap_or_default()
+        });
+        out.push((stage.id, stage.r#type.clone(), v.to_string()));
     }
-    if moved == 0 {
-        return Ok(None);
+    Ok(out)
+}
+
+/// A lyric line with every chord-shaped `[tag]` passed through `mv`, and how
+/// many moved. Annotations (`[x2]`, `[whispered]`) and the words are kept
+/// exactly as written — same chord test as the paste import's `line_chord_tags`.
+fn transpose_line_chord_tags(line: &str, mv: &dyn Fn(&str) -> String) -> (String, usize) {
+    let mut out = String::with_capacity(line.len());
+    let mut moved = 0;
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else { break };
+        out.push_str(&rest[..=open]);
+        let inner = &after[..close];
+        let name = inner.trim();
+        if !name.is_empty() && parse_chord_tag(name).is_some() {
+            out.push_str(&mv(name));
+            moved += 1;
+        } else {
+            out.push_str(inner);
+        }
+        out.push(']');
+        rest = &after[close + 1..];
     }
-    let data = v.get("data").cloned().unwrap_or_else(|| json!({}));
-    v["text"] = json!(chords_editor_text(&data));
-    Ok(Some((stage.id, v.to_string())))
+    out.push_str(rest);
+    (out, moved)
 }
 
 /// Phase 1 render round-trip ("Analyze → Composer"): analyze an audio file (a
@@ -2244,6 +2293,42 @@ mod tests {
         assert_eq!(ch[3], json!("D#"), "a bare-string chord transposes as well");
         // it lands as a NEW revision, so History can undo it
         assert!(db::list_artifact_revisions(&conn, &cid).await.unwrap().len() >= 2);
+    }
+
+    /// The chord tags written INTO the lyrics move with the key too. The
+    /// Composer lays chords from those tags, so a key change that moved only
+    /// the Chords stage reopened the song with the old names (PR review,
+    /// 2026-10-29). Non-chord tags ([x2], [whispered]) stay as written.
+    #[tokio::test]
+    async fn changing_the_key_transposes_the_lyric_chord_tags() {
+        let (_db, conn) = mem_conn().await;
+        let preset = db::create_preset(&conn, StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = db::create_song(&conn, &preset.id, "S").await.unwrap();
+        db::update_song_key(&conn, &song.id, "A", "minor", 120).await.unwrap();
+        let lid = db::list_stages(&conn, &song.id).await.unwrap()
+            .into_iter().find(|s| s.r#type == "lyrics").unwrap().id;
+        let data = json!({ "sections": [
+            { "label": "Verse 1", "lines": ["[Am]Streetlights drown in [F]silver water [x2]", "I count the ripples"] },
+            { "label": "Chorus", "frozen": true, "lines": ["[C]We dance where the [G/B]rain [whispered]glows"] }
+        ] });
+        db::save_artifact(&conn, &song.id, Some(&lid), "lyrics",
+            &json!({ "kind": "lyrics", "text": "", "data": data }).to_string()).await.unwrap();
+
+        // A minor -> C minor is +3 semitones
+        change_song_key(&conn, &song.id, "C", "minor", 120).await.unwrap();
+        let art = db::current_artifact(&conn, &lid).await.unwrap().unwrap();
+        let v: Value = serde_json::from_str(&art.content).unwrap();
+        assert_eq!(v["data"]["sections"][0]["lines"][0], json!("[Cm]Streetlights drown in [G#]silver water [x2]"),
+            "chord tags move; a repeat marker is not a chord");
+        assert_eq!(v["data"]["sections"][0]["lines"][1], json!("I count the ripples"), "an untagged line is untouched");
+        assert_eq!(v["data"]["sections"][1]["lines"][0], json!("[D#]We dance where the [A#/D]rain [whispered]glows"),
+            "a locked section moves too — the key is the song's");
+        assert_eq!(v["data"]["sections"][1]["frozen"], json!(true), "the lock itself is kept");
+        assert_eq!(v["text"].as_str().unwrap(), crate::render::render_stage_text("lyrics", &v["data"]).unwrap(),
+            "the text is rebuilt from the moved data");
     }
 
     /// Two key changes in flight at once (fast picker clicks) must not both
