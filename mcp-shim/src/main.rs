@@ -21,10 +21,12 @@ use tokio::io::AsyncBufReadExt;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let db_path = std::env::var("SONGSMITH_DB").unwrap_or_else(|_| default_db_path());
-    let database = db::open(std::path::Path::new(&db_path)).await?;
-    // db::connect sets PRAGMA busy_timeout so writes racing the desktop app wait
-    // for the lock instead of surfacing "database is locked" as raw tool errors
-    let conn = db::connect(&database).await?;
+    // Shared by every tool call; each call takes its OWN connection from the
+    // pool. SQLite transactions belong to a connection, so on a shared one a
+    // write from one concurrent call joined another call's open transaction and
+    // was lost if it rolled back. Connections also set PRAGMA busy_timeout, so a
+    // write racing the desktop app (or another call) waits for the lock.
+    let database = std::sync::Arc::new(db::open(std::path::Path::new(&db_path)).await?);
 
     // The single stdout writer: every response is one full JSON line, written
     // and flushed by this task alone — concurrent tool tasks can't interleave.
@@ -75,13 +77,12 @@ async fn main() -> anyhow::Result<()> {
             // Each call runs on its own task so a long run_stage can't block
             // the loop; the response channel serializes the actual writes.
             "tools/call" => {
-                let conn = conn.clone();
+                let database = database.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                    let settings = db::get_settings(&conn).await.unwrap_or_default();
-                    let resp = match tools::dispatch(&conn, &settings, &name, &args).await {
+                    let resp = match call_tool(&database, &name, &args).await {
                         Ok(result) => reply(id, json!({
                             "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
                         })),
@@ -117,4 +118,11 @@ fn error(id: Option<Value>, code: i64, message: &str) -> Value {
 fn default_db_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     format!("{home}/Library/Application Support/com.songsmithstudio.desktop/songsmith-studio.db")
+}
+
+/// Run one tool call on its own connection (see `main`).
+async fn call_tool(database: &db::Pool, name: &str, args: &Value) -> anyhow::Result<Value> {
+    let conn = database.get().await?;
+    let settings = db::get_settings(&conn).await.unwrap_or_default();
+    tools::dispatch(&conn, &settings, name, args).await
 }

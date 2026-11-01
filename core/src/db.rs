@@ -15,13 +15,90 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-pub async fn open(path: &Path) -> Result<Database> {
+/// Open (and migrate) the database file, as a pool of connections.
+pub async fn open(path: &Path) -> Result<Pool> {
     let db = Builder::new_local(path).build().await?;
     let conn = connect(&db).await?;
-    migrate(&conn).await?;
-    migrate_sections(&conn).await?;
-    seed_skills(&conn).await?;
-    Ok(db)
+    let setup = async {
+        migrate(&conn).await?;
+        migrate_sections(&conn).await?;
+        seed_skills(&conn).await
+    }.await;
+    if let Err(e) = setup {
+        never_close(conn);
+        return Err(e);
+    }
+    Ok(Pool { db, idle: std::sync::Mutex::new(vec![conn]) })
+}
+
+/// Let a connection go WITHOUT dropping it. Dropping the last handle to a libsql
+/// 0.6 local connection closes the SQLite handle twice (`LibsqlConnection::drop`
+/// and then the inner `Connection::drop` both call `sqlite3_close_v2` on the
+/// same pointer; 0.10 nulls it after the first close) — a use-after-free that
+/// segfaults under macOS guard malloc. Leaking the handle is the safe side:
+/// every connection here is in autocommit, so nothing unsaved is lost, and the
+/// OS reclaims it at exit. Remove this once libsql is upgraded.
+fn never_close(conn: Connection) {
+    std::mem::forget(conn);
+}
+
+/// The database plus its idle connections. Each app command and shim tool call
+/// takes its own connection with `get()`: SQLite transactions belong to a
+/// connection, so on a shared one a concurrent task's write joined another
+/// task's open transaction and was lost if it rolled back.
+///
+/// Connections are REUSED and never dropped, not even with the pool (see
+/// `never_close`). The pool only grows to the most connections ever in use at
+/// once.
+pub struct Pool {
+    db: Database,
+    idle: std::sync::Mutex<Vec<Connection>>,
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        let idle = self.idle.get_mut().unwrap_or_else(|e| e.into_inner());
+        idle.drain(..).for_each(never_close);
+    }
+}
+
+impl Pool {
+    /// An idle connection, or a new one when every connection is busy.
+    pub async fn get(&self) -> Result<PooledConn<'_>> {
+        let reused = self.idle.lock().unwrap().pop();
+        let conn = match reused {
+            Some(c) => c,
+            None => connect(&self.db).await?,
+        };
+        let pooled = PooledConn { pool: self, conn: Some(conn) };
+        // A dropped libsql Transaction rolls back, but a raw `BEGIN` left open
+        // by a task that failed would make the next task's writes join it.
+        if !pooled.is_autocommit() {
+            pooled.execute("ROLLBACK", ()).await?;
+        }
+        Ok(pooled)
+    }
+}
+
+/// A connection borrowed from a `Pool`; it goes back to the pool on drop.
+pub struct PooledConn<'a> {
+    pool: &'a Pool,
+    conn: Option<Connection>,
+}
+
+impl std::ops::Deref for PooledConn<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("connection is present until drop")
+    }
+}
+
+impl Drop for PooledConn<'_> {
+    fn drop(&mut self) {
+        if let Some(c) = self.conn.take() {
+            self.pool.idle.lock().unwrap_or_else(|e| e.into_inner()).push(c);
+        }
+    }
 }
 
 /// Connect + per-connection PRAGMAs. `busy_timeout` makes concurrent writers
@@ -31,9 +108,25 @@ pub async fn open(path: &Path) -> Result<Database> {
 pub async fn connect(db: &Database) -> Result<Connection> {
     let conn = db.connect()?;
     // PRAGMA returns a result row — use query (execute rejects row-returning statements)
-    let mut rows = conn.query("PRAGMA busy_timeout = 5000", ()).await?;
-    while rows.next().await?.is_some() {}
+    let pragma = async {
+        let mut rows = conn.query("PRAGMA busy_timeout = 5000", ()).await?;
+        while rows.next().await?.is_some() {}
+        Ok::<_, libsql::Error>(())
+    }.await;
+    if let Err(e) = pragma {
+        never_close(conn);
+        return Err(e.into());
+    }
     Ok(conn)
+}
+
+/// Start a write transaction. IMMEDIATE takes the write lock up front: each app
+/// command and shim tool call has its own connection (`Pool`), and two DEFERRED
+/// transactions that both read and then write deadlock (SQLITE_BUSY, which skips
+/// the busy timeout). Read anything the writes depend on through the returned
+/// transaction, so another connection can't change it in between.
+pub async fn begin(conn: &Connection) -> Result<libsql::Transaction> {
+    Ok(conn.transaction_with_behavior(libsql::TransactionBehavior::Immediate).await?)
 }
 
 pub async fn migrate(conn: &Connection) -> Result<()> {
@@ -153,7 +246,7 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     // TRANSACTIONAL: the shift + insert must land together — a crash between them
     // would re-shift ordinals on the next launch (permanent stage-order corruption).
     // Errors propagate; the transaction rolls back on failure so a retry is clean.
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     tx.execute(
         "UPDATE stage SET ordinal = ordinal + 1 WHERE type IN ('lyrics','prompt') \
          AND song_id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await?;
@@ -350,7 +443,7 @@ async fn migrate_song_sections(conn: &Connection, song_id: &str) -> Result<()> {
 
     // 6) rows + rewrites land together (spec: transactional)
     let ts = now();
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     for (idx, e) in spine.iter().enumerate() {
         tx.execute(
             "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
@@ -659,7 +752,7 @@ pub async fn create_song(conn: &Connection, preset_id: &str, title: &str) -> Res
     let (key_root, key_mode) = key.unwrap_or_else(|| ("A".into(), "minor".into()));
     let bpm = bpm.unwrap_or(120);
     // song + its stage spec land atomically — no half-created songs
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     tx.execute(
         "INSERT INTO song (id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, intent, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'in_progress', 'concept', ?4, ?5, ?6, '', ?7, ?7)",
@@ -730,7 +823,7 @@ pub async fn set_song_current_stage(conn: &Connection, id: &str, stage_type: &st
 /// from would lose work; the link is cleared instead.
 pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
     // all-or-nothing — never leave orphaned stages/artifacts behind
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     tx.execute("DELETE FROM stage_draft WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM artifact WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
@@ -766,6 +859,13 @@ pub async fn get_section(conn: &Connection, id: &str) -> Result<Option<Section>>
     let mut rows = conn.query(&format!("SELECT {SECTION_COLS} FROM section WHERE id = ?1"), params![id]).await?;
     Ok(rows.next().await?.as_ref().map(map_section))
 }
+/// One past the song's last section position (0 for an empty spine).
+async fn next_section_position(conn: &Connection, song_id: &str) -> Result<i64> {
+    let mut rows = conn
+        .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
+        .await?;
+    Ok(rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0))
+}
 /// Add a spine row. `position: None` appends at the end; `Some(p)` inserts at
 /// `p` (clamped), shifting later sections down — shift + insert land together.
 pub async fn create_section(
@@ -773,14 +873,9 @@ pub async fn create_section(
 ) -> Result<Section> {
     let id = new_id();
     let ts = now();
-    let end: i64 = {
-        let mut rows = conn
-            .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
-            .await?;
-        rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0)
-    };
+    let tx = begin(conn).await?;
+    let end = next_section_position(&tx, song_id).await?;
     let pos = position.map(|p| p.clamp(0, end)).unwrap_or(end);
-    let tx = conn.transaction().await?;
     tx.execute("UPDATE section SET position = position + 1 WHERE song_id = ?1 AND position >= ?2", params![song_id, pos]).await?;
     tx.execute(
         "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
@@ -797,14 +892,9 @@ pub async fn create_section(
 /// form takes defaults (type ""/bars 8/role "") — the snapshot is light.
 pub(crate) async fn restore_section_row(conn: &Connection, id: &str, song_id: &str, position: i64, label: &str) -> Result<Section> {
     let ts = now();
-    let end: i64 = {
-        let mut rows = conn
-            .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
-            .await?;
-        rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0)
-    };
+    let tx = begin(conn).await?;
+    let end = next_section_position(&tx, song_id).await?;
     let pos = position.clamp(0, end);
-    let tx = conn.transaction().await?;
     tx.execute("UPDATE section SET position = position + 1 WHERE song_id = ?1 AND position >= ?2", params![song_id, pos]).await?;
     tx.execute(
         "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
@@ -825,8 +915,8 @@ pub async fn update_section(conn: &Connection, id: &str, label: &str, r#type: &s
 }
 /// Delete a spine row and close the position gap — both or neither.
 pub async fn delete_section(conn: &Connection, id: &str) -> Result<()> {
-    let sec = get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found"))?;
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
+    let sec = get_section(&tx, id).await?.ok_or_else(|| anyhow!("section not found"))?;
     tx.execute("DELETE FROM section WHERE id = ?1", params![id]).await?;
     tx.execute(
         "UPDATE section SET position = position - 1 WHERE song_id = ?1 AND position > ?2",
@@ -838,14 +928,14 @@ pub async fn delete_section(conn: &Connection, id: &str) -> Result<()> {
 /// Reorder a song's spine: `ids` must be exactly the song's section ids (each
 /// once — a full permutation), in the new order. All positions land together.
 pub async fn reorder_sections(conn: &Connection, song_id: &str, ids: &[String]) -> Result<Vec<Section>> {
-    let existing = list_sections(conn, song_id).await?;
+    let tx = begin(conn).await?;
+    let existing = list_sections(&tx, song_id).await?;
     let have: std::collections::HashSet<&str> = existing.iter().map(|x| x.id.as_str()).collect();
     let given: std::collections::HashSet<&str> = ids.iter().map(|x| x.as_str()).collect();
     if ids.len() != existing.len() || have != given {
         return Err(anyhow!("reorder_sections needs every section id of the song exactly once ({} sections)", existing.len()));
     }
     let ts = now();
-    let tx = conn.transaction().await?;
     for (pos, id) in ids.iter().enumerate() {
         tx.execute("UPDATE section SET position = ?2, updated_at = ?3 WHERE id = ?1", params![id.as_str(), pos as i64, ts.clone()]).await?;
     }
@@ -1287,7 +1377,7 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
 }
 pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
     // one transaction: settings change as a unit, never a half-applied mix
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd), ("musicai_api_key", &st.musicai_api_key), ("musicai_workflow", &st.musicai_workflow)] {
         tx.execute(
             "INSERT INTO setting (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2",
@@ -1835,5 +1925,76 @@ mod tests {
         save_composition(&conn, Some(&a.id), "older", None, "{}").await.unwrap();
         let list = list_compositions(&conn).await.unwrap();
         assert_eq!(list[0].id, a.id);
+    }
+
+    /// A file-backed DB, as the app and the mcp-shim use: unlike `:memory:`,
+    /// several connections see the same data, so cross-connection races are real.
+    async fn file_db() -> (Pool, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("songsmith-db-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (open(&dir.join("t.db")).await.unwrap(), dir)
+    }
+
+    /// REGRESSION (PR #3 review, 2026-10-29): every app command and shim tool
+    /// call gets its own connection, so two section deletes can run at once.
+    /// `delete_section` read the row's position BEFORE its transaction, so the
+    /// second delete closed the gap at a stale position and left a hole; and a
+    /// DEFERRED read-then-write transaction on each connection deadlocks
+    /// (SQLITE_BUSY, which skips the busy timeout). Positions must stay 0..n.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_section_deletes_on_separate_connections_keep_positions_whole() {
+        let (pool, dir) = file_db().await;
+        let pool = std::sync::Arc::new(pool);
+        let conn = pool.get().await.unwrap();
+        let preset = create_preset(&conn, crate::models::StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = create_song(&conn, &preset.id, "Race").await.unwrap();
+        for round in 0..30 {
+            for s in list_sections(&conn, &song.id).await.unwrap() {
+                delete_section(&conn, &s.id).await.unwrap();
+            }
+            let mut ids = vec![];
+            for n in 0..4 {
+                ids.push(create_section(&conn, &song.id, &format!("S{n}"), "verse", 8, "", None).await.unwrap().id);
+            }
+            let (p1, p2) = (pool.clone(), pool.clone());
+            let (a, b) = (ids[1].clone(), ids[2].clone());
+            let t1 = tokio::spawn(async move { delete_section(&p1.get().await.unwrap(), &a).await });
+            let t2 = tokio::spawn(async move { delete_section(&p2.get().await.unwrap(), &b).await });
+            t1.await.unwrap().unwrap_or_else(|e| panic!("round {round}: first delete failed: {e}"));
+            t2.await.unwrap().unwrap_or_else(|e| panic!("round {round}: second delete failed: {e}"));
+            let got: Vec<(String, i64)> = list_sections(&conn, &song.id).await.unwrap()
+                .into_iter().map(|s| (s.label, s.position)).collect();
+            assert_eq!(got, vec![("S0".to_string(), 0), ("S3".to_string(), 1)], "round {round}: positions have a hole");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A pooled connection handed back mid-transaction must not carry that
+    /// transaction to the next task, or the next task's writes join it — the
+    /// very bug the pool exists to prevent. And a returned connection is reused
+    /// rather than dropped (dropping one double-closes it under libsql 0.6).
+    #[tokio::test]
+    async fn a_pooled_connection_comes_back_clean_and_is_reused() {
+        let (pool, dir) = file_db().await;
+        {
+            let c = pool.get().await.unwrap();
+            c.execute("BEGIN", ()).await.unwrap();
+            c.execute("INSERT INTO setting (key, value) VALUES ('left_open', '1')", ()).await.unwrap();
+        }
+        assert_eq!(pool.idle.lock().unwrap().len(), 1, "the connection must go back to the pool");
+        let c = pool.get().await.unwrap();
+        assert!(c.is_autocommit(), "a reused connection must not still be inside a transaction");
+        c.execute("INSERT INTO setting (key, value) VALUES ('next_task', '1')", ()).await.unwrap();
+        let mut rows = c.query("SELECT key FROM setting WHERE key IN ('left_open', 'next_task')", ()).await.unwrap();
+        let mut keys = vec![];
+        while let Some(r) = rows.next().await.unwrap() { keys.push(r.get::<String>(0).unwrap()); }
+        assert_eq!(keys, vec!["next_task".to_string()]);
+        drop(rows);
+        drop(c);
+        assert_eq!(pool.idle.lock().unwrap().len(), 1, "one task at a time needs only one connection");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
