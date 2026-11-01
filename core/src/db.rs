@@ -19,10 +19,27 @@ pub fn new_id() -> String {
 pub async fn open(path: &Path) -> Result<Pool> {
     let db = Builder::new_local(path).build().await?;
     let conn = connect(&db).await?;
-    migrate(&conn).await?;
-    migrate_sections(&conn).await?;
-    seed_skills(&conn).await?;
+    let setup = async {
+        migrate(&conn).await?;
+        migrate_sections(&conn).await?;
+        seed_skills(&conn).await
+    }.await;
+    if let Err(e) = setup {
+        never_close(conn);
+        return Err(e);
+    }
     Ok(Pool { db, idle: std::sync::Mutex::new(vec![conn]) })
+}
+
+/// Let a connection go WITHOUT dropping it. Dropping the last handle to a libsql
+/// 0.6 local connection closes the SQLite handle twice (`LibsqlConnection::drop`
+/// and then the inner `Connection::drop` both call `sqlite3_close_v2` on the
+/// same pointer; 0.10 nulls it after the first close) — a use-after-free that
+/// segfaults under macOS guard malloc. Leaking the handle is the safe side:
+/// every connection here is in autocommit, so nothing unsaved is lost, and the
+/// OS reclaims it at exit. Remove this once libsql is upgraded.
+fn never_close(conn: Connection) {
+    std::mem::forget(conn);
 }
 
 /// The database plus its idle connections. Each app command and shim tool call
@@ -30,14 +47,19 @@ pub async fn open(path: &Path) -> Result<Pool> {
 /// connection, so on a shared one a concurrent task's write joined another
 /// task's open transaction and was lost if it rolled back.
 ///
-/// Connections are REUSED, never dropped: dropping the last handle to a libsql
-/// 0.6 local connection closes the SQLite handle twice (`LibsqlConnection::drop`
-/// and then the inner `Connection::drop` both call `sqlite3_close_v2` on the
-/// same pointer; 0.10 nulls it after the first close). The pool only grows to
-/// the most connections ever in use at once.
+/// Connections are REUSED and never dropped, not even with the pool (see
+/// `never_close`). The pool only grows to the most connections ever in use at
+/// once.
 pub struct Pool {
     db: Database,
     idle: std::sync::Mutex<Vec<Connection>>,
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        let idle = self.idle.get_mut().unwrap_or_else(|e| e.into_inner());
+        idle.drain(..).for_each(never_close);
+    }
 }
 
 impl Pool {
@@ -86,8 +108,15 @@ impl Drop for PooledConn<'_> {
 pub async fn connect(db: &Database) -> Result<Connection> {
     let conn = db.connect()?;
     // PRAGMA returns a result row — use query (execute rejects row-returning statements)
-    let mut rows = conn.query("PRAGMA busy_timeout = 5000", ()).await?;
-    while rows.next().await?.is_some() {}
+    let pragma = async {
+        let mut rows = conn.query("PRAGMA busy_timeout = 5000", ()).await?;
+        while rows.next().await?.is_some() {}
+        Ok::<_, libsql::Error>(())
+    }.await;
+    if let Err(e) = pragma {
+        never_close(conn);
+        return Err(e.into());
+    }
     Ok(conn)
 }
 
