@@ -36,6 +36,15 @@ pub async fn connect(db: &Database) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Start a write transaction. IMMEDIATE takes the write lock up front: each app
+/// command and shim tool call has its own connection, and two DEFERRED
+/// transactions that both read and then write deadlock (SQLITE_BUSY, which skips
+/// the busy timeout). Read anything the writes depend on through the returned
+/// transaction, so another connection can't change it in between.
+pub async fn begin(conn: &Connection) -> Result<libsql::Transaction> {
+    Ok(conn.transaction_with_behavior(libsql::TransactionBehavior::Immediate).await?)
+}
+
 pub async fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -153,7 +162,7 @@ pub async fn migrate(conn: &Connection) -> Result<()> {
     // TRANSACTIONAL: the shift + insert must land together — a crash between them
     // would re-shift ordinals on the next launch (permanent stage-order corruption).
     // Errors propagate; the transaction rolls back on failure so a retry is clean.
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     tx.execute(
         "UPDATE stage SET ordinal = ordinal + 1 WHERE type IN ('lyrics','prompt') \
          AND song_id NOT IN (SELECT song_id FROM stage WHERE type='lyric_spec')", ()).await?;
@@ -350,7 +359,7 @@ async fn migrate_song_sections(conn: &Connection, song_id: &str) -> Result<()> {
 
     // 6) rows + rewrites land together (spec: transactional)
     let ts = now();
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     for (idx, e) in spine.iter().enumerate() {
         tx.execute(
             "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
@@ -659,7 +668,7 @@ pub async fn create_song(conn: &Connection, preset_id: &str, title: &str) -> Res
     let (key_root, key_mode) = key.unwrap_or_else(|| ("A".into(), "minor".into()));
     let bpm = bpm.unwrap_or(120);
     // song + its stage spec land atomically — no half-created songs
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     tx.execute(
         "INSERT INTO song (id, style_preset_id, title, status, current_stage, key_root, key_mode, bpm, intent, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'in_progress', 'concept', ?4, ?5, ?6, '', ?7, ?7)",
@@ -730,7 +739,7 @@ pub async fn set_song_current_stage(conn: &Connection, id: &str, stage_type: &st
 /// from would lose work; the link is cleared instead.
 pub async fn delete_song(conn: &Connection, id: &str) -> Result<()> {
     // all-or-nothing — never leave orphaned stages/artifacts behind
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     tx.execute("DELETE FROM stage_draft WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM artifact WHERE song_id = ?1", params![id]).await?;
     tx.execute("DELETE FROM stage WHERE song_id = ?1", params![id]).await?;
@@ -766,6 +775,13 @@ pub async fn get_section(conn: &Connection, id: &str) -> Result<Option<Section>>
     let mut rows = conn.query(&format!("SELECT {SECTION_COLS} FROM section WHERE id = ?1"), params![id]).await?;
     Ok(rows.next().await?.as_ref().map(map_section))
 }
+/// One past the song's last section position (0 for an empty spine).
+async fn next_section_position(conn: &Connection, song_id: &str) -> Result<i64> {
+    let mut rows = conn
+        .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
+        .await?;
+    Ok(rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0))
+}
 /// Add a spine row. `position: None` appends at the end; `Some(p)` inserts at
 /// `p` (clamped), shifting later sections down — shift + insert land together.
 pub async fn create_section(
@@ -773,14 +789,9 @@ pub async fn create_section(
 ) -> Result<Section> {
     let id = new_id();
     let ts = now();
-    let end: i64 = {
-        let mut rows = conn
-            .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
-            .await?;
-        rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0)
-    };
+    let tx = begin(conn).await?;
+    let end = next_section_position(&tx, song_id).await?;
     let pos = position.map(|p| p.clamp(0, end)).unwrap_or(end);
-    let tx = conn.transaction().await?;
     tx.execute("UPDATE section SET position = position + 1 WHERE song_id = ?1 AND position >= ?2", params![song_id, pos]).await?;
     tx.execute(
         "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
@@ -797,14 +808,9 @@ pub async fn create_section(
 /// form takes defaults (type ""/bars 8/role "") — the snapshot is light.
 pub(crate) async fn restore_section_row(conn: &Connection, id: &str, song_id: &str, position: i64, label: &str) -> Result<Section> {
     let ts = now();
-    let end: i64 = {
-        let mut rows = conn
-            .query("SELECT COALESCE(MAX(position) + 1, 0) FROM section WHERE song_id = ?1", params![song_id])
-            .await?;
-        rows.next().await?.as_ref().map(|r| i(r, 0)).unwrap_or(0)
-    };
+    let tx = begin(conn).await?;
+    let end = next_section_position(&tx, song_id).await?;
     let pos = position.clamp(0, end);
-    let tx = conn.transaction().await?;
     tx.execute("UPDATE section SET position = position + 1 WHERE song_id = ?1 AND position >= ?2", params![song_id, pos]).await?;
     tx.execute(
         "INSERT INTO section (id, song_id, position, label, type, bars, role, created_at, updated_at)
@@ -825,8 +831,8 @@ pub async fn update_section(conn: &Connection, id: &str, label: &str, r#type: &s
 }
 /// Delete a spine row and close the position gap — both or neither.
 pub async fn delete_section(conn: &Connection, id: &str) -> Result<()> {
-    let sec = get_section(conn, id).await?.ok_or_else(|| anyhow!("section not found"))?;
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
+    let sec = get_section(&tx, id).await?.ok_or_else(|| anyhow!("section not found"))?;
     tx.execute("DELETE FROM section WHERE id = ?1", params![id]).await?;
     tx.execute(
         "UPDATE section SET position = position - 1 WHERE song_id = ?1 AND position > ?2",
@@ -838,14 +844,14 @@ pub async fn delete_section(conn: &Connection, id: &str) -> Result<()> {
 /// Reorder a song's spine: `ids` must be exactly the song's section ids (each
 /// once — a full permutation), in the new order. All positions land together.
 pub async fn reorder_sections(conn: &Connection, song_id: &str, ids: &[String]) -> Result<Vec<Section>> {
-    let existing = list_sections(conn, song_id).await?;
+    let tx = begin(conn).await?;
+    let existing = list_sections(&tx, song_id).await?;
     let have: std::collections::HashSet<&str> = existing.iter().map(|x| x.id.as_str()).collect();
     let given: std::collections::HashSet<&str> = ids.iter().map(|x| x.as_str()).collect();
     if ids.len() != existing.len() || have != given {
         return Err(anyhow!("reorder_sections needs every section id of the song exactly once ({} sections)", existing.len()));
     }
     let ts = now();
-    let tx = conn.transaction().await?;
     for (pos, id) in ids.iter().enumerate() {
         tx.execute("UPDATE section SET position = ?2, updated_at = ?3 WHERE id = ?1", params![id.as_str(), pos as i64, ts.clone()]).await?;
     }
@@ -1287,7 +1293,7 @@ pub async fn get_settings(conn: &Connection) -> Result<Settings> {
 }
 pub async fn set_settings(conn: &Connection, st: &Settings) -> Result<()> {
     // one transaction: settings change as a unit, never a half-applied mix
-    let tx = conn.transaction().await?;
+    let tx = begin(conn).await?;
     for (k, v) in [("claude_model", &st.claude_model), ("claude_bin", &st.claude_bin), ("ableton_mcp", &st.ableton_mcp), ("music_folder", &st.music_folder), ("analyzer_cmd", &st.analyzer_cmd), ("musicai_api_key", &st.musicai_api_key), ("musicai_workflow", &st.musicai_workflow)] {
         tx.execute(
             "INSERT INTO setting (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=?2",
@@ -1835,5 +1841,50 @@ mod tests {
         save_composition(&conn, Some(&a.id), "older", None, "{}").await.unwrap();
         let list = list_compositions(&conn).await.unwrap();
         assert_eq!(list[0].id, a.id);
+    }
+
+    /// A file-backed DB, as the app and the mcp-shim use: unlike `:memory:`,
+    /// several connections see the same data, so cross-connection races are real.
+    async fn file_db() -> (Database, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("songsmith-db-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (open(&dir.join("t.db")).await.unwrap(), dir)
+    }
+
+    /// REGRESSION (PR #3 review, 2026-10-29): every app command and shim tool
+    /// call gets its own connection, so two section deletes can run at once.
+    /// `delete_section` read the row's position BEFORE its transaction, so the
+    /// second delete closed the gap at a stale position and left a hole; and a
+    /// DEFERRED read-then-write transaction on each connection deadlocks
+    /// (SQLITE_BUSY, which skips the busy timeout). Positions must stay 0..n.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_section_deletes_on_separate_connections_keep_positions_whole() {
+        let (db, dir) = file_db().await;
+        let conn = connect(&db).await.unwrap();
+        let preset = create_preset(&conn, crate::models::StyleInput {
+            name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
+            key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
+        }).await.unwrap();
+        let song = create_song(&conn, &preset.id, "Race").await.unwrap();
+        let db = std::sync::Arc::new(db);
+        for round in 0..30 {
+            for s in list_sections(&conn, &song.id).await.unwrap() {
+                delete_section(&conn, &s.id).await.unwrap();
+            }
+            let mut ids = vec![];
+            for n in 0..4 {
+                ids.push(create_section(&conn, &song.id, &format!("S{n}"), "verse", 8, "", None).await.unwrap().id);
+            }
+            let (d1, d2) = (db.clone(), db.clone());
+            let (a, b) = (ids[1].clone(), ids[2].clone());
+            let t1 = tokio::spawn(async move { delete_section(&connect(&d1).await.unwrap(), &a).await });
+            let t2 = tokio::spawn(async move { delete_section(&connect(&d2).await.unwrap(), &b).await });
+            t1.await.unwrap().unwrap_or_else(|e| panic!("round {round}: first delete failed: {e}"));
+            t2.await.unwrap().unwrap_or_else(|e| panic!("round {round}: second delete failed: {e}"));
+            let got: Vec<(String, i64)> = list_sections(&conn, &song.id).await.unwrap()
+                .into_iter().map(|s| (s.label, s.position)).collect();
+            assert_eq!(got, vec![("S0".to_string(), 0), ("S3".to_string(), 1)], "round {round}: positions have a hole");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1684,7 +1684,7 @@ pub async fn change_song_key(conn: &Connection, song_id: &str, root: &str, mode:
     // key over the old chords, and reading before BEGIN let an edit that
     // committed in between be overwritten by a rewrite of stale content
     // (PR review, 2026-10-29).
-    let tx = conn.transaction().await?;
+    let tx = db::begin(conn).await?;
     let before = db::get_song(&tx, song_id).await?.ok_or_else(|| anyhow!("song not found"))?;
     let rewrites = transposed_stages(&tx, song_id, &before.key_root, root).await?;
     let song = db::update_song_key(&tx, song_id, root, mode, bpm).await?;
