@@ -21,10 +21,10 @@ use tokio::io::AsyncBufReadExt;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let db_path = std::env::var("SONGSMITH_DB").unwrap_or_else(|_| default_db_path());
-    // Shared by every tool call; each call opens its OWN connection from it.
-    // SQLite transactions belong to a connection, so on a shared one a write
-    // from one concurrent call joined another call's open transaction and was
-    // lost if it rolled back. db::connect also sets PRAGMA busy_timeout, so a
+    // Shared by every tool call; each call takes its OWN connection from the
+    // pool. SQLite transactions belong to a connection, so on a shared one a
+    // write from one concurrent call joined another call's open transaction and
+    // was lost if it rolled back. Connections also set PRAGMA busy_timeout, so a
     // write racing the desktop app (or another call) waits for the lock.
     let database = std::sync::Arc::new(db::open(std::path::Path::new(&db_path)).await?);
 
@@ -121,8 +121,8 @@ fn default_db_path() -> String {
 }
 
 /// Run one tool call on its own connection (see `main`).
-async fn call_tool(database: &libsql::Database, name: &str, args: &Value) -> anyhow::Result<Value> {
-    let conn = db::connect(database).await?;
+async fn call_tool(database: &db::Pool, name: &str, args: &Value) -> anyhow::Result<Value> {
+    let conn = database.get().await?;
     let settings = db::get_settings(&conn).await.unwrap_or_default();
     tools::dispatch(&conn, &settings, name, args).await
 }

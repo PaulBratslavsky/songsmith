@@ -15,13 +15,68 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-pub async fn open(path: &Path) -> Result<Database> {
+/// Open (and migrate) the database file, as a pool of connections.
+pub async fn open(path: &Path) -> Result<Pool> {
     let db = Builder::new_local(path).build().await?;
     let conn = connect(&db).await?;
     migrate(&conn).await?;
     migrate_sections(&conn).await?;
     seed_skills(&conn).await?;
-    Ok(db)
+    Ok(Pool { db, idle: std::sync::Mutex::new(vec![conn]) })
+}
+
+/// The database plus its idle connections. Each app command and shim tool call
+/// takes its own connection with `get()`: SQLite transactions belong to a
+/// connection, so on a shared one a concurrent task's write joined another
+/// task's open transaction and was lost if it rolled back.
+///
+/// Connections are REUSED, never dropped: dropping the last handle to a libsql
+/// 0.6 local connection closes the SQLite handle twice (`LibsqlConnection::drop`
+/// and then the inner `Connection::drop` both call `sqlite3_close_v2` on the
+/// same pointer; 0.10 nulls it after the first close). The pool only grows to
+/// the most connections ever in use at once.
+pub struct Pool {
+    db: Database,
+    idle: std::sync::Mutex<Vec<Connection>>,
+}
+
+impl Pool {
+    /// An idle connection, or a new one when every connection is busy.
+    pub async fn get(&self) -> Result<PooledConn<'_>> {
+        let reused = self.idle.lock().unwrap().pop();
+        let conn = match reused {
+            Some(c) => c,
+            None => connect(&self.db).await?,
+        };
+        let pooled = PooledConn { pool: self, conn: Some(conn) };
+        // A dropped libsql Transaction rolls back, but a raw `BEGIN` left open
+        // by a task that failed would make the next task's writes join it.
+        if !pooled.is_autocommit() {
+            pooled.execute("ROLLBACK", ()).await?;
+        }
+        Ok(pooled)
+    }
+}
+
+/// A connection borrowed from a `Pool`; it goes back to the pool on drop.
+pub struct PooledConn<'a> {
+    pool: &'a Pool,
+    conn: Option<Connection>,
+}
+
+impl std::ops::Deref for PooledConn<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("connection is present until drop")
+    }
+}
+
+impl Drop for PooledConn<'_> {
+    fn drop(&mut self) {
+        if let Some(c) = self.conn.take() {
+            self.pool.idle.lock().unwrap_or_else(|e| e.into_inner()).push(c);
+        }
+    }
 }
 
 /// Connect + per-connection PRAGMAs. `busy_timeout` makes concurrent writers
@@ -37,7 +92,7 @@ pub async fn connect(db: &Database) -> Result<Connection> {
 }
 
 /// Start a write transaction. IMMEDIATE takes the write lock up front: each app
-/// command and shim tool call has its own connection, and two DEFERRED
+/// command and shim tool call has its own connection (`Pool`), and two DEFERRED
 /// transactions that both read and then write deadlock (SQLITE_BUSY, which skips
 /// the busy timeout). Read anything the writes depend on through the returned
 /// transaction, so another connection can't change it in between.
@@ -1845,7 +1900,7 @@ mod tests {
 
     /// A file-backed DB, as the app and the mcp-shim use: unlike `:memory:`,
     /// several connections see the same data, so cross-connection races are real.
-    async fn file_db() -> (Database, std::path::PathBuf) {
+    async fn file_db() -> (Pool, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("songsmith-db-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         (open(&dir.join("t.db")).await.unwrap(), dir)
@@ -1859,14 +1914,14 @@ mod tests {
     /// (SQLITE_BUSY, which skips the busy timeout). Positions must stay 0..n.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_section_deletes_on_separate_connections_keep_positions_whole() {
-        let (db, dir) = file_db().await;
-        let conn = connect(&db).await.unwrap();
+        let (pool, dir) = file_db().await;
+        let pool = std::sync::Arc::new(pool);
+        let conn = pool.get().await.unwrap();
         let preset = create_preset(&conn, crate::models::StyleInput {
             name: "T".into(), genre: "".into(), mood: "".into(), influences: "".into(),
             key_tempo_feel: "".into(), vocal_range: "".into(), themes: "".into(), lyric_exemplars: "".into(),
         }).await.unwrap();
         let song = create_song(&conn, &preset.id, "Race").await.unwrap();
-        let db = std::sync::Arc::new(db);
         for round in 0..30 {
             for s in list_sections(&conn, &song.id).await.unwrap() {
                 delete_section(&conn, &s.id).await.unwrap();
@@ -1875,16 +1930,42 @@ mod tests {
             for n in 0..4 {
                 ids.push(create_section(&conn, &song.id, &format!("S{n}"), "verse", 8, "", None).await.unwrap().id);
             }
-            let (d1, d2) = (db.clone(), db.clone());
+            let (p1, p2) = (pool.clone(), pool.clone());
             let (a, b) = (ids[1].clone(), ids[2].clone());
-            let t1 = tokio::spawn(async move { delete_section(&connect(&d1).await.unwrap(), &a).await });
-            let t2 = tokio::spawn(async move { delete_section(&connect(&d2).await.unwrap(), &b).await });
+            let t1 = tokio::spawn(async move { delete_section(&p1.get().await.unwrap(), &a).await });
+            let t2 = tokio::spawn(async move { delete_section(&p2.get().await.unwrap(), &b).await });
             t1.await.unwrap().unwrap_or_else(|e| panic!("round {round}: first delete failed: {e}"));
             t2.await.unwrap().unwrap_or_else(|e| panic!("round {round}: second delete failed: {e}"));
             let got: Vec<(String, i64)> = list_sections(&conn, &song.id).await.unwrap()
                 .into_iter().map(|s| (s.label, s.position)).collect();
             assert_eq!(got, vec![("S0".to_string(), 0), ("S3".to_string(), 1)], "round {round}: positions have a hole");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A pooled connection handed back mid-transaction must not carry that
+    /// transaction to the next task, or the next task's writes join it — the
+    /// very bug the pool exists to prevent. And a returned connection is reused
+    /// rather than dropped (dropping one double-closes it under libsql 0.6).
+    #[tokio::test]
+    async fn a_pooled_connection_comes_back_clean_and_is_reused() {
+        let (pool, dir) = file_db().await;
+        {
+            let c = pool.get().await.unwrap();
+            c.execute("BEGIN", ()).await.unwrap();
+            c.execute("INSERT INTO setting (key, value) VALUES ('left_open', '1')", ()).await.unwrap();
+        }
+        assert_eq!(pool.idle.lock().unwrap().len(), 1, "the connection must go back to the pool");
+        let c = pool.get().await.unwrap();
+        assert!(c.is_autocommit(), "a reused connection must not still be inside a transaction");
+        c.execute("INSERT INTO setting (key, value) VALUES ('next_task', '1')", ()).await.unwrap();
+        let mut rows = c.query("SELECT key FROM setting WHERE key IN ('left_open', 'next_task')", ()).await.unwrap();
+        let mut keys = vec![];
+        while let Some(r) = rows.next().await.unwrap() { keys.push(r.get::<String>(0).unwrap()); }
+        assert_eq!(keys, vec!["next_task".to_string()]);
+        drop(rows);
+        drop(c);
+        assert_eq!(pool.idle.lock().unwrap().len(), 1, "one task at a time needs only one connection");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

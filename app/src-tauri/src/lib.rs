@@ -10,11 +10,11 @@ use song_core::models::*;
 use song_core::{agent, db, tools};
 
 struct AppState {
-    /// The database. Every command opens its own connection through `conn()`
+    /// The database. Every command takes its own connection through `conn()`
     /// rather than sharing one: SQLite transactions belong to a connection, so
     /// on a shared one any write a concurrent command made while a transaction
     /// was open joined it — and was lost if that transaction rolled back.
-    db: libsql::Database,
+    db: db::Pool,
     db_path: String,
     /// stage ids with an in-flight run, to dedupe concurrent requests.
     inflight: Mutex<HashSet<String>>,
@@ -35,9 +35,9 @@ fn e2s<E: std::fmt::Display>(e: E) -> String {
 }
 
 impl AppState {
-    /// A fresh connection for one command (see `AppState::db`).
-    async fn conn(&self) -> R<Connection> {
-        db::connect(&self.db).await.map_err(e2s)
+    /// A connection of this command's own (see `AppState::db`).
+    async fn conn(&self) -> R<db::PooledConn<'_>> {
+        self.db.get().await.map_err(e2s)
     }
 }
 
@@ -45,38 +45,38 @@ impl AppState {
 
 #[tauri::command]
 async fn list_style_presets(state: State<'_, AppState>) -> R<Vec<StylePreset>> {
-    db::list_presets(&state.conn().await?).await.map_err(e2s)
+    db::list_presets(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn get_style_preset(state: State<'_, AppState>, id: String) -> R<Option<StylePreset>> {
-    db::get_preset(&state.conn().await?, &id).await.map_err(e2s)
+    db::get_preset(&*state.conn().await?, &id).await.map_err(e2s)
 }
 #[tauri::command]
 async fn create_style_preset(state: State<'_, AppState>, input: StyleInput) -> R<StylePreset> {
-    db::create_preset(&state.conn().await?, input).await.map_err(e2s)
+    db::create_preset(&*state.conn().await?, input).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_style_preset(state: State<'_, AppState>, id: String, input: StyleInput) -> R<StylePreset> {
-    db::update_preset(&state.conn().await?, &id, input).await.map_err(e2s)
+    db::update_preset(&*state.conn().await?, &id, input).await.map_err(e2s)
 }
 
 /// Store a preset's Ableton arrangement profile JSON ("" = keyword fallback).
 #[tauri::command]
 async fn set_preset_arrangement(state: State<'_, AppState>, id: String, arrangement: String) -> R<StylePreset> {
-    db::set_preset_arrangement(&state.conn().await?, &id, &arrangement).await.map_err(e2s)
+    db::set_preset_arrangement(&*state.conn().await?, &id, &arrangement).await.map_err(e2s)
 }
 
 /// Claude maps the preset's style onto the arrangement profile and stores it.
 #[tauri::command]
 async fn generate_preset_arrangement(state: State<'_, AppState>, id: String) -> R<StylePreset> {
-    song_core::agent::generate_preset_arrangement(&state.conn().await?, &db::get_settings(&state.conn().await?).await.map_err(e2s)?, &id).await.map_err(e2s)
+    song_core::agent::generate_preset_arrangement(&*state.conn().await?, &db::get_settings(&*state.conn().await?).await.map_err(e2s)?, &id).await.map_err(e2s)
 }
 
 /// Auto-generate a style preset from a name/seed. Streams `preset_token` events.
 #[tauri::command]
 async fn generate_style_preset(app: tauri::AppHandle, state: State<'_, AppState>, name: String, notes: Option<String>) -> R<StyleInput> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
-    agent::generate_style_preset(&state.conn().await?, &settings, &name, notes.as_deref(), move |tok| {
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
+    agent::generate_style_preset(&*state.conn().await?, &settings, &name, notes.as_deref(), move |tok| {
         let _ = app.emit("preset_token", serde_json::json!({ "token": tok }));
     })
     .await
@@ -87,32 +87,32 @@ async fn generate_style_preset(app: tauri::AppHandle, state: State<'_, AppState>
 
 #[tauri::command]
 async fn create_song(state: State<'_, AppState>, style_preset_id: String, title: String, intent: Option<String>) -> R<Song> {
-    let song = db::create_song(&state.conn().await?, &style_preset_id, &title).await.map_err(e2s)?;
+    let song = db::create_song(&*state.conn().await?, &style_preset_id, &title).await.map_err(e2s)?;
     // optional north-star brief straight from the create form
     match intent.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        Some(i) => db::update_song_intent(&state.conn().await?, &song.id, i).await.map_err(e2s),
+        Some(i) => db::update_song_intent(&*state.conn().await?, &song.id, i).await.map_err(e2s),
         None => Ok(song),
     }
 }
 #[tauri::command]
 async fn list_songs(state: State<'_, AppState>) -> R<Vec<Song>> {
-    db::list_songs(&state.conn().await?).await.map_err(e2s)
+    db::list_songs(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn get_song(state: State<'_, AppState>, id: String) -> R<Option<SongDetail>> {
-    db::get_song_detail(&state.conn().await?, &id).await.map_err(e2s)
+    db::get_song_detail(&*state.conn().await?, &id).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_status(state: State<'_, AppState>, id: String, status: String) -> R<Song> {
-    db::update_song_status(&state.conn().await?, &id, &status).await.map_err(e2s)
+    db::update_song_status(&*state.conn().await?, &id, &status).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_title(state: State<'_, AppState>, id: String, title: String) -> R<Song> {
-    db::update_song_title(&state.conn().await?, &id, &title).await.map_err(e2s)
+    db::update_song_title(&*state.conn().await?, &id, &title).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_intent(state: State<'_, AppState>, id: String, intent: String) -> R<Song> {
-    db::update_song_intent(&state.conn().await?, &id, &intent).await.map_err(e2s)
+    db::update_song_intent(&*state.conn().await?, &id, &intent).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_key(state: State<'_, AppState>, id: String, root: String, mode: String, bpm: i64) -> R<Song> {
@@ -120,19 +120,19 @@ async fn update_song_key(state: State<'_, AppState>, id: String, root: String, m
     // see agent::change_song_key. Internal callers that set the key TO MATCH
     // content they just derived (import, tag inference, composition creators)
     // keep using db::update_song_key directly and must NOT transpose.
-    agent::change_song_key(&state.conn().await?, &id, &root, &mode, bpm).await.map_err(e2s)
+    agent::change_song_key(&*state.conn().await?, &id, &root, &mode, bpm).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_song_voicings(state: State<'_, AppState>, id: String, voicings: String) -> R<Song> {
-    db::update_song_voicings(&state.conn().await?, &id, &voicings).await.map_err(e2s)
+    db::update_song_voicings(&*state.conn().await?, &id, &voicings).await.map_err(e2s)
 }
 #[tauri::command]
 async fn import_reference(app: tauri::AppHandle, state: State<'_, AppState>, audio_path: String) -> R<String> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     let progress = move |msg: String| {
         let _ = app.emit("import_progress", serde_json::json!({ "message": msg }));
     };
-    song_core::agent::import_reference_full(&state.conn().await?, &settings, &audio_path, &progress).await.map_err(e2s)
+    song_core::agent::import_reference_full(&*state.conn().await?, &settings, &audio_path, &progress).await.map_err(e2s)
 }
 // ---- Setup doctor (Task B, 2026-07-27): first-run environment checks + the
 // bundled AbletonMCP Remote Script installer, so the app works beyond the dev
@@ -155,7 +155,7 @@ fn ableton_live_dirs() -> Vec<std::path::PathBuf> {
 
 #[tauri::command]
 async fn run_doctor(state: State<'_, AppState>) -> R<Vec<DoctorCheck>> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     let mut out: Vec<DoctorCheck> = vec![];
     let check = |name: &str, status: &str, detail: String| DoctorCheck { name: name.into(), status: status.into(), detail };
 
@@ -246,12 +246,14 @@ async fn install_ableton_script() -> R<String> {
 
 #[tauri::command]
 async fn generate_song_melody(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String, section: Option<String>) -> R<serde_json::Value> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    // connect before claiming: a `?` after the claim would strand it
+    let conn = state.conn().await?;
+    let settings = db::get_settings(&conn).await.map_err(e2s)?;
     let key = write_key("lead", &song_id);
     let cancel = agent::CancelToken::new();
     claim_write(&state.running, &key, "lead", &cancel)?;
     let result = song_core::agent::generate_song_melody(
-        &state.conn().await?, &settings, &song_id, section.as_deref(),
+        &conn, &settings, &song_id, section.as_deref(),
         write_progress(&app, &song_id, "lead"), Some(cancel),
     ).await;
     state.running.lock().unwrap().remove(&key);
@@ -304,56 +306,56 @@ fn write_progress(app: &tauri::AppHandle, song_id: &str, part: &str) -> impl Fn(
 }
 #[tauri::command]
 async fn resume_import(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     // carry the song id so a banner only shows ITS song's progress — every
     // mounted banner used to echo any running import (audit 2026-07-28)
     let sid = song_id.clone();
     let progress = move |msg: String| {
         let _ = app.emit("import_progress", serde_json::json!({ "song_id": sid, "message": msg }));
     };
-    song_core::agent::resume_import(&state.conn().await?, &settings, &song_id, &progress).await.map_err(e2s)
+    song_core::agent::resume_import(&*state.conn().await?, &settings, &song_id, &progress).await.map_err(e2s)
 }
 #[tauri::command]
 async fn self_check_stage(state: State<'_, AppState>, stage_id: String) -> R<StageDraft> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
-    song_core::agent::self_check_stage(&state.conn().await?, &settings, &stage_id).await.map_err(e2s)
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
+    song_core::agent::self_check_stage(&*state.conn().await?, &settings, &stage_id).await.map_err(e2s)
 }
 #[tauri::command]
 async fn refine_field(state: State<'_, AppState>, stage_label: String, field_label: String, current: String, instruction: String, song_id: Option<String>) -> R<String> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
-    agent::refine_field(&state.conn().await?, &settings, song_id.as_deref(), &stage_label, &field_label, &current, &instruction)
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
+    agent::refine_field(&*state.conn().await?, &settings, song_id.as_deref(), &stage_label, &field_label, &current, &instruction)
         .await
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
 async fn delete_song(state: State<'_, AppState>, id: String) -> R<()> {
-    db::delete_song(&state.conn().await?, &id).await.map_err(e2s)
+    db::delete_song(&*state.conn().await?, &id).await.map_err(e2s)
 }
 
 // ---- Section spine (docs/SECTION-SPINE-SPEC.md — Phase 1: CRUD only) --------
 
 #[tauri::command]
 async fn list_sections(state: State<'_, AppState>, song_id: String) -> R<Vec<Section>> {
-    db::list_sections(&state.conn().await?, &song_id).await.map_err(e2s)
+    db::list_sections(&*state.conn().await?, &song_id).await.map_err(e2s)
 }
 /// `position: None` appends at the end; `Some(p)` inserts at `p` (clamped).
 #[tauri::command]
 async fn create_section(state: State<'_, AppState>, song_id: String, label: String, section_type: String, bars: i64, role: String, position: Option<i64>) -> R<Section> {
-    db::create_section(&state.conn().await?, &song_id, &label, &section_type, bars, &role, position).await.map_err(e2s)
+    db::create_section(&*state.conn().await?, &song_id, &label, &section_type, bars, &role, position).await.map_err(e2s)
 }
 /// Form only (label/type/bars/role) — order changes go through `reorder_sections`.
 #[tauri::command]
 async fn update_section(state: State<'_, AppState>, id: String, label: String, section_type: String, bars: i64, role: String) -> R<Section> {
-    db::update_section(&state.conn().await?, &id, &label, &section_type, bars, &role).await.map_err(e2s)
+    db::update_section(&*state.conn().await?, &id, &label, &section_type, bars, &role).await.map_err(e2s)
 }
 #[tauri::command]
 async fn delete_section(state: State<'_, AppState>, id: String) -> R<()> {
-    db::delete_section(&state.conn().await?, &id).await.map_err(e2s)
+    db::delete_section(&*state.conn().await?, &id).await.map_err(e2s)
 }
 /// `section_ids` must be every section id of the song, each once, in the new order.
 #[tauri::command]
 async fn reorder_sections(state: State<'_, AppState>, song_id: String, section_ids: Vec<String>) -> R<Vec<Section>> {
-    db::reorder_sections(&state.conn().await?, &song_id, &section_ids).await.map_err(e2s)
+    db::reorder_sections(&*state.conn().await?, &song_id, &section_ids).await.map_err(e2s)
 }
 /// Mid-session spine-birth union (docs/SECTION-SPINE-SPEC.md Phase 4): append
 /// rows for sections that exist only in stage artifacts (first-seen order) —
@@ -361,7 +363,7 @@ async fn reorder_sections(state: State<'_, AppState>, song_id: String, section_i
 /// so a lyrics-only Bridge is never orphaned. Idempotent.
 #[tauri::command]
 async fn union_spine_sections(state: State<'_, AppState>, song_id: String) -> R<Vec<Section>> {
-    song_core::spine::union_artifact_sections(&state.conn().await?, &song_id).await.map_err(e2s)
+    song_core::spine::union_artifact_sections(&*state.conn().await?, &song_id).await.map_err(e2s)
 }
 
 // ---- Paste-lyrics import (spec Feature B — words kept verbatim) -------------
@@ -369,7 +371,7 @@ async fn union_spine_sections(state: State<'_, AppState>, song_id: String) -> R<
 /// Dry-run parse of pasted lyrics (drives the preview modal — saves nothing).
 #[tauri::command]
 async fn parse_pasted_lyrics(state: State<'_, AppState>, text: String) -> R<agent::ParsedLyrics> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     agent::parse_pasted_lyrics(&settings, &text).await.map_err(e2s)
 }
 
@@ -378,18 +380,18 @@ async fn parse_pasted_lyrics(state: State<'_, AppState>, text: String) -> R<agen
 /// (the UI warns before confirm).
 #[tauri::command]
 async fn import_lyrics(state: State<'_, AppState>, song_id: String, text: String) -> R<()> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
-    agent::import_lyrics(&state.conn().await?, &settings, &song_id, &text).await.map(|_| ()).map_err(e2s)
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
+    agent::import_lyrics(&*state.conn().await?, &settings, &song_id, &text).await.map(|_| ()).map_err(e2s)
 }
 
 /// New song from pasted lyrics: mirrors `create_song`'s inputs, then imports.
 #[tauri::command]
 async fn create_song_from_lyrics(state: State<'_, AppState>, style_preset_id: String, title: String, text: String, intent: Option<String>) -> R<Song> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
-    let song = agent::create_song_from_lyrics(&state.conn().await?, &settings, &style_preset_id, &title, &text).await.map_err(e2s)?;
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
+    let song = agent::create_song_from_lyrics(&*state.conn().await?, &settings, &style_preset_id, &title, &text).await.map_err(e2s)?;
     // optional north-star brief straight from the create form
     match intent.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        Some(i) => db::update_song_intent(&state.conn().await?, &song.id, i).await.map_err(e2s),
+        Some(i) => db::update_song_intent(&*state.conn().await?, &song.id, i).await.map_err(e2s),
         None => Ok(song),
     }
 }
@@ -402,7 +404,7 @@ async fn create_song_from_lyrics(state: State<'_, AppState>, style_preset_id: St
 /// preserved; returns `{ ok, skipped_frozen }`.
 #[tauri::command]
 async fn export_composition_to_song(state: State<'_, AppState>, song_id: String, sections_json: String) -> R<serde_json::Value> {
-    agent::export_composition_to_song(&state.conn().await?, &song_id, &sections_json).await.map_err(e2s)
+    agent::export_composition_to_song(&*state.conn().await?, &song_id, &sections_json).await.map_err(e2s)
 }
 
 /// New song from a composition: mirrors the create flow's preset/title inputs,
@@ -410,17 +412,22 @@ async fn export_composition_to_song(state: State<'_, AppState>, song_id: String,
 /// resolved sections. Lyrics stay empty.
 #[tauri::command]
 async fn create_song_from_composition(state: State<'_, AppState>, style_preset_id: String, title: String, key_root: String, key_mode: String, bpm: i64, sections_json: String) -> R<Song> {
-    agent::create_song_from_composition(&state.conn().await?, &style_preset_id, &title, &key_root, &key_mode, bpm, &sections_json).await.map_err(e2s)
+    agent::create_song_from_composition(&*state.conn().await?, &style_preset_id, &title, &key_root, &key_mode, bpm, &sections_json).await.map_err(e2s)
 }
 #[tauri::command]
 async fn get_stage(state: State<'_, AppState>, id: String) -> R<Option<StageDetail>> {
-    db::get_stage_detail(&state.conn().await?, &id).await.map_err(e2s)
+    db::get_stage_detail(&*state.conn().await?, &id).await.map_err(e2s)
 }
 
 /// Run a stage. Streams `stage_token` then a final `stage_done`. Deduped and
 /// cancellable via `cancel_stage`.
 #[tauri::command]
 async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: String, user_input: Option<String>) -> R<RunResult> {
+    // Everything that can fail with `?` comes BEFORE the run registers itself:
+    // an early return after it would strand the inflight/running entries, and
+    // every later run would report "already running".
+    let conn = state.conn().await?;
+    let settings = db::get_settings(&conn).await.map_err(e2s)?;
     {
         let mut set = state.inflight.lock().unwrap();
         if set.contains(&stage_id) {
@@ -430,10 +437,9 @@ async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: 
     }
     let cancel = agent::CancelToken::new();
     state.running.lock().unwrap().insert(stage_id.clone(), cancel.clone());
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
     let app2 = app.clone();
     let sid = stage_id.clone();
-    let result = agent::run_stage(&state.conn().await?, &settings, &stage_id, user_input, move |tok| {
+    let result = agent::run_stage(&conn, &settings, &stage_id, user_input, move |tok| {
         let _ = app2.emit("stage_token", serde_json::json!({ "stage_id": sid, "token": tok }));
     }, Some(cancel))
     .await;
@@ -452,13 +458,13 @@ async fn run_stage(app: tauri::AppHandle, state: State<'_, AppState>, stage_id: 
 /// (re-guarded against the current spine/frozen sections); the draft clears.
 #[tauri::command]
 async fn accept_stage_draft(state: State<'_, AppState>, stage_id: String) -> R<Artifact> {
-    agent::accept_stage_draft(&state.conn().await?, &stage_id).await.map_err(e2s)
+    agent::accept_stage_draft(&*state.conn().await?, &stage_id).await.map_err(e2s)
 }
 
 /// Throw a stage's pending draft away — the current artifact is untouched.
 #[tauri::command]
 async fn discard_stage_draft(state: State<'_, AppState>, stage_id: String) -> R<()> {
-    agent::discard_stage_draft(&state.conn().await?, &stage_id).await.map_err(e2s)
+    agent::discard_stage_draft(&*state.conn().await?, &stage_id).await.map_err(e2s)
 }
 
 /// Cancel an in-flight stage run: fire its cancel token — the run's Claude child
@@ -476,16 +482,16 @@ async fn cancel_stage(state: State<'_, AppState>, stage_id: String) -> R<()> {
     state.inflight.lock().unwrap().remove(&stage_id);
     if !had_run {
         // stranded-stage rescue: reset a stuck "in_progress" with no live run
-        if let Ok(Some(stage)) = db::get_stage(&state.conn().await?, &stage_id).await {
+        if let Ok(Some(stage)) = db::get_stage(&*state.conn().await?, &stage_id).await {
             if stage.status == "in_progress" {
-                let cur = db::current_artifact(&state.conn().await?, &stage_id).await.ok().flatten();
+                let cur = db::current_artifact(&*state.conn().await?, &stage_id).await.ok().flatten();
                 match cur {
                     // an approved artifact means the stage had finished — restore "done"
-                    Some(a) if a.approved => { let _ = db::set_stage_status(&state.conn().await?, &stage_id, "done").await; }
+                    Some(a) if a.approved => { let _ = db::set_stage_status(&*state.conn().await?, &stage_id, "done").await; }
                     // an unapproved artifact + in_progress is the normal post-run state — leave it
                     Some(_) => {}
                     // no artifact at all: the run died before producing anything
-                    None => { let _ = db::set_stage_status(&state.conn().await?, &stage_id, "pending").await; }
+                    None => { let _ = db::set_stage_status(&*state.conn().await?, &stage_id, "pending").await; }
                 }
             }
         }
@@ -495,18 +501,18 @@ async fn cancel_stage(state: State<'_, AppState>, stage_id: String) -> R<()> {
 
 #[tauri::command]
 async fn approve_stage(state: State<'_, AppState>, stage_id: String) -> R<serde_json::Value> {
-    tools::approve_stage(&state.conn().await?, &stage_id).await.map_err(e2s)
+    tools::approve_stage(&*state.conn().await?, &stage_id).await.map_err(e2s)
 }
 #[tauri::command]
 async fn advance_stage(state: State<'_, AppState>, song_id: String) -> R<serde_json::Value> {
-    tools::advance_song(&state.conn().await?, &song_id).await.map_err(e2s)
+    tools::advance_song(&*state.conn().await?, &song_id).await.map_err(e2s)
 }
 
 // ---- Artifacts -------------------------------------------------------------
 
 #[tauri::command]
 async fn get_artifact(state: State<'_, AppState>, id: String) -> R<Option<Artifact>> {
-    db::get_artifact(&state.conn().await?, &id).await.map_err(e2s)
+    db::get_artifact(&*state.conn().await?, &id).await.map_err(e2s)
 }
 /// TRUST MODEL: this command is the USER's own editor saving — it is the
 /// unlock/rewrite authority and deliberately bypasses the freeze guard (that is
@@ -514,11 +520,11 @@ async fn get_artifact(state: State<'_, AppState>, id: String) -> R<Option<Artifa
 /// arms in `tools::dispatch` instead and can never violate frozen sections.
 #[tauri::command]
 async fn save_artifact(state: State<'_, AppState>, song_id: String, stage_id: Option<String>, kind: String, content: String) -> R<Artifact> {
-    db::save_artifact(&state.conn().await?, &song_id, stage_id.as_deref(), &kind, &content).await.map_err(e2s)
+    db::save_artifact(&*state.conn().await?, &song_id, stage_id.as_deref(), &kind, &content).await.map_err(e2s)
 }
 #[tauri::command]
 async fn list_artifact_revisions(state: State<'_, AppState>, stage_id: String) -> R<Vec<Artifact>> {
-    db::list_artifact_revisions(&state.conn().await?, &stage_id).await.map_err(e2s)
+    db::list_artifact_revisions(&*state.conn().await?, &stage_id).await.map_err(e2s)
 }
 /// Direct (user-authority) revert — snapshot-based (docs/SECTION-SPINE-SPEC.md
 /// §Snapshots): spine rows the revision references that no longer exist are
@@ -526,105 +532,105 @@ async fn list_artifact_revisions(state: State<'_, AppState>, stage_id: String) -
 /// restored verbatim, so its section_ids reattach.
 #[tauri::command]
 async fn revert_artifact(state: State<'_, AppState>, artifact_id: String) -> R<Artifact> {
-    song_core::spine::revert_artifact(&state.conn().await?, &artifact_id).await.map_err(e2s)
+    song_core::spine::revert_artifact(&*state.conn().await?, &artifact_id).await.map_err(e2s)
 }
 /// Name (or clear) a revision in the History timeline — metadata only.
 #[tauri::command]
 async fn set_artifact_label(state: State<'_, AppState>, artifact_id: String, label: Option<String>) -> R<()> {
-    db::set_artifact_label(&state.conn().await?, &artifact_id, label.as_deref()).await.map_err(e2s)
+    db::set_artifact_label(&*state.conn().await?, &artifact_id, label.as_deref()).await.map_err(e2s)
 }
 
 // ---- Skills ----------------------------------------------------------------
 
 #[tauri::command]
 async fn list_skills(state: State<'_, AppState>) -> R<Vec<Skill>> {
-    db::list_skills(&state.conn().await?).await.map_err(e2s)
+    db::list_skills(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn get_skill(state: State<'_, AppState>, id: String) -> R<Option<Skill>> {
-    db::get_skill(&state.conn().await?, &id).await.map_err(e2s)
+    db::get_skill(&*state.conn().await?, &id).await.map_err(e2s)
 }
 #[tauri::command]
 async fn create_skill(state: State<'_, AppState>, input: SkillInput) -> R<Skill> {
-    db::create_skill(&state.conn().await?, input).await.map_err(e2s)
+    db::create_skill(&*state.conn().await?, input).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_skill(state: State<'_, AppState>, id: String, input: SkillInput) -> R<Skill> {
-    db::update_skill(&state.conn().await?, &id, input).await.map_err(e2s)
+    db::update_skill(&*state.conn().await?, &id, input).await.map_err(e2s)
 }
 #[tauri::command]
 async fn set_skill_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> R<Skill> {
-    db::set_skill_enabled(&state.conn().await?, &id, enabled).await.map_err(e2s)
+    db::set_skill_enabled(&*state.conn().await?, &id, enabled).await.map_err(e2s)
 }
 
 // ---- Saved progressions ----------------------------------------------------
 
 #[tauri::command]
 async fn list_progressions(state: State<'_, AppState>) -> R<Vec<Progression>> {
-    db::list_progressions(&state.conn().await?).await.map_err(e2s)
+    db::list_progressions(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn save_progression(state: State<'_, AppState>, name: String, chords: Vec<String>, picks: Option<String>) -> R<Progression> {
-    db::create_progression(&state.conn().await?, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
+    db::create_progression(&*state.conn().await?, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
 }
 #[tauri::command]
 async fn update_progression(state: State<'_, AppState>, id: String, name: String, chords: Vec<String>, picks: Option<String>) -> R<Progression> {
-    db::update_progression(&state.conn().await?, &id, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
+    db::update_progression(&*state.conn().await?, &id, &name, &chords, picks.as_deref().unwrap_or("")).await.map_err(e2s)
 }
 #[tauri::command]
 async fn delete_progression(state: State<'_, AppState>, id: String) -> R<()> {
-    db::delete_progression(&state.conn().await?, &id).await.map_err(e2s)
+    db::delete_progression(&*state.conn().await?, &id).await.map_err(e2s)
 }
 
 // ---- Saved compositions (Composer sketches / full-song exports) -------------
 
 #[tauri::command]
 async fn list_compositions(state: State<'_, AppState>) -> R<Vec<CompositionMeta>> {
-    db::list_compositions(&state.conn().await?).await.map_err(e2s)
+    db::list_compositions(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn get_composition(state: State<'_, AppState>, id: String) -> R<Option<CompositionRow>> {
-    db::get_composition(&state.conn().await?, &id).await.map_err(e2s)
+    db::get_composition(&*state.conn().await?, &id).await.map_err(e2s)
 }
 /// `id: None` inserts (the frontend adopts the minted row id); `Some` updates
 /// in place. `data` is the zod-validated Composition JSON blob.
 #[tauri::command]
 async fn save_composition(state: State<'_, AppState>, id: Option<String>, name: String, song_id: Option<String>, data: String) -> R<CompositionRow> {
-    db::save_composition(&state.conn().await?, id.as_deref(), &name, song_id.as_deref(), &data).await.map_err(e2s)
+    db::save_composition(&*state.conn().await?, id.as_deref(), &name, song_id.as_deref(), &data).await.map_err(e2s)
 }
 #[tauri::command]
 async fn delete_composition(state: State<'_, AppState>, id: String) -> R<()> {
-    db::delete_composition(&state.conn().await?, &id).await.map_err(e2s)
+    db::delete_composition(&*state.conn().await?, &id).await.map_err(e2s)
 }
 
 // ---- Final renders ---------------------------------------------------------
 
 #[tauri::command]
 async fn list_renders(state: State<'_, AppState>, song_id: String) -> R<Vec<Render>> {
-    db::list_renders(&state.conn().await?, &song_id).await.map_err(e2s)
+    db::list_renders(&*state.conn().await?, &song_id).await.map_err(e2s)
 }
 #[tauri::command]
 async fn add_render(state: State<'_, AppState>, song_id: String, label: String, file_path: String, source: String, notes: String) -> R<Render> {
-    db::create_render(&state.conn().await?, &song_id, &label, &file_path, &source, &notes).await.map_err(e2s)
+    db::create_render(&*state.conn().await?, &song_id, &label, &file_path, &source, &notes).await.map_err(e2s)
 }
 #[tauri::command]
 async fn set_render_pick(state: State<'_, AppState>, id: String, is_pick: bool) -> R<()> {
-    db::set_render_pick(&state.conn().await?, &id, is_pick).await.map_err(e2s)
+    db::set_render_pick(&*state.conn().await?, &id, is_pick).await.map_err(e2s)
 }
 #[tauri::command]
 async fn delete_render(state: State<'_, AppState>, id: String) -> R<()> {
-    db::delete_render(&state.conn().await?, &id).await.map_err(e2s)
+    db::delete_render(&*state.conn().await?, &id).await.map_err(e2s)
 }
 
 // ---- Settings & meta -------------------------------------------------------
 
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> R<Settings> {
-    db::get_settings(&state.conn().await?).await.map_err(e2s)
+    db::get_settings(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn set_settings(state: State<'_, AppState>, settings: Settings) -> R<Settings> {
-    db::set_settings(&state.conn().await?, &settings).await.map_err(e2s)?;
+    db::set_settings(&*state.conn().await?, &settings).await.map_err(e2s)?;
     Ok(settings)
 }
 #[tauri::command]
@@ -729,7 +735,7 @@ fn mcp_setup_command(app: tauri::AppHandle, state: State<'_, AppState>) -> serde
 #[tauri::command]
 async fn chat_send(app: tauri::AppHandle, state: State<'_, AppState>, message: String, session_id: Option<String>, song_id: Option<String>) -> R<String> {
     let claude = find_claude().ok_or("The `claude` CLI was not found. Install Claude Code and sign in.")?;
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     let cfg = ensure_mcp_config(&app, &state.db_path, &settings.ableton_mcp)?;
     let resuming = session_id.is_some();
     let sid = session_id.unwrap_or_else(song_core::db::new_id);
@@ -749,7 +755,7 @@ offset from the section bar counts, so the timeline shows named clips per sectio
 created; if the ableton tools aren't reachable, say so plainly.",
     );
     if let Some(ref id) = song_id {
-        if let Ok(Some(s)) = db::get_song(&state.conn().await?, id).await {
+        if let Ok(Some(s)) = db::get_song(&*state.conn().await?, id).await {
             preamble.push_str(&format!(
                 "\n\nCURRENT SONG: the user is viewing \"{}\" (song_id {}) — {} {}, {} BPM, on the \"{}\" stage. \
 When they say \"this song\"/\"the song\"/\"here\", act on song_id {}.",
@@ -759,7 +765,7 @@ When they say \"this song\"/\"the song\"/\"here\", act on song_id {}.",
         // Embed the section map (with bar counts) from the Structure stage so the
         // chat can place one Ableton locator per section precisely, without
         // guessing — parsed by the ONE core section parser (ableton::song_sections).
-        let sections = song_core::ableton::song_sections(&state.conn().await?, id).await;
+        let sections = song_core::ableton::song_sections(&*state.conn().await?, id).await;
         if !sections.is_empty() {
             let list: Vec<String> = sections.iter().map(|(label, bars)| format!("{label} ({bars} bars)")).collect();
             preamble.push_str(&format!(
@@ -851,7 +857,7 @@ fn ensure_claude_bin(conn: &Connection) {
 
 #[tauri::command]
 async fn claude_status(state: State<'_, AppState>) -> R<serde_json::Value> {
-    let s = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let s = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     let bin = find_claude();
     let found = bin.is_some();
     let version = tokio::task::spawn_blocking(move || {
@@ -878,7 +884,7 @@ fn api_key_in_env() -> bool {
 /// (API key stripped so we report the *subscription* login, not an inherited key).
 #[tauri::command]
 async fn claude_auth_status(state: State<'_, AppState>) -> R<serde_json::Value> {
-    let s = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    let s = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
     let bin = find_claude();
     let found = bin.is_some();
     let bin_path = bin
@@ -1204,21 +1210,21 @@ fn test_ableton() -> R<String> {
 /// builder (song_core::ableton), where the moved logic + section parsing live.
 #[tauri::command]
 async fn ableton_build(state: State<'_, AppState>, song_id: String) -> R<String> {
-    song_core::ableton::build_locators_for(&state.conn().await?, &song_id).await.map_err(e2s)
+    song_core::ableton::build_locators_for(&*state.conn().await?, &song_id).await.map_err(e2s)
 }
 
 /// Build the song structure in Ableton's Arrangement as named, color-coded CLIPS
 /// on a "Sections" track — thin wrapper over song_core::ableton::build_clips_for.
 #[tauri::command]
 async fn ableton_build_clips(state: State<'_, AppState>, song_id: String) -> R<String> {
-    song_core::ableton::build_clips_for(&state.conn().await?, &song_id).await.map_err(e2s)
+    song_core::ableton::build_clips_for(&*state.conn().await?, &song_id).await.map_err(e2s)
 }
 
 /// Non-destructive Lead-only push (song_core::ableton::build_melody_track_for).
 #[tauri::command]
 async fn ableton_build_melody(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
     let sid = song_id.clone();
-    song_core::ableton::build_melody_track_for(&state.conn().await?, &song_id, move |msg| {
+    song_core::ableton::build_melody_track_for(&*state.conn().await?, &song_id, move |msg| {
         let _ = app.emit("ableton_progress", serde_json::json!({ "song_id": sid, "message": msg }));
     })
     .await
@@ -1228,21 +1234,23 @@ async fn ableton_build_melody(app: tauri::AppHandle, state: State<'_, AppState>,
 /// lanes — degree-based, already in the Composer's vocabulary.
 #[tauri::command]
 async fn get_song_takes(state: State<'_, AppState>, song_id: String) -> R<serde_json::Value> {
-    let melody = db::get_song_melody(&state.conn().await?, &song_id).await.map_err(e2s)?
+    let melody = db::get_song_melody(&*state.conn().await?, &song_id).await.map_err(e2s)?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let bass = db::get_song_part(&state.conn().await?, &song_id, "bass").await.map_err(e2s)?
+    let bass = db::get_song_part(&*state.conn().await?, &song_id, "bass").await.map_err(e2s)?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
     Ok(serde_json::json!({ "melody": melody, "bass": bass }))
 }
 /// Arranger: Claude writes one part (bass/pad/chords/arp) as a stored take.
 #[tauri::command]
 async fn generate_song_part(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String, part: String) -> R<serde_json::Value> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
+    // connect before claiming: a `?` after the claim would strand it
+    let conn = state.conn().await?;
+    let settings = db::get_settings(&conn).await.map_err(e2s)?;
     let key = write_key(&part, &song_id);
     let cancel = agent::CancelToken::new();
     claim_write(&state.running, &key, &part, &cancel)?;
     let result = song_core::agent::generate_song_part(
-        &state.conn().await?, &settings, &song_id, &part,
+        &conn, &settings, &song_id, &part,
         write_progress(&app, &song_id, &part), Some(cancel),
     ).await;
     state.running.lock().unwrap().remove(&key);
@@ -1263,7 +1271,7 @@ async fn cancel_write(state: State<'_, AppState>, song_id: String, part: String)
 #[tauri::command]
 async fn ableton_build_part(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String, part: String) -> R<String> {
     let sid = song_id.clone();
-    song_core::ableton::build_take_track_for(&state.conn().await?, &song_id, &part, move |msg| {
+    song_core::ableton::build_take_track_for(&*state.conn().await?, &song_id, &part, move |msg| {
         let _ = app.emit("ableton_progress", serde_json::json!({ "song_id": sid, "message": msg }));
     })
     .await
@@ -1275,7 +1283,7 @@ async fn ableton_build_part(app: tauri::AppHandle, state: State<'_, AppState>, s
 #[tauri::command]
 async fn ableton_build_song(app: tauri::AppHandle, state: State<'_, AppState>, song_id: String) -> R<String> {
     let sid = song_id.clone();
-    song_core::ableton::build_song_for(&state.conn().await?, &song_id, move |msg| {
+    song_core::ableton::build_song_for(&*state.conn().await?, &song_id, move |msg| {
         let _ = app.emit("ableton_progress", serde_json::json!({ "song_id": sid, "message": msg }));
     })
     .await
@@ -1309,23 +1317,23 @@ async fn ableton_build_composition(bpm: i64, length_beats: f64, tracks: Vec<Comp
 
 #[tauri::command]
 async fn list_outlines(state: State<'_, AppState>) -> R<Vec<Outline>> {
-    db::list_outlines(&state.conn().await?).await.map_err(e2s)
+    db::list_outlines(&*state.conn().await?).await.map_err(e2s)
 }
 #[tauri::command]
 async fn save_outline(state: State<'_, AppState>, name: String, bpm: i64, sections: Vec<(String, i64)>) -> R<Outline> {
-    db::create_outline(&state.conn().await?, &name, bpm, &sections).await.map_err(e2s)
+    db::create_outline(&*state.conn().await?, &name, bpm, &sections).await.map_err(e2s)
 }
 #[tauri::command]
 async fn delete_outline(state: State<'_, AppState>, id: String) -> R<()> {
-    db::delete_outline(&state.conn().await?, &id).await.map_err(e2s)
+    db::delete_outline(&*state.conn().await?, &id).await.map_err(e2s)
 }
 
 /// Phase 1 render round-trip: analyze a render's audio into a Composer-ready
 /// summary (real tempo/key + sections with chords). No song is touched.
 #[tauri::command]
 async fn analyze_for_composer(state: State<'_, AppState>, audio_path: String) -> R<serde_json::Value> {
-    let settings = db::get_settings(&state.conn().await?).await.map_err(e2s)?;
-    song_core::agent::analyze_for_composer(&state.conn().await?, &settings, &audio_path).await.map_err(e2s)
+    let settings = db::get_settings(&*state.conn().await?).await.map_err(e2s)?;
+    song_core::agent::analyze_for_composer(&*state.conn().await?, &settings, &audio_path).await.map_err(e2s)
 }
 
 /// Read a local audio file as base64 (the webview loads render audio for the
@@ -1407,12 +1415,10 @@ pub fn run() {
             let db_path = dir.join("songsmith-studio.db");
             let db_path_str = db_path.to_string_lossy().to_string();
 
+            // db::connect (inside the pool) sets PRAGMA busy_timeout so writes
+            // racing the mcp-shim wait for the lock instead of erroring
             let database = tauri::async_runtime::block_on(song_core::db::open(&db_path)).expect("open database");
-            // db::connect sets PRAGMA busy_timeout so writes racing the mcp-shim
-            // wait for the lock instead of erroring "database is locked"
-            let conn = tauri::async_runtime::block_on(song_core::db::connect(&database)).expect("connect database");
-            ensure_claude_bin(&conn);
-            drop(conn);
+            ensure_claude_bin(&tauri::async_runtime::block_on(database.get()).expect("connect database"));
             app.manage(AppState { db: database, db_path: db_path_str, inflight: Mutex::new(HashSet::new()), running: Mutex::new(HashMap::new()), login_child: Mutex::new(None), midi: Mutex::new(None) });
             Ok(())
         })
