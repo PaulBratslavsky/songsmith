@@ -19,4 +19,4 @@ chrono = { version = "0.4", features = ["serde"] }
 ts-rs = "10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
-libsql = "0.6"
+libsql = "0.10"
